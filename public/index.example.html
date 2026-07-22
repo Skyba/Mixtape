@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mixtape</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d23; --muted:#9aa0a6; --dim:#6b7280; --line:#23262d; --blue:#3b82f6; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:#fff; font-family:-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:24px 18px 80px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .meta { color:var(--muted); font-size:13px; }
+  .bar { display:flex; height:14px; border-radius:7px; overflow:hidden; background:var(--card); margin:18px 0 12px; }
+  .legend { display:flex; flex-wrap:wrap; gap:14px; margin-bottom:20px; }
+  .legend span { display:inline-flex; align-items:center; gap:6px; color:#cdd1d6; font-size:13px; }
+  .dot { width:12px; height:12px; border-radius:6px; display:inline-block; }
+  .tabs { display:flex; gap:8px; margin:8px 0 16px; }
+  .tab { background:var(--card); color:var(--muted); border:none; padding:10px 18px; border-radius:20px; font-size:14px; cursor:pointer; }
+  .tab.on { background:var(--blue); color:#fff; font-weight:700; }
+  .utt { margin-bottom:14px; }
+  .spk { font-weight:700; font-size:14px; }
+  .ts { color:var(--dim); font-size:12px; font-weight:400; }
+  .txt { color:#cdd1d6; font-size:15px; line-height:1.5; margin-top:2px; }
+  .summary { background:#16331f; border-radius:12px; padding:16px; color:#d7f5e1; line-height:1.55; white-space:pre-wrap; }
+  .ask { margin-top:24px; }
+  .ask textarea { width:100%; background:var(--card); color:#fff; border:1px solid var(--line); border-radius:10px; padding:12px; font:inherit; min-height:54px; }
+  .ask button { margin-top:10px; background:var(--blue); color:#fff; border:none; padding:12px 18px; border-radius:10px; font-weight:700; cursor:pointer; }
+  .answer { background:var(--card); border-radius:12px; padding:16px; margin-top:14px; white-space:pre-wrap; line-height:1.5; color:#cdd1d6; }
+  .center { text-align:center; color:var(--muted); margin-top:80px; }
+  .brand { color:var(--dim); font-size:12px; margin-top:40px; text-align:center; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="loading" class="center">Loading…</div>
+  <div id="content" class="hidden">
+    <h1 id="title"></h1>
+    <div class="meta" id="sub"></div>
+    <div class="bar" id="bar"></div>
+    <div class="legend" id="legend"></div>
+    <div class="tabs">
+      <button class="tab on" id="tabT">Transcript</button>
+      <button class="tab" id="tabS">Summary</button>
+    </div>
+    <div id="paneT"></div>
+    <div id="paneS" class="hidden"></div>
+    <div class="ask">
+      <textarea id="q" placeholder="Ask anything about this conversation…"></textarea>
+      <button id="askBtn">Ask</button>
+      <div id="answer" class="answer hidden"></div>
+    </div>
+  </div>
+  <div class="brand">▦ Made with Mixtape</div>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+import { getFirestore, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+// Paste YOUR Firebase web config here, then save as public/index.html.
+const firebaseConfig = {
+  apiKey: "PASTE_FIREBASE_WEB_API_KEY",
+  authDomain: "PASTE_PROJECT.firebaseapp.com",
+  projectId: "PASTE_PROJECT",
+  storageBucket: "PASTE_PROJECT.firebasestorage.app",
+  messagingSenderId: "PASTE_SENDER_ID",
+  appId: "PASTE_APP_ID",
+};
+const db = getFirestore(initializeApp(firebaseConfig));
+
+const PALETTE = ["#3b82f6","#ef4444","#10b981","#f59e0b","#8b5cf6","#ec4899","#14b8a6","#f97316"];
+const colorFor = (letter) => PALETTE[((letter.charCodeAt(0)-65)%PALETTE.length+PALETTE.length)%PALETTE.length];
+const mmss = (ms) => { const s=Math.floor(ms/1000); return `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`; };
+
+function getId() {
+  const p = new URLSearchParams(location.search).get("id");
+  if (p) return p;
+  const m = location.pathname.match(/\/r\/([^/]+)/);
+  return m ? m[1] : null;
+}
+
+const id = getId();
+const nameFor = (s, letter) => (s.speakerMap && s.speakerMap[letter]) || (s.speakers && s.speakers[letter.charCodeAt(0)-65]) || ("Speaker " + letter);
+let activeTab = true; // true = transcript
+
+function load() {
+  if (!id) { document.getElementById("loading").textContent = "No share id."; return; }
+  onSnapshot(doc(db, "shares", id),
+    (snap) => {
+      if (!snap.exists()) { document.getElementById("loading").textContent = "This link is no longer available."; return; }
+      render(snap.data());
+    },
+    () => { document.getElementById("loading").textContent = "Error loading."; }
+  );
+}
+
+function render(s) {
+  document.getElementById("loading").classList.add("hidden");
+  document.getElementById("content").classList.remove("hidden");
+  // idempotent: clear rebuilt regions so live updates don't duplicate
+  document.getElementById("bar").innerHTML = "";
+  document.getElementById("legend").innerHTML = "";
+  document.getElementById("paneT").innerHTML = "";
+  document.getElementById("title").textContent = s.base || "Recording";
+  const when = s.recordedAt ? new Date(s.recordedAt).toLocaleString() : "";
+  const liveTag = s.live ? "🔴 LIVE · " : "";
+  document.getElementById("sub").textContent = `${liveTag}${when} · ${Math.round((s.durationSeconds||0)/60)} min · ${s.language||""}`;
+
+  const utts = s.utterances || [];
+  // timeline + legend
+  const talk = {}; let total = 0;
+  utts.forEach((u,i) => { const e = (typeof u.end==="number"?u.end:(utts[i+1]?utts[i+1].start:u.start+3000)); const d=Math.max(0,e-u.start); talk[u.speaker]=(talk[u.speaker]||0)+d; total+=d; });
+  const bar = document.getElementById("bar");
+  const span = (utts.length? ((utts[utts.length-1].end||utts[utts.length-1].start) - utts[0].start) : 1) || 1;
+  let cursor = utts.length? utts[0].start : 0;
+  utts.forEach((u,i) => {
+    const e = (typeof u.end==="number"?u.end:(utts[i+1]?utts[i+1].start:u.start+3000));
+    if (u.start>cursor){ const g=document.createElement("div"); g.style.flexGrow=(u.start-cursor)/span; bar.appendChild(g); }
+    const seg=document.createElement("div"); seg.style.flexGrow=(e-u.start)/span; seg.style.background=colorFor(u.speaker); bar.appendChild(seg);
+    cursor=Math.max(cursor,e);
+  });
+  const legend = document.getElementById("legend");
+  Object.keys(talk).sort().forEach(l => {
+    const el=document.createElement("span");
+    const dot=document.createElement("i"); dot.className="dot"; dot.style.background=colorFor(l);
+    const pct=document.createElement("b"); pct.textContent=Math.round((talk[l]/(total||1))*100)+"%";
+    // speaker name is untrusted (from the share doc) — use textContent, never innerHTML
+    el.append(dot, document.createTextNode(nameFor(s,l)+" "), pct);
+    legend.appendChild(el);
+  });
+
+  // transcript — diarized rows if utterances exist, else plain live text
+  const paneT = document.getElementById("paneT");
+  if (utts.length) {
+    utts.forEach(u => {
+      const row=document.createElement("div"); row.className="utt";
+      const spk=document.createElement("div"); spk.className="spk"; spk.style.color=colorFor(u.speaker);
+      // speaker name is untrusted (from the share doc) — textContent, not innerHTML
+      spk.appendChild(document.createTextNode(nameFor(s,u.speaker)+" "));
+      const ts=document.createElement("span"); ts.className="ts"; ts.textContent=mmss(u.start); spk.appendChild(ts);
+      const txt=document.createElement("div"); txt.className="txt"; txt.textContent=u.text;
+      row.append(spk, txt);
+      paneT.appendChild(row);
+    });
+  } else if (s.liveText) {
+    const p=document.createElement("div"); p.className="txt"; p.textContent = s.liveText;
+    paneT.appendChild(p);
+  }
+
+  // summary
+  const paneS = document.getElementById("paneS");
+  paneS.innerHTML = s.summary ? `<div class="summary">${escapeHtml(s.summary)}</div>` : `<div class="meta">No summary was generated.</div>`;
+
+  document.getElementById("tabT").onclick = () => switchTab(true);
+  document.getElementById("tabS").onclick = () => switchTab(false);
+  document.getElementById("askBtn").onclick = ask;
+  switchTab(activeTab); // preserve current tab across live updates
+}
+
+function switchTab(t) {
+  activeTab = t;
+  document.getElementById("tabT").classList.toggle("on", t);
+  document.getElementById("tabS").classList.toggle("on", !t);
+  document.getElementById("paneT").classList.toggle("hidden", !t);
+  document.getElementById("paneS").classList.toggle("hidden", t);
+}
+
+async function ask() {
+  const q = document.getElementById("q").value.trim();
+  if (!q) return;
+  const ans = document.getElementById("answer");
+  ans.classList.remove("hidden"); ans.textContent = "Thinking…";
+  try {
+    const r = await fetch("/api/ask", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ id, prompt:q }) });
+    const data = await r.json();
+    ans.textContent = data.answer || data.error || "No response.";
+  } catch (e) { ans.textContent = "Couldn't reach the assistant."; }
+}
+
+function escapeHtml(s){ return s.replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+load();
+</script>
+</body>
+</html>

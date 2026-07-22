@@ -1,0 +1,27 @@
+{
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "hosting": {
+    "public": "public",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "/api/ask",
+        "function": { "functionId": "askSonnet", "region": "us-central1" }
+      },
+      {
+        "source": "/api/v1/**",
+        "function": { "functionId": "api", "region": "us-central1" }
+      },
+      { "source": "/r/**", "destination": "/index.html" }
+    ]
+  },
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs20"
+  }
+}

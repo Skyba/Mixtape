@@ -30,8 +30,16 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
-.env*.local
+# local env files + secrets
+.env
+.env.*
+!.env.example
+
+# your own Firebase web config (copy firebaseConfig.example.ts → firebaseConfig.ts)
+firebaseConfig.ts
+
+# firebase cli cache
+.firebase/
 
 # typescript
 *.tsbuildinfo
@@ -39,3 +47,14 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# CLI logs + local build artifacts
+firebase-debug.log
+firebase-debug.*.log
+*-debug.log
+apk-qr.png
+
+# hosting page + firebase project pointer carry YOUR project config —
+# copy the .example versions and paste your own before deploying
+public/index.html
+.firebaserc

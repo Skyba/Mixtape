@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Public share docs: anyone WITH THE LINK (the exact id) can read one — but
+    // `list`/query is denied so the collection can't be enumerated. (`read` alone
+    // would grant both get AND list, exposing every share's transcript.)
+    match /shares/{shareId} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if request.auth != null
+                    && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if request.auth != null
+                    && resource.data.ownerUid == request.auth.uid;
+    }
+
+    // API keys are managed only by Cloud Functions (admin); no client access.
+    match /apiKeys/{id} {
+      allow read, write: if false;
+    }
+  }
+}
