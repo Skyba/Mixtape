@@ -324,7 +324,11 @@ export default function RecordScreen() {
     (async () => {
       try {
         await recorder.prepareToRecordAsync();
-        recorder.record();
+        // Native backstop: if the JS roll timer is suspended (screen off / Doze)
+        // the segment stops itself instead of recording forever. Set above
+        // SEGMENT_MS so the normal JS roll always wins and this only fires on a
+        // freeze — the same durability the normal-mode forDuration cap gives.
+        recorder.record({ forDuration: Math.round(SEGMENT_MS / 1000) + 10 });
       } catch {}
       segTimer.current = setTimeout(() => rollSegment(false), SEGMENT_MS);
     })();
