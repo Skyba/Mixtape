@@ -14,6 +14,7 @@ import {
   setAudioModeAsync,
   useAudioRecorder,
 } from "expo-audio";
+import type { RecordingStatus } from "expo-audio";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Clipboard from "expo-clipboard";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
@@ -80,7 +81,12 @@ function fmt(t: number) {
 
 export default function RecordScreen() {
   const navigation = useNavigation<Nav>();
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  // The status listener delegates through a ref so it always runs the latest
+  // closure (stop/refs), not the one captured on first render.
+  const onRecStatusRef = useRef<(s: RecordingStatus) => void>(() => {});
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY, (s) =>
+    onRecStatusRef.current(s)
+  );
 
   const [lastRec, setLastRec] = useState<Recording | null>(null);
   const [count, setCount] = useState(1);
@@ -129,10 +135,19 @@ export default function RecordScreen() {
   const tick = useRef<ReturnType<typeof setInterval> | null>(null);
   const elapsedRef = useRef(0);
   const startMsRef = useRef(0);
+  const recordingRef = useRef(false); // true only during a normal (non-live) take
   const durationRef = useRef(durationH);
   useEffect(() => {
     durationRef.current = durationH;
   }, [durationH]);
+
+  // Fires when the native recorder finishes — including the forDuration hard cap
+  // reached while the screen is off and the JS timer is suspended. Runs the save
+  // flow that a manual stop() would. Guarded so a manual stop (which clears
+  // recordingRef first) and live-mode segment stops don't double-trigger it.
+  onRecStatusRef.current = (s: RecordingStatus) => {
+    if (s.isFinished && recordingRef.current && !liveOn.current) stop();
+  };
 
   useEffect(() => {
     (async () => {
@@ -173,7 +188,10 @@ export default function RecordScreen() {
       }
       elapsedRef.current = secs;
       setElapsed(secs);
-      if (!liveOn.current && secs >= durationRef.current * 3600) stop();
+      // Enforce the cap for both modes. In normal mode the native forDuration
+      // cap normally fires first; this catches live mode and is a foreground
+      // fallback. stop() routes to stopLive() when a live session is active.
+      if (secs >= durationRef.current * 3600) stop();
     }, 1000);
   }
 
@@ -235,10 +253,14 @@ export default function RecordScreen() {
       setElapsed(0);
       elapsedRef.current = 0;
       await recorder.prepareToRecordAsync();
-      recorder.record();
+      // forDuration is a native hard cap: the OS recorder stops itself at the
+      // deadline even with the screen off / JS timer suspended. The JS interval
+      // below is now just a display + foreground fallback.
+      recorder.record({ forDuration: Math.round(durationH * 3600) });
+      recordingRef.current = true;
       await activateKeepAwakeAsync();
       acquireWakelock();
-      logEvent("start normal: recording");
+      logEvent(`start normal: recording, cap=${durationH}h`);
       setIsRecording(true);
       setPaused(false);
       startTick();
@@ -455,13 +477,17 @@ export default function RecordScreen() {
 
   function resume() {
     try {
-      recorder.record();
+      // Re-arm the native cap for the time that's left, so the limit still holds
+      // after a pause/resume.
+      const left = Math.round(durationRef.current * 3600 - elapsedRef.current);
+      recorder.record({ forDuration: Math.max(1, left) });
     } catch {}
     setPaused(false);
     startTick();
   }
 
   async function cancel() {
+    recordingRef.current = false;
     if (liveOn.current) {
       liveOn.current = false;
       stopDiarization();
@@ -491,6 +517,8 @@ export default function RecordScreen() {
 
   async function stop() {
     if (liveOn.current) return stopLive();
+    if (!recordingRef.current) return; // already stopping/stopped (idempotent)
+    recordingRef.current = false;
     stopTick();
     let seconds = elapsedRef.current;
     try {
