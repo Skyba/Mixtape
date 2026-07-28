@@ -1,4 +1,4 @@
-export type TranscriptStatus = "none" | "pending" | "done" | "error";
+export type TranscriptStatus = "none" | "pending" | "processing" | "done" | "error";
 export type UploadStatus = "pending" | "uploaded" | "skipped";
 
 export type Recording = {

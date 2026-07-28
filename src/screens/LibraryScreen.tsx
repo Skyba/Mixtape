@@ -408,7 +408,11 @@ function Row({
   onToggle?: () => void;
 }) {
   const sync = syncInfo(rec, remote);
-  const { date, title } = splitBase(rec.base);
+  const split = splitBase(rec.base);
+  const date = split.date;
+  // Prefer the AI topic — cloud recordings keep a provisional filename, so the
+  // real title lives in the topic field rather than in the base.
+  const title = rec.topic || split.title;
   return (
     <View>
     <View style={[styles.row, selected && styles.rowSel]}>
@@ -450,7 +454,8 @@ function Row({
             <View style={[styles.pill, { borderColor: "#4ade80" }]}>
               <Text style={[styles.pillTxt, { color: "#4ade80" }]}>Transcript</Text>
             </View>
-          ) : rec.transcriptStatus === "pending" ? (
+          ) : rec.transcriptStatus === "pending" ||
+            rec.transcriptStatus === "processing" ? (
             <View style={[styles.pill, { borderColor: "#fbbf24" }]}>
               <Text style={[styles.pillTxt, { color: "#fbbf24" }]}>Transcribing</Text>
             </View>

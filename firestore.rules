@@ -17,5 +17,10 @@ service cloud.firestore {
     match /apiKeys/{id} {
       allow read, write: if false;
     }
+
+    // Transcription job locks — written only by Cloud Functions (admin).
+    match /transcriptions/{id} {
+      allow read, write: if false;
+    }
   }
 }

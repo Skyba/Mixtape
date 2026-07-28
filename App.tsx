@@ -19,6 +19,7 @@ import {
   flushPendingUploads,
   retryPendingMerges,
   retryPendingTranscriptions,
+  pullCloudTranscripts,
 } from "./src/recordingFlow";
 import { logEvent, getLogText } from "./src/log";
 import { uploadDebugLog } from "./src/firebase";
@@ -95,7 +96,8 @@ export default function App() {
     getSettings().then(async (s) => {
       flushPendingUploads(s);
       retryPendingMerges(s); // recover any live recording whose merge didn't finish
-      retryPendingTranscriptions(s); // finish transcriptions interrupted by an app close
+      pullCloudTranscripts(s); // collect transcripts the backend finished while closed
+      retryPendingTranscriptions(s); // offline fallback: finish on-device transcriptions
       try {
         await uploadDebugLog(await getLogText()); // make latest logs pullable
       } catch {}
@@ -107,6 +109,7 @@ export default function App() {
       if (next === "active") {
         getSettings().then((s) => {
           flushPendingUploads(s);
+          pullCloudTranscripts(s);
           retryPendingTranscriptions(s);
         });
       }

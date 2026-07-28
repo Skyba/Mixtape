@@ -1,4 +1,5 @@
 const { onRequest, onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onObjectFinalized } = require("firebase-functions/v2/storage");
 const admin = require("firebase-admin");
 const ffmpegPath = require("ffmpeg-static");
 const { execFile } = require("child_process");
@@ -349,6 +350,271 @@ exports.askSonnet = onRequest(
       }
       res.json({ answer: data.content?.[0]?.text || "No response." });
     } catch (e) {
+      res.status(500).json({ error: String((e && e.message) || e) });
+    }
+  }
+);
+
+// ===== Server-side transcription (runs with the screen off) =================
+// A recording's meta .json landing in Storage with transcriptStatus "pending"
+// triggers startTranscription, which hands the audio to AssemblyAI with a
+// webhook. AAI calls transcriptionWebhook back when done; that writes the
+// .txt/.aai.json + updates the meta to "done". The phone just uploads and later
+// pulls the finished transcript — no need to keep the app open.
+const AAI = "https://api.assemblyai.com/v2";
+const AAI_RATE_PER_HOUR = 0.12; // matches the app's estimate
+const LANG_CODES = { English: "en", French: "fr", Spanish: "es", Arabic: "ar" };
+const TOPIC_MODEL = "claude-haiku-4-5-20251001";
+
+function mmss(ms) {
+  const s = Math.floor((ms || 0) / 1000);
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+// Same resolution + rendering the app uses, so cloud .txt is byte-identical.
+function nameForSpeaker(letter, speakers, speakerMap) {
+  if (speakerMap && speakerMap[letter]) return speakerMap[letter];
+  const idx = letter.charCodeAt(0) - 65;
+  if (idx >= 0 && idx < (speakers || []).length) return speakers[idx];
+  return "Speaker " + letter;
+}
+function renderTranscript(utterances, speakers, speakerMap) {
+  return utterances
+    .map((u) => `[${mmss(u.start)}] ${nameForSpeaker(u.speaker, speakers, speakerMap)}: ${u.text}`)
+    .join("\n\n");
+}
+async function anthropic(key, maxTokens, prompt) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: TOPIC_MODEL,
+      max_tokens: maxTokens,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  const data = await res.json();
+  return data?.content?.[0]?.text ?? "";
+}
+async function inferSpeakerMap(utterances, speakers, anthropicKey) {
+  if (!anthropicKey || !utterances.length) return null;
+  const named = (speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
+  if (named.length < 1) return null;
+  const letters = [...new Set(utterances.map((u) => u.speaker))];
+  if (letters.length < 2) return null;
+  const sample = utterances.slice(0, 40).map((u) => `${u.speaker}: ${u.text}`).join("\n").slice(0, 4000);
+  const prompt =
+    `A meeting transcript is labeled by anonymous speaker letters (${letters.join(", ")}). ` +
+    `The participants are: ${named.join(", ")}.\n` +
+    `Using ONLY the content — especially self-introductions ("I'm X", "This is X") and how ` +
+    `people address each other by name — map each speaker letter to the correct participant. ` +
+    `Output ONLY a JSON object like {"A":"Name","B":"Name"}. Omit any letter whose identity is unclear.\n\n` +
+    `Transcript:\n${sample}`;
+  try {
+    const raw = await anthropic(anthropicKey, 200, prompt);
+    const json = raw.match(/\{[\s\S]*\}/);
+    if (!json) return null;
+    const parsed = JSON.parse(json[0]);
+    const clean = {};
+    for (const [letter, name] of Object.entries(parsed)) if (named.includes(name)) clean[letter] = name;
+    return Object.keys(clean).length ? clean : null;
+  } catch {
+    return null;
+  }
+}
+async function inferTopic(transcript, anthropicKey) {
+  if (!anthropicKey || !transcript.trim()) return null;
+  try {
+    const raw = await anthropic(
+      anthropicKey,
+      24,
+      "Give a 2-5 word topic title for this meeting transcript. " +
+        "Output only the title, no quotes or punctuation.\n\n" +
+        transcript.slice(0, 6000)
+    );
+    const t = raw.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim().split(" ").slice(0, 6).join(" ");
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+async function saveJson(p, obj) {
+  await bkt().file(p).save(JSON.stringify(obj, null, 2), { contentType: "application/json" });
+}
+
+const TRANSCRIBE_SECRETS = ["ASSEMBLYAI_KEY", "ANTHROPIC_KEY", "TRANSCRIBE_WEBHOOK_SECRET"];
+
+// Fires when a recording's meta .json is finalized. Only new, uploaded, but
+// untranscribed recordings ("pending") start a job — re-uploads and the
+// "processing"/"done" writes below are ignored, so it never loops or doubles.
+exports.startTranscription = onObjectFinalized(
+  // Storage-trigger functions must run in the bucket's region (us-east1).
+  { region: "us-east1", secrets: TRANSCRIBE_SECRETS, memory: "512MiB", timeoutSeconds: 120 },
+  async (event) => {
+    const name = event.data.name || "";
+    if (!name.endsWith(".json") || name.endsWith(".aai.json")) return;
+    if (name.includes("/_live/") || name.includes("/_logs/")) return;
+    const m = name.match(/^recordings\/([^/]+)\/([^/]+)\/(.+)\.json$/);
+    if (!m) return;
+    const [, uid, folder, base] = m;
+
+    let meta;
+    try {
+      meta = JSON.parse((await bkt().file(name).download())[0].toString());
+    } catch {
+      return;
+    }
+    if (meta.transcriptStatus !== "pending") return;
+    if (!Array.isArray(meta.speakers) || meta.speakers.length === 0) return;
+
+    const m4a = `recordings/${uid}/${folder}/${base}.m4a`;
+    const [audioExists] = await bkt().file(m4a).exists();
+    if (!audioExists) return; // audio not up yet (m4a normally uploads first)
+
+    // Firestore lock keyed by the object path → exactly one job per recording.
+    const lockRef = admin.firestore().collection("transcriptions").doc(sha256(name));
+    const acquired = await admin.firestore().runTransaction(async (tx) => {
+      const d = await tx.get(lockRef);
+      if (d.exists) return false;
+      tx.set(lockRef, {
+        uid, folder, base,
+        status: "starting",
+        createdAt: new Date().toISOString(),
+      });
+      return true;
+    });
+    if (!acquired) return;
+
+    try {
+      const [signed] = await bkt().file(m4a).getSignedUrl({
+        version: "v4",
+        action: "read",
+        expires: Date.now() + 6 * 60 * 60 * 1000,
+      });
+      const body = { audio_url: signed, speaker_labels: true };
+      const lang = LANG_CODES[meta.language];
+      if (lang) body.language_code = lang;
+      else body.language_detection = true;
+      body.webhook_url = `https://${process.env.GCLOUD_PROJECT}.web.app/hooks/transcription`;
+      body.webhook_auth_header_name = "x-mixtape-secret";
+      body.webhook_auth_header_value = process.env.TRANSCRIBE_WEBHOOK_SECRET;
+
+      const created = await (
+        await fetch(`${AAI}/transcript`, {
+          method: "POST",
+          headers: { authorization: process.env.ASSEMBLYAI_KEY, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      ).json();
+      if (!created.id) throw new Error("AAI create failed: " + JSON.stringify(created).slice(0, 200));
+
+      await lockRef.set(
+        { transcriptId: created.id, speakers: meta.speakers, language: meta.language || "", status: "processing" },
+        { merge: true }
+      );
+      meta.transcriptStatus = "processing";
+      await saveJson(name, meta);
+    } catch (e) {
+      await lockRef.delete().catch(() => {});
+      try {
+        meta.transcriptStatus = "error";
+        await saveJson(name, meta);
+      } catch {}
+      console.error("startTranscription", base, String((e && e.message) || e));
+    }
+  }
+);
+
+// AssemblyAI calls this (via the stable /hooks/transcription hosting rewrite)
+// when a job finishes. Writes the transcript back to the owner's storage.
+exports.transcriptionWebhook = onRequest(
+  { region: "us-central1", secrets: TRANSCRIBE_SECRETS, invoker: "public" },
+  async (req, res) => {
+    try {
+      if (req.method !== "POST") return res.status(405).end();
+      if (req.get("x-mixtape-secret") !== process.env.TRANSCRIBE_WEBHOOK_SECRET) {
+        return res.status(401).end();
+      }
+      const transcriptId = req.body && req.body.transcript_id;
+      const status = req.body && req.body.status;
+      if (!transcriptId) return res.status(400).end();
+
+      const snap = await admin
+        .firestore()
+        .collection("transcriptions")
+        .where("transcriptId", "==", transcriptId)
+        .limit(1)
+        .get();
+      if (snap.empty) return res.status(200).json({ ok: true, note: "no matching job" });
+      const lockRef = snap.docs[0].ref;
+      const job = snap.docs[0].data();
+      const metaPath = `recordings/${job.uid}/${job.folder}/${job.base}.json`;
+      const prefix = `recordings/${job.uid}/${job.folder}/${job.base}`;
+
+      const patchMeta = async (patch) => {
+        let meta = {};
+        try {
+          meta = JSON.parse((await bkt().file(metaPath).download())[0].toString());
+        } catch {}
+        Object.assign(meta, patch);
+        await saveJson(metaPath, meta);
+        return meta;
+      };
+
+      if (status !== "completed") {
+        await patchMeta({ transcriptStatus: "error" });
+        await lockRef.delete().catch(() => {});
+        return res.status(200).json({ ok: true });
+      }
+
+      const data = await (
+        await fetch(`${AAI}/transcript/${transcriptId}`, {
+          headers: { authorization: process.env.ASSEMBLYAI_KEY },
+        })
+      ).json();
+      const utterances = data.utterances || [];
+      const speakers = job.speakers || [];
+      const speakerMap = await inferSpeakerMap(utterances, speakers, process.env.ANTHROPIC_KEY);
+      const text = renderTranscript(utterances, speakers, speakerMap);
+      const topic = await inferTopic(text, process.env.ANTHROPIC_KEY);
+      const audioDurationSec = data.audio_duration || 0;
+
+      await bkt().file(prefix + ".txt").save(text, { contentType: "text/plain" });
+      await bkt().file(prefix + ".aai.json").save(JSON.stringify(utterances), { contentType: "application/json" });
+      const meta = await patchMeta({
+        transcriptStatus: "done",
+        speakerMap: speakerMap,
+        topic: topic,
+        aaiTranscriptId: transcriptId,
+        audioDurationSec,
+        transcribedAt: new Date().toISOString(),
+        estCostUsd: (audioDurationSec / 3600) * AAI_RATE_PER_HOUR,
+      });
+
+      if (meta.shareId) {
+        await admin
+          .firestore()
+          .doc(`shares/${meta.shareId}`)
+          .set(
+            {
+              utterances,
+              speakerMap: speakerMap,
+              topic: topic,
+              durationSeconds: meta.durationSeconds || 0,
+              speakers,
+              language: meta.language || "",
+            },
+            { merge: true }
+          )
+          .catch(() => {});
+      }
+      await lockRef.delete().catch(() => {});
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error("transcriptionWebhook", String((e && e.message) || e));
       res.status(500).json({ error: String((e && e.message) || e) });
     }
   }

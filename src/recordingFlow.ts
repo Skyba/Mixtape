@@ -1,6 +1,8 @@
 import { INBOX, Recording, Settings } from "./types";
 import {
   audioPath,
+  transcriptPath,
+  aaiJsonPath,
   listRecordings,
   renameRecording,
   saveNewRecording,
@@ -29,6 +31,7 @@ import {
   deleteRemoteRecording,
   downloadUrlForPath,
   remoteObjectPath,
+  fetchRemoteMeta,
   liveSegmentPath,
   liveMergedPath,
   uploadDebugLog,
@@ -150,7 +153,30 @@ export async function processStop(args: StopArgs): Promise<Recording> {
   logEvent(`saved local ${rec.base}`);
   await notify("Recording saved", `${rec.base} (${rec.folder})`);
 
-  const eligible = args.speakers.length > 0 && !!args.settings.assemblyAiKey;
+  const cloudMode = isFirebaseConfigured && isSignedIn();
+  const hasSpeakers = args.speakers.length > 0;
+
+  // Cloud mode: upload with "pending" and let the backend transcribe with the
+  // screen off. pullCloudTranscripts brings the finished transcript back — no
+  // on-device AAI call that would stall while the app is backgrounded.
+  if (hasSpeakers && cloudMode) {
+    rec = { ...rec, transcriptStatus: "pending" };
+    await writeMeta(rec);
+    rec = await tryUpload(rec, args.settings);
+    await writeMeta(rec);
+    await notify(
+      rec.uploadStatus === "uploaded"
+        ? "Uploaded — transcribing on the server…"
+        : "Saved — will transcribe once uploaded",
+      rec.base
+    );
+    logEvent(`processStop done (cloud) upload=${rec.uploadStatus} transcript=pending`);
+    await flushLog();
+    return rec;
+  }
+
+  // Offline / not signed in: transcribe on-device (existing path).
+  const eligible = hasSpeakers && !!args.settings.assemblyAiKey;
   if (eligible) {
     rec = { ...rec, transcriptStatus: "pending" };
     await writeMeta(rec);
@@ -382,6 +408,10 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
 export async function retryPendingTranscriptions(
   settings: Settings
 ): Promise<number> {
+  // Cloud mode: the backend transcribes and pullCloudTranscripts collects the
+  // result, so on-device retry would double-transcribe. Only fall back to
+  // local transcription when there's no cloud (offline / signed out).
+  if (isFirebaseConfigured && isSignedIn()) return 0;
   if (retryInFlight || !settings.assemblyAiKey) return 0;
   retryInFlight = true;
   try {
@@ -431,5 +461,52 @@ export async function flushPendingUploads(settings: Settings): Promise<number> {
       /* keep pending */
     }
   }
+  return n;
+}
+
+/**
+ * Cloud mode: pulls transcripts the backend produced while the app was closed.
+ * For each local recording still "pending"/"processing", reads the cloud meta;
+ * when the server marks it "done", downloads the transcript + utterances and
+ * updates the local copy. This is what makes server-side transcription show up
+ * in the app without keeping it open.
+ */
+export async function pullCloudTranscripts(settings: Settings): Promise<number> {
+  if (!isFirebaseConfigured || !isSignedIn()) return 0;
+  const all = await listRecordings();
+  let n = 0;
+  for (const r of all.filter(
+    (x) => x.transcriptStatus === "pending" || x.transcriptStatus === "processing"
+  )) {
+    try {
+      const remote = await fetchRemoteMeta(remoteObjectPath(r, "json"));
+      if (remote.transcriptStatus === "done") {
+        await downloadRemoteFile(remoteObjectPath(r, "txt"), transcriptPath(r));
+        await downloadRemoteFile(remoteObjectPath(r, "aai.json"), aaiJsonPath(r));
+        await writeMeta({
+          ...r,
+          transcriptStatus: "done",
+          speakerMap: remote.speakerMap ?? r.speakerMap,
+          topic: remote.topic ?? r.topic,
+          aaiTranscriptId: remote.aaiTranscriptId ?? r.aaiTranscriptId,
+          audioDurationSec: remote.audioDurationSec ?? r.audioDurationSec,
+          transcribedAt: remote.transcribedAt ?? r.transcribedAt,
+          estCostUsd: remote.estCostUsd ?? r.estCostUsd,
+        });
+        n++;
+        logEvent(`pulled cloud transcript ${r.base}`);
+      } else if (remote.transcriptStatus === "error") {
+        await writeMeta({ ...r, transcriptStatus: "error" });
+      } else if (
+        remote.transcriptStatus === "processing" &&
+        r.transcriptStatus === "pending"
+      ) {
+        await writeMeta({ ...r, transcriptStatus: "processing" });
+      }
+    } catch {
+      /* remote meta not ready yet — try again next time */
+    }
+  }
+  if (n) await flushLog();
   return n;
 }

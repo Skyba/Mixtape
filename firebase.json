@@ -17,6 +17,10 @@
         "source": "/api/v1/**",
         "function": { "functionId": "api", "region": "us-central1" }
       },
+      {
+        "source": "/hooks/transcription",
+        "function": { "functionId": "transcriptionWebhook", "region": "us-central1" }
+      },
       { "source": "/r/**", "destination": "/index.html" }
     ]
   },

@@ -95,7 +95,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const insets = useSafeAreaInsets();
 
   const done = rec.transcriptStatus === "done";
-  const pending = rec.transcriptStatus === "pending";
+  const pending =
+    rec.transcriptStatus === "pending" || rec.transcriptStatus === "processing";
   const canUseTranscript = done && !isRemote && !!transcript;
 
   useEffect(() => {
@@ -283,7 +284,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   return (
     <ScrollView style={styles.container}>
       {copied ? <Text style={styles.copiedBanner}>Copied ✓</Text> : null}
-      <Text style={styles.title}>{rec.base}</Text>
+      <Text style={styles.title}>{rec.topic || rec.base}</Text>
       <Text style={styles.meta}>
         {new Date(rec.recordedAt).toLocaleString()} ·{" "}
         {Math.round(rec.durationSeconds / 60)} min · {rec.language}
