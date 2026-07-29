@@ -65,6 +65,19 @@ import {
 } from "../../modules/mixtape-wakelock";
 
 const SEGMENT_MS = 20000; // live segment length
+
+// Global audio mode required while recording. The mode is GLOBAL mutable state,
+// so it's re-asserted at every record start — any code that sets the mode
+// without shouldPlayInBackground (expo-audio resets omitted fields) would
+// otherwise make the native recorder pause the moment the screen locks.
+const RECORDING_AUDIO_MODE = {
+  playsInSilentMode: true,
+  allowsRecording: true,
+  allowsBackgroundRecording: true,
+  // Without this, expo-audio pauses the recorder the moment the screen
+  // locks (OnActivityEntersBackground). This is what keeps it running.
+  shouldPlayInBackground: true,
+};
 import type { RootStackParamList } from "../../App";
 
 type Nav = NativeStackNavigationProp<RootStackParamList>;
@@ -153,14 +166,7 @@ export default function RecordScreen() {
     (async () => {
       const perm = await AudioModule.requestRecordingPermissionsAsync();
       if (!perm.granted) Alert.alert("Microphone permission denied");
-      await setAudioModeAsync({
-        playsInSilentMode: true,
-        allowsRecording: true,
-        allowsBackgroundRecording: true,
-        // Without this, expo-audio pauses the recorder the moment the screen
-        // locks (OnActivityEntersBackground). This is what keeps it running.
-        shouldPlayInBackground: true,
-      });
+      await setAudioModeAsync(RECORDING_AUDIO_MODE);
       setSpeakerHist(await getSpeakerHistory());
       setFolderHist(await getFolders());
       setSettings(await getSettings());
@@ -252,6 +258,10 @@ export default function RecordScreen() {
       setStatus("");
       setElapsed(0);
       elapsedRef.current = 0;
+      // Re-assert the recording mode: the global mode may have been changed
+      // since mount, and without shouldPlayInBackground the recorder pauses
+      // on screen-off.
+      await setAudioModeAsync(RECORDING_AUDIO_MODE);
       await recorder.prepareToRecordAsync();
       // forDuration is a native hard cap: the OS recorder stops itself at the
       // deadline even with the screen off / JS timer suspended. The JS interval
@@ -274,6 +284,10 @@ export default function RecordScreen() {
     setStatus("");
     setElapsed(0);
     elapsedRef.current = 0;
+    // Same re-assert as start(): keeps segments recording with the screen off.
+    try {
+      await setAudioModeAsync(RECORDING_AUDIO_MODE);
+    } catch {}
     setLiveText("");
     setDiarUtt([]);
     setDiarMap(undefined);

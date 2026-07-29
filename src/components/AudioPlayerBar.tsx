@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import {
-  useAudioPlayer,
-  useAudioPlayerStatus,
-  setAudioModeAsync,
-} from "expo-audio";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 
 function mmss(sec: number): string {
   if (!isFinite(sec) || sec < 0) sec = 0;
@@ -20,12 +16,11 @@ export default function AudioPlayerBar({ uri }: { uri: string }) {
   const [trackW, setTrackW] = useState(1);
   const [scrub, setScrub] = useState<number | null>(null); // fraction while dragging
 
-  useEffect(() => {
-    setAudioModeAsync({
-      playsInSilentMode: true,
-      allowsRecording: false,
-    }).catch(() => {});
-  }, []);
+  // NOTE: deliberately no setAudioModeAsync here. The audio mode is GLOBAL, and
+  // setting it without shouldPlayInBackground reset that flag to false — which
+  // made the native recorder pause on screen-off for any recording started after
+  // the player had been opened. Playback works fine under the recording mode set
+  // by RecordScreen (allowsRecording has no effect on Android playback).
 
   // restart from the top once playback reaches the end
   useEffect(() => {
