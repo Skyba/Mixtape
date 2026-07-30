@@ -486,6 +486,9 @@ export async function pullCloudTranscripts(settings: Settings): Promise<number> 
         await writeMeta({
           ...r,
           transcriptStatus: "done",
+          // A cap-stopped take can save 0 locally; the server backfills the
+          // true duration from AssemblyAI — bring it down with the transcript.
+          durationSeconds: r.durationSeconds || remote.durationSeconds || 0,
           speakerMap: remote.speakerMap ?? r.speakerMap,
           topic: remote.topic ?? r.topic,
           aaiTranscriptId: remote.aaiTranscriptId ?? r.aaiTranscriptId,

@@ -76,13 +76,35 @@ export async function listRecordings(): Promise<Recording[]> {
   return out.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
 }
 
+/**
+ * Returns base, or "base (2)", "base (3)"… — first name with no existing meta.
+ * Same-day recordings with the same speakers produce identical bases (cloud
+ * mode keeps the provisional name), and an equal base means the same local
+ * paths AND the same cloud object paths — the later recording silently
+ * overwrote the earlier one. Never reuse a base that already exists.
+ */
+async function findFreeBase(folder: string, base: string): Promise<string> {
+  let candidate = base;
+  for (let i = 2; ; i++) {
+    const info = await FileSystem.getInfoAsync(
+      `${folderDir(folder)}${candidate}.json`
+    );
+    if (!info.exists) return candidate;
+    candidate = `${base} (${i})`;
+  }
+}
+
 export async function saveNewRecording(
   cacheUri: string,
   base: string,
   meta: Omit<Recording, "base" | "folder">,
   folder: string = INBOX
 ): Promise<Recording> {
-  const r: Recording = { ...meta, base, folder };
+  const r: Recording = {
+    ...meta,
+    base: await findFreeBase(folder, base),
+    folder,
+  };
   await ensureDir(folderDir(folder));
   await FileSystem.copyAsync({ from: cacheUri, to: audioPath(r) });
   await writeMeta(r);
@@ -98,7 +120,10 @@ export async function renameRecording(
   r: Recording,
   newBase: string
 ): Promise<Recording> {
-  const next: Recording = { ...r, base: newBase };
+  const next: Recording = {
+    ...r,
+    base: await findFreeBase(r.folder, newBase),
+  };
   await moveFile(audioPath(r), audioPath(next));
   await moveFile(transcriptPath(r), transcriptPath(next));
   await moveFile(aaiJsonPath(r), aaiJsonPath(next));

@@ -149,6 +149,7 @@ export default function RecordScreen() {
   const elapsedRef = useRef(0);
   const startMsRef = useRef(0);
   const recordingRef = useRef(false); // true only during a normal (non-live) take
+  const capFiredRef = useRef(false); // native forDuration cap ended the take
   const durationRef = useRef(durationH);
   useEffect(() => {
     durationRef.current = durationH;
@@ -159,7 +160,12 @@ export default function RecordScreen() {
   // flow that a manual stop() would. Guarded so a manual stop (which clears
   // recordingRef first) and live-mode segment stops don't double-trigger it.
   onRecStatusRef.current = (s: RecordingStatus) => {
-    if (s.isFinished && recordingRef.current && !liveOn.current) stop();
+    if (s.isFinished && recordingRef.current && !liveOn.current) {
+      // Only a native-initiated finish reaches here with recordingRef still
+      // true (a manual stop clears it first) — i.e. the forDuration cap.
+      capFiredRef.current = true;
+      stop();
+    }
   };
 
   useEffect(() => {
@@ -258,6 +264,7 @@ export default function RecordScreen() {
       setStatus("");
       setElapsed(0);
       elapsedRef.current = 0;
+      capFiredRef.current = false;
       // Re-assert the recording mode: the global mode may have been changed
       // since mount, and without shouldPlayInBackground the recorder pauses
       // on screen-off.
@@ -540,8 +547,17 @@ export default function RecordScreen() {
     stopTick();
     let seconds = elapsedRef.current;
     try {
-      seconds = Math.floor((recorder.getStatus().durationMillis || 0) / 1000);
+      // After a native forDuration stop the recorder is already reset and
+      // reads 0 — never let that overwrite the ticked value.
+      const derived = Math.floor((recorder.getStatus().durationMillis || 0) / 1000);
+      if (derived > 0) seconds = derived;
     } catch {}
+    if (capFiredRef.current) {
+      // The native cap stopped it: the planned limit IS the duration (the JS
+      // tick may have been suspended the whole time, so elapsedRef is stale).
+      seconds = Math.max(seconds, Math.round(durationRef.current * 3600));
+      capFiredRef.current = false;
+    }
     setPaused(false);
     try {
       await recorder.stop();

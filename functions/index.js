@@ -584,7 +584,7 @@ exports.transcriptionWebhook = onRequest(
 
       await bkt().file(prefix + ".txt").save(text, { contentType: "text/plain" });
       await bkt().file(prefix + ".aai.json").save(JSON.stringify(utterances), { contentType: "application/json" });
-      const meta = await patchMeta({
+      let meta = await patchMeta({
         transcriptStatus: "done",
         speakerMap: speakerMap,
         topic: topic,
@@ -593,6 +593,11 @@ exports.transcriptionWebhook = onRequest(
         transcribedAt: new Date().toISOString(),
         estCostUsd: (audioDurationSec / 3600) * AAI_RATE_PER_HOUR,
       });
+      // A cap-stopped take reports durationSeconds 0 from the phone; AAI's
+      // measured audio length is ground truth, so backfill it server-side.
+      if (!meta.durationSeconds && audioDurationSec) {
+        meta = await patchMeta({ durationSeconds: Math.round(audioDurationSec) });
+      }
 
       if (meta.shareId) {
         await admin
