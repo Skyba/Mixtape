@@ -22,7 +22,7 @@ import {
   pullCloudTranscripts,
 } from "./src/recordingFlow";
 import { logEvent, getLogText } from "./src/log";
-import { uploadDebugLog } from "./src/firebase";
+import { uploadDebugLog, authReady } from "./src/firebase";
 import { getSettings } from "./src/storage";
 import { Recording } from "./src/types";
 
@@ -94,6 +94,10 @@ export default function App() {
     logEvent("app launch");
     initNotifications();
     getSettings().then(async (s) => {
+      // Auth restores from storage asynchronously — without this the recovery
+      // jobs below all read "signed out" and take their offline path, which
+      // re-transcribes on-device what the backend already did in the cloud.
+      await authReady();
       flushPendingUploads(s);
       retryPendingMerges(s); // recover any live recording whose merge didn't finish
       pullCloudTranscripts(s); // collect transcripts the backend finished while closed
@@ -107,7 +111,8 @@ export default function App() {
     // background otherwise stays stuck until the next cold launch.
     const sub = AppState.addEventListener("change", (next) => {
       if (next === "active") {
-        getSettings().then((s) => {
+        getSettings().then(async (s) => {
+          await authReady();
           flushPendingUploads(s);
           pullCloudTranscripts(s);
           retryPendingTranscriptions(s);

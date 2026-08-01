@@ -67,6 +67,26 @@ export function isSignedIn(): boolean {
   return !!auth().currentUser;
 }
 
+let _authReady: Promise<void> | null = null;
+/**
+ * Resolves once Firebase Auth has restored the persisted session from storage.
+ * `currentUser` is null for the first moments after launch, so anything that
+ * branches on isSignedIn() must await this first — otherwise it takes the
+ * signed-out path (e.g. transcribing on-device work the backend already did).
+ */
+export function authReady(): Promise<void> {
+  if (!isFirebaseConfigured) return Promise.resolve();
+  if (!_authReady) {
+    _authReady = new Promise((resolve) => {
+      const un = onAuthStateChanged(auth(), () => {
+        un();
+        resolve();
+      });
+    });
+  }
+  return _authReady;
+}
+
 export function currentEmail(): string | null {
   return auth().currentUser?.email ?? null;
 }

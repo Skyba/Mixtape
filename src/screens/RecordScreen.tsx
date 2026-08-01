@@ -429,7 +429,8 @@ export default function RecordScreen() {
       const { utterances, audioDurationSec } = await diarizeFromUrl(
         url,
         language,
-        settings
+        settings,
+        resolveSpeakers().length
       );
       logEvent(`diar pass segs=${n} utt=${utterances.length} dur=${audioDurationSec}`);
       if (liveOn.current && utterances.length) {

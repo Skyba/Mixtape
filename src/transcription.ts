@@ -93,6 +93,13 @@ async function transcribeUrl(
     audio_url: audioUrl,
     speaker_labels: true,
   };
+  // Without this AAI picks its own speaker count and can split one person into
+  // two labels — the extra letter has no name to bind to and renders as
+  // "Speaker D". A max (rather than exact speakers_expected) still allows a
+  // named participant to stay silent; the two options are mutually exclusive.
+  if (rec.speakers.length) {
+    body.speaker_options = { max_speakers_expected: rec.speakers.length };
+  }
   if (langCode) body.language_code = langCode;
   else body.language_detection = true;
 
@@ -186,7 +193,8 @@ export async function transcribeClipText(
 export async function diarizeFromUrl(
   audioUrl: string,
   language: string,
-  settings: Settings
+  settings: Settings,
+  speakerCount = 0
 ): Promise<{ utterances: Utterance[]; audioDurationSec: number }> {
   if (!settings.assemblyAiKey) throw new Error("AssemblyAI key not set");
   const langCode = LANG_CODES[language];
@@ -194,6 +202,9 @@ export async function diarizeFromUrl(
     audio_url: audioUrl,
     speaker_labels: true,
   };
+  if (speakerCount) {
+    body.speaker_options = { max_speakers_expected: speakerCount };
+  }
   if (langCode) body.language_code = langCode;
   else body.language_detection = true;
   const create = await fetch(`${AAI}/transcript`, {
@@ -213,6 +224,68 @@ export async function diarizeFromUrl(
 }
 
 /**
+ * Getting this wrong mislabels every line of the transcript, so it doesn't run
+ * on the user-picked (cheap) topic model — a wrong map is far more expensive
+ * than the few cents this costs.
+ */
+const SPEAKER_MAP_MODEL = "claude-sonnet-5";
+
+/**
+ * Pulls the answer out of a Messages response. Thinking-capable models put a
+ * "thinking" block first, so content[0] is not necessarily the text — and
+ * reading it blindly yields undefined instead of the answer.
+ */
+function textFrom(data: any): string {
+  return (data?.content ?? [])
+    .filter((b: any) => b?.type === "text")
+    .map((b: any) => b.text as string)
+    .join("\n");
+}
+
+/** Escapes a participant name for use inside a RegExp. */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Picks the lines worth reasoning over: every utterance that says a
+ * participant's name (the only real evidence of who is who), plus an even
+ * spread across the whole recording for context. Reading just the opening
+ * minutes — as this used to — is how a two-hour conversation gets mapped off
+ * the first bit of small talk.
+ */
+export function speakerSample(utterances: Utterance[], named: string[]): string {
+  const namePat = new RegExp(`\\b(${named.map(escapeRe).join("|")})\\b`, "i");
+  const picked = new Set<number>();
+  utterances.forEach((u, i) => {
+    if (picked.size < 90 && namePat.test(u.text)) picked.add(i);
+  });
+  const stride = Math.max(1, Math.floor(utterances.length / 60));
+  utterances.forEach((_, i) => {
+    if (i % stride === 0) picked.add(i);
+  });
+  return [...picked]
+    .sort((a, b) => a - b)
+    .map((i) => `${utterances[i].speaker}: ${utterances[i].text.slice(0, 400)}`)
+    .join("\n")
+    .slice(0, 24000);
+}
+
+/** Per-letter speaking time, so the model can tell a participant from a cameo. */
+function speakerStats(utterances: Utterance[]): string {
+  const mins: Record<string, number> = {};
+  const turns: Record<string, number> = {};
+  for (const u of utterances) {
+    mins[u.speaker] = (mins[u.speaker] ?? 0) + ((u.end ?? u.start) - u.start) / 60000;
+    turns[u.speaker] = (turns[u.speaker] ?? 0) + 1;
+  }
+  return Object.keys(mins)
+    .sort()
+    .map((l) => `${l}: ${mins[l].toFixed(0)} min over ${turns[l]} turns`)
+    .join("; ");
+}
+
+/**
  * Maps AssemblyAI's anonymous speaker letters (A/B/…) to the participant names
  * by reading the content — self-introductions ("I'm X"), how people address each
  * other, etc. Fixes the arbitrary order-based guess (AAI "A" ≠ first-typed name).
@@ -226,20 +299,21 @@ export async function inferSpeakerMap(
   if (!settings.anthropicKey || !utterances.length) return undefined;
   const named = speakers.filter((s) => !/^Speaker \d+$/.test(s));
   if (named.length < 1) return undefined;
-  const letters = [...new Set(utterances.map((u) => u.speaker))];
+  const letters = [...new Set(utterances.map((u) => u.speaker))].sort();
   if (letters.length < 2) return undefined; // one speaker: nothing to disambiguate
-  const sample = utterances
-    .slice(0, 40)
-    .map((u) => `${u.speaker}: ${u.text}`)
-    .join("\n")
-    .slice(0, 4000);
   const prompt =
-    `A meeting transcript is labeled by anonymous speaker letters (${letters.join(", ")}). ` +
-    `The participants are: ${named.join(", ")}.\n` +
-    `Using ONLY the content — especially self-introductions ("I'm X", "This is X") and how ` +
-    `people address each other by name — map each speaker letter to the correct participant. ` +
-    `Output ONLY a JSON object like {"A":"Name","B":"Name"}. Omit any letter whose identity is unclear.\n\n` +
-    `Transcript:\n${sample}`;
+    `A conversation transcript is labelled with anonymous speaker letters ` +
+    `(${letters.join(", ")}), speaking ${speakerStats(utterances)}.\n` +
+    `The participants are: ${named.join(", ")}.\n\n` +
+    `Assign a participant name to EVERY letter, reasoning only from the content:\n` +
+    `- A speaker talked ABOUT in the third person ("X wants…", "ask X") is NOT the ` +
+    `speaker of that line — this is the strongest signal available.\n` +
+    `- "I'm X" / "this is X" names the speaker of that line.\n` +
+    `- When someone is addressed by name, the person who answers next is usually them.\n` +
+    `- Diarization can split one person across two letters, so two letters may ` +
+    `share a name — assign the best fit rather than leaving a letter out.\n\n` +
+    `Output ONLY a JSON object with one entry per letter, e.g. {"A":"Name","B":"Name"}.\n\n` +
+    `Transcript:\n${speakerSample(utterances, named)}`;
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -249,13 +323,15 @@ export async function inferSpeakerMap(
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: settings.topicModel,
-        max_tokens: 200,
+        model: SPEAKER_MAP_MODEL,
+        // Room for the model to think before the (tiny) JSON answer — too small
+        // a budget gets spent entirely on thinking and returns no text at all.
+        max_tokens: 2000,
         messages: [{ role: "user", content: prompt }],
       }),
     });
     const data = await res.json();
-    const raw: string = data?.content?.[0]?.text ?? "";
+    const raw = textFrom(data);
     const json = raw.match(/\{[\s\S]*\}/)?.[0];
     if (!json) return undefined;
     const parsed = JSON.parse(json) as Record<string, string>;
@@ -296,7 +372,7 @@ export async function summarize(
   });
   const data = await res.json();
   if (data?.error) throw new Error(data.error?.message ?? "Summary failed");
-  return data?.content?.[0]?.text ?? "";
+  return textFrom(data);
 }
 
 /** Asks Claude Haiku for a short filename-safe topic. Returns "" on failure. */
@@ -328,8 +404,7 @@ export async function inferTopic(
       }),
     });
     const data = await res.json();
-    const raw: string = data?.content?.[0]?.text ?? "";
-    return raw
+    return textFrom(data)
       .replace(/[\\/:*?"<>|]/g, "")
       .replace(/\s+/g, " ")
       .trim()

@@ -365,6 +365,9 @@ const AAI = "https://api.assemblyai.com/v2";
 const AAI_RATE_PER_HOUR = 0.12; // matches the app's estimate
 const LANG_CODES = { English: "en", French: "fr", Spanish: "es", Arabic: "ar" };
 const TOPIC_MODEL = "claude-haiku-4-5-20251001";
+// A wrong speaker map mislabels every line of the transcript, so that call gets
+// a stronger model than the throwaway topic title. Mirrors src/transcription.ts.
+const SPEAKER_MAP_MODEL = "claude-sonnet-5";
 
 function mmss(ms) {
   const s = Math.floor((ms || 0) / 1000);
@@ -382,7 +385,7 @@ function renderTranscript(utterances, speakers, speakerMap) {
     .map((u) => `[${mmss(u.start)}] ${nameForSpeaker(u.speaker, speakers, speakerMap)}: ${u.text}`)
     .join("\n\n");
 }
-async function anthropic(key, maxTokens, prompt) {
+async function anthropic(key, maxTokens, prompt, model = TOPIC_MODEL) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -391,30 +394,74 @@ async function anthropic(key, maxTokens, prompt) {
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: TOPIC_MODEL,
+      model,
       max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     }),
   });
   const data = await res.json();
-  return data?.content?.[0]?.text ?? "";
+  // Thinking-capable models put a "thinking" block first, so content[0] is not
+  // necessarily the answer — collect the text blocks instead.
+  return ((data && data.content) || [])
+    .filter((b) => b && b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
 }
+// Lines that name a participant are the only real evidence of who is who, and
+// they're spread through the whole recording — sampling just the opening
+// minutes is how a two-hour conversation gets mapped off initial small talk.
+function speakerSample(utterances, named) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const namePat = new RegExp(`\\b(${named.map(esc).join("|")})\\b`, "i");
+  const picked = new Set();
+  utterances.forEach((u, i) => {
+    if (picked.size < 90 && namePat.test(u.text)) picked.add(i);
+  });
+  const stride = Math.max(1, Math.floor(utterances.length / 60));
+  utterances.forEach((_, i) => {
+    if (i % stride === 0) picked.add(i);
+  });
+  return [...picked]
+    .sort((a, b) => a - b)
+    .map((i) => `${utterances[i].speaker}: ${utterances[i].text.slice(0, 400)}`)
+    .join("\n")
+    .slice(0, 24000);
+}
+
+function speakerStats(utterances) {
+  const mins = {}, turns = {};
+  for (const u of utterances) {
+    mins[u.speaker] = (mins[u.speaker] || 0) + ((u.end || u.start) - u.start) / 60000;
+    turns[u.speaker] = (turns[u.speaker] || 0) + 1;
+  }
+  return Object.keys(mins).sort()
+    .map((l) => `${l}: ${mins[l].toFixed(0)} min over ${turns[l]} turns`)
+    .join("; ");
+}
+
 async function inferSpeakerMap(utterances, speakers, anthropicKey) {
   if (!anthropicKey || !utterances.length) return null;
   const named = (speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
   if (named.length < 1) return null;
-  const letters = [...new Set(utterances.map((u) => u.speaker))];
+  const letters = [...new Set(utterances.map((u) => u.speaker))].sort();
   if (letters.length < 2) return null;
-  const sample = utterances.slice(0, 40).map((u) => `${u.speaker}: ${u.text}`).join("\n").slice(0, 4000);
   const prompt =
-    `A meeting transcript is labeled by anonymous speaker letters (${letters.join(", ")}). ` +
-    `The participants are: ${named.join(", ")}.\n` +
-    `Using ONLY the content — especially self-introductions ("I'm X", "This is X") and how ` +
-    `people address each other by name — map each speaker letter to the correct participant. ` +
-    `Output ONLY a JSON object like {"A":"Name","B":"Name"}. Omit any letter whose identity is unclear.\n\n` +
-    `Transcript:\n${sample}`;
+    `A conversation transcript is labelled with anonymous speaker letters ` +
+    `(${letters.join(", ")}), speaking ${speakerStats(utterances)}.\n` +
+    `The participants are: ${named.join(", ")}.\n\n` +
+    `Assign a participant name to EVERY letter, reasoning only from the content:\n` +
+    `- A speaker talked ABOUT in the third person ("X wants…", "ask X") is NOT the ` +
+    `speaker of that line — this is the strongest signal available.\n` +
+    `- "I'm X" / "this is X" names the speaker of that line.\n` +
+    `- When someone is addressed by name, the person who answers next is usually them.\n` +
+    `- Diarization can split one person across two letters, so two letters may ` +
+    `share a name — assign the best fit rather than leaving a letter out.\n\n` +
+    `Output ONLY a JSON object with one entry per letter, e.g. {"A":"Name","B":"Name"}.\n\n` +
+    `Transcript:\n${speakerSample(utterances, named)}`;
   try {
-    const raw = await anthropic(anthropicKey, 200, prompt);
+    // 2000 tokens: room to think before the tiny JSON answer — too small a
+    // budget gets spent entirely on thinking and returns no text at all.
+    const raw = await anthropic(anthropicKey, 2000, prompt, SPEAKER_MAP_MODEL);
     const json = raw.match(/\{[\s\S]*\}/);
     if (!json) return null;
     const parsed = JSON.parse(json[0]);
@@ -495,6 +542,12 @@ exports.startTranscription = onObjectFinalized(
         expires: Date.now() + 6 * 60 * 60 * 1000,
       });
       const body = { audio_url: signed, speaker_labels: true };
+      // Without a count AAI can split one person into two labels; the extra
+      // letter has no name to bind to and renders as "Speaker D". A max (not an
+      // exact count) still allows a named participant to stay silent.
+      if (meta.speakers.length) {
+        body.speaker_options = { max_speakers_expected: meta.speakers.length };
+      }
       const lang = LANG_CODES[meta.language];
       if (lang) body.language_code = lang;
       else body.language_detection = true;
