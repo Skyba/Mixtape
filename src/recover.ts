@@ -1,5 +1,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { listRecordings, audioPath } from "./recordings";
+import { processStop } from "./recordingFlow";
+import { INBOX, Recording, Settings } from "./types";
 
 export type CacheAudio = {
   uri: string;
@@ -66,4 +68,39 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
   return found
     .filter((f) => !saved.has(f.size))
     .sort((a, b) => b.modTime - a.modTime);
+}
+
+/**
+ * Saves cache audio into the library. No speakers and no language are set —
+ * guessing either is how a recovered file gets transcribed wrong (a stale
+ * one-speaker default collapses a conversation into a single label). Assign
+ * the speakers on the recording's own page, then transcribe from there.
+ */
+export async function importOrphanAudio(
+  uri: string,
+  settings: Settings
+): Promise<Recording> {
+  return processStop({
+    cacheUri: uri,
+    durationSeconds: 0, // filled in from the transcript
+    plannedDurationHours: 0,
+    speakers: [],
+    folder: INBOX,
+    language: "", // empty = let AssemblyAI detect it
+    settings,
+  });
+}
+
+/** Deletes the given cache files. Returns the bytes reclaimed. */
+export async function deleteOrphanAudio(files: CacheAudio[]): Promise<number> {
+  let freed = 0;
+  for (const f of files) {
+    try {
+      await FileSystem.deleteAsync(f.uri, { idempotent: true });
+      freed += f.size;
+    } catch {
+      /* already gone or not ours to delete */
+    }
+  }
+  return freed;
 }

@@ -39,8 +39,12 @@ import {
   liveSegmentPath,
   liveMergedPath,
 } from "../firebase";
-import { processStop, processStopLive, transcribeExisting } from "../recordingFlow";
-import { listOrphanAudio, CacheAudio } from "../recover";
+import {
+  processStop,
+  processStopLive,
+  transcribeExisting,
+  setRecordingInProgress,
+} from "../recordingFlow";
 import { logEvent } from "../log";
 import {
   transcribeClipText,
@@ -116,7 +120,6 @@ export default function RecordScreen() {
   const [paused, setPaused] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [status, setStatus] = useState("");
-  const [orphans, setOrphans] = useState<CacheAudio[]>([]);
 
   const [liveMode, setLiveMode] = useState(false);
   const [shareLive, setShareLive] = useState(false);
@@ -181,15 +184,12 @@ export default function RecordScreen() {
     })();
   }, []);
 
-  // Surface audio the recorder left in the cache (a discarded take is stopped
-  // properly, so the file is intact — it just never got saved). Re-checked
-  // after each recording ends.
-  useEffect(() => {
-    if (isRecording) return;
-    listOrphanAudio()
-      .then(setOrphans)
-      .catch(() => {});
-  }, [isRecording]);
+  // Mirrors the recording state into module scope so the cache tools in
+  // Settings never offer to delete the take that's still being written.
+  function markRecording(on: boolean) {
+    setIsRecording(on);
+    setRecordingInProgress(on);
+  }
 
   function stopTick() {
     if (tick.current) clearInterval(tick.current);
@@ -290,7 +290,7 @@ export default function RecordScreen() {
       await activateKeepAwakeAsync();
       acquireWakelock();
       logEvent(`start normal: recording, cap=${durationH}h`);
-      setIsRecording(true);
+      markRecording(true);
       setPaused(false);
       startTick();
     } catch (e: any) {
@@ -322,7 +322,7 @@ export default function RecordScreen() {
     liveOn.current = true;
     await activateKeepAwakeAsync();
     acquireWakelock();
-    setIsRecording(true);
+    markRecording(true);
     setPaused(false);
     startTick();
 
@@ -524,7 +524,24 @@ export default function RecordScreen() {
     startTick();
   }
 
-  async function cancel() {
+  /**
+   * Discarding throws away however long you've been recording, and one stray
+   * tap used to do it with no way back, so it asks first. The audio itself
+   * survives in the cache either way — Settings ▸ Developer can import it back
+   * until Android reclaims the space.
+   */
+  function cancel() {
+    Alert.alert(
+      "Discard this recording?",
+      `${fmt(elapsedRef.current)} recorded. It won't be saved to your library.`,
+      [
+        { text: "Keep recording", style: "cancel" },
+        { text: "Discard", style: "destructive", onPress: () => discard() },
+      ]
+    );
+  }
+
+  async function discard() {
     recordingRef.current = false;
     if (liveOn.current) {
       liveOn.current = false;
@@ -544,7 +561,7 @@ export default function RecordScreen() {
     } catch {}
     deactivateKeepAwake();
     releaseWakelock();
-    setIsRecording(false);
+    markRecording(false);
     setPaused(false);
     setLiveText("");
     setDiarUtt([]);
@@ -577,7 +594,7 @@ export default function RecordScreen() {
     } catch {}
     deactivateKeepAwake();
     releaseWakelock();
-    setIsRecording(false);
+    markRecording(false);
     const uri = recorder.uri;
     logEvent(`stop normal: durationMillis-derived=${seconds}s uri=${!!uri}`);
     if (!uri) {
@@ -606,34 +623,6 @@ export default function RecordScreen() {
     }
   }
 
-  /**
-   * Saves audio the recorder left behind in the cache — a discarded take, or a
-   * stop that never made it into the library. Duration is left at 0: the backend
-   * fills in the real length from AssemblyAI when it transcribes.
-   */
-  async function recoverOrphan(o: CacheAudio) {
-    setStatus("Importing discarded audio…");
-    try {
-      const s = await getSettings();
-      const rec = await processStop({
-        cacheUri: o.uri,
-        durationSeconds: 0,
-        plannedDurationHours: durationH,
-        speakers: resolveSpeakers(),
-        folder,
-        language,
-        settings: s,
-      });
-      setStatus(
-        `Recovered: ${rec.base}\nTranscript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
-      );
-      setLastRec(rec);
-      setOrphans(await listOrphanAudio());
-    } catch (e: any) {
-      setStatus("Import failed: " + String(e?.message ?? e));
-    }
-  }
-
   async function stopLive() {
     const wasDiarizing = diarOnRef.current;
     liveOn.current = false;
@@ -644,7 +633,7 @@ export default function RecordScreen() {
     await rollSegment(true);
     deactivateKeepAwake();
     releaseWakelock();
-    setIsRecording(false);
+    markRecording(false);
     if (segUris.current.length === 0) {
       setStatus("No audio captured.");
       return;
@@ -945,32 +934,6 @@ export default function RecordScreen() {
       )}
 
       {status ? <Text style={styles.status}>{status}</Text> : null}
-
-      {!isRecording && orphans.length ? (
-        <View style={styles.recoverBox}>
-          <Text style={styles.recoverTitle}>
-            Unsaved audio in cache ({orphans.length})
-          </Text>
-          <Text style={styles.recoverHint}>
-            Discarded or never saved. Android may clear these — import what you
-            want to keep.
-          </Text>
-          {orphans.map((o) => (
-            <TouchableOpacity
-              key={o.uri}
-              style={styles.recoverRow}
-              onPress={() => recoverOrphan(o)}
-            >
-              <Text style={styles.recoverTxt}>
-                {o.modTime ? new Date(o.modTime).toLocaleString() : "unknown time"}
-                {" · "}
-                {(o.size / 1048576).toFixed(1)} MB
-              </Text>
-              <Text style={styles.recoverAction}>Import →</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      ) : null}
       {lastRec ? (
         <TouchableOpacity
           style={styles.viewBtn}
@@ -1085,25 +1048,6 @@ const styles = StyleSheet.create({
   cancelBtn: { paddingVertical: 12, alignItems: "center", marginTop: 6 },
   cancelTxt: { color: "#9aa0a6", fontSize: 14, fontWeight: "600" },
   status: { color: "#9aa0a6", fontSize: 13, marginTop: 16, lineHeight: 19 },
-  recoverBox: {
-    backgroundColor: "#1a1d23",
-    borderRadius: 12,
-    padding: 14,
-    marginTop: 16,
-  },
-  recoverTitle: { color: "#fff", fontSize: 15, fontWeight: "700" },
-  recoverHint: { color: "#9aa0a6", fontSize: 12, marginTop: 4, lineHeight: 17 },
-  recoverRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    backgroundColor: "#23262d",
-    borderRadius: 10,
-    padding: 12,
-    marginTop: 10,
-  },
-  recoverTxt: { color: "#e8eaed", fontSize: 13, flex: 1 },
-  recoverAction: { color: "#8ab4f8", fontSize: 13, fontWeight: "700" },
   viewBtn: {
     backgroundColor: "#23262d",
     padding: 14,

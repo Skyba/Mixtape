@@ -30,6 +30,13 @@ import {
 } from "../firebase";
 import { uploadDebugLog } from "../firebase";
 import { exportLog, getLogText } from "../log";
+import {
+  listOrphanAudio,
+  importOrphanAudio,
+  deleteOrphanAudio,
+  CacheAudio,
+} from "../recover";
+import { isRecordingInProgress } from "../recordingFlow";
 import { DEFAULT_SETTINGS, Settings } from "../types";
 import type { RootStackParamList } from "../../App";
 
@@ -134,10 +141,63 @@ export default function SettingsScreen() {
   const [authEmail, setAuthEmail] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
 
+  const [orphans, setOrphans] = useState<CacheAudio[]>([]);
+  const [cacheBusy, setCacheBusy] = useState("");
+
   useEffect(() => {
     getSettings().then(setS);
+    refreshOrphans();
     return subscribeAuth(setAuthEmail);
   }, []);
+
+  async function refreshOrphans() {
+    // Never list the take that's being recorded right now — it lives in the
+    // same cache directory and is very much still wanted.
+    if (isRecordingInProgress()) return setOrphans([]);
+    try {
+      setOrphans(await listOrphanAudio());
+    } catch {
+      setOrphans([]);
+    }
+  }
+
+  async function importOrphan(o: CacheAudio) {
+    setCacheBusy("Importing…");
+    try {
+      const rec = await importOrphanAudio(o.uri, s);
+      await refreshOrphans();
+      setCacheBusy("");
+      Alert.alert(
+        "Recovered",
+        `Saved as "${rec.base}".\n\nOpen it in the library to set the speakers, then transcribe.`
+      );
+    } catch (e: any) {
+      setCacheBusy("");
+      Alert.alert("Import failed", String(e?.message ?? e));
+    }
+  }
+
+  function clearCachedAudio() {
+    const mb = orphans.reduce((n, o) => n + o.size, 0) / 1048576;
+    Alert.alert(
+      "Delete cached audio?",
+      `${orphans.length} file(s), ${mb.toFixed(1)} MB. Any recording you haven't imported is gone for good.`,
+      [
+        { text: "Keep", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            setCacheBusy("Deleting…");
+            const freed = await deleteOrphanAudio(orphans);
+            await refreshOrphans();
+            setCacheBusy("");
+            Alert.alert("Cleared", `${(freed / 1048576).toFixed(1)} MB freed.`);
+          },
+        },
+      ]
+    );
+  }
 
   async function save() {
     await saveSettings(s);
@@ -288,6 +348,53 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
+      <TouchableOpacity
+        style={[styles.updateBtn, { marginTop: 10 }]}
+        onPress={refreshOrphans}
+      >
+        <Ionicons name="refresh-outline" size={18} color="#fff" />
+        <Text style={styles.saveTxt}>
+          {orphans.length
+            ? `Unsaved audio in cache (${orphans.length})`
+            : "Check for unsaved audio"}
+        </Text>
+      </TouchableOpacity>
+      <Text style={styles.hint}>
+        Recordings that were discarded or never saved. Android clears this cache
+        on its own when storage runs low.
+      </Text>
+
+      {orphans.map((o) => (
+        <TouchableOpacity
+          key={o.uri}
+          style={styles.cacheRow}
+          onPress={() => importOrphan(o)}
+          disabled={!!cacheBusy}
+        >
+          <Text style={styles.cacheTxt}>
+            {o.modTime ? new Date(o.modTime).toLocaleString() : "unknown time"}
+            {" · "}
+            {(o.size / 1048576).toFixed(1)} MB
+          </Text>
+          <Text style={styles.cacheAction}>Import →</Text>
+        </TouchableOpacity>
+      ))}
+
+      {orphans.length ? (
+        <TouchableOpacity
+          style={[styles.updateBtn, { marginTop: 10 }]}
+          onPress={clearCachedAudio}
+          disabled={!!cacheBusy}
+        >
+          <Ionicons name="trash-outline" size={18} color="#f28b82" />
+          <Text style={[styles.saveTxt, { color: "#f28b82" }]}>
+            Clear cached audio (
+            {(orphans.reduce((n, o) => n + o.size, 0) / 1048576).toFixed(1)} MB)
+          </Text>
+        </TouchableOpacity>
+      ) : null}
+      {cacheBusy ? <Text style={styles.hint}>{cacheBusy}</Text> : null}
+
       <Text style={styles.label}>App</Text>
       <TouchableOpacity
         style={styles.updateBtn}
@@ -431,4 +538,15 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   devRow: { flexDirection: "row", gap: 10 },
+  cacheRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#23262d",
+    borderRadius: 10,
+    padding: 12,
+    marginTop: 8,
+  },
+  cacheTxt: { color: "#e8eaed", fontSize: 13, flex: 1 },
+  cacheAction: { color: "#8ab4f8", fontSize: 13, fontWeight: "700" },
 });

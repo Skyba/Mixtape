@@ -53,6 +53,16 @@ async function flushLog(): Promise<void> {
 // foreground/launch retry never double-transcribes one that's already in flight.
 const activeTranscriptions = new Set<string>();
 let retryInFlight = false;
+
+// Set while the recorder is running. The in-progress take lives in the cache
+// directory like any other, so the cache tools must not offer to delete it.
+let recording = false;
+export function setRecordingInProgress(v: boolean): void {
+  recording = v;
+}
+export function isRecordingInProgress(): boolean {
+  return recording;
+}
 // "error" recordings retried at most once per app session (avoid loops on a
 // genuinely bad file), unlike "pending" which retries every foreground.
 const erroredRetried = new Set<string>();
