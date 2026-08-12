@@ -544,8 +544,9 @@ exports.startTranscription = onObjectFinalized(
       const body = { audio_url: signed, speaker_labels: true };
       // Without a count AAI can split one person into two labels; the extra
       // letter has no name to bind to and renders as "Speaker D". A max (not an
-      // exact count) still allows a named participant to stay silent.
-      if (meta.speakers.length) {
+      // exact count) still allows a named participant to stay silent. Never cap
+      // at 1 — that merges a whole conversation into a single blob.
+      if (meta.speakers.length > 1) {
         body.speaker_options = { max_speakers_expected: meta.speakers.length };
       }
       const lang = LANG_CODES[meta.language];

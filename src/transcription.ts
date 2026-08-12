@@ -97,7 +97,9 @@ async function transcribeUrl(
   // two labels — the extra letter has no name to bind to and renders as
   // "Speaker D". A max (rather than exact speakers_expected) still allows a
   // named participant to stay silent; the two options are mutually exclusive.
-  if (rec.speakers.length) {
+  // Never cap at 1: that merges a real conversation into a single blob, and a
+  // one-speaker selection is more often a stale default than the truth.
+  if (rec.speakers.length > 1) {
     body.speaker_options = { max_speakers_expected: rec.speakers.length };
   }
   if (langCode) body.language_code = langCode;
@@ -202,7 +204,7 @@ export async function diarizeFromUrl(
     audio_url: audioUrl,
     speaker_labels: true,
   };
-  if (speakerCount) {
+  if (speakerCount > 1) {
     body.speaker_options = { max_speakers_expected: speakerCount };
   }
   if (langCode) body.language_code = langCode;
