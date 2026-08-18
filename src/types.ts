@@ -20,7 +20,9 @@ export type Recording = {
   estCostUsd?: number; // estimated, audioDuration * rate
   summary?: string; // last AI summary output
   shareId?: string; // set when published to a public link
-  mergePending?: { id: string; count: number }; // live segments awaiting cloud merge
+  // live segments awaiting cloud merge. `segments` are the local cache files,
+  // kept so the merge can be retried even if their upload was interrupted.
+  mergePending?: { id: string; count: number; segments?: string[] };
 };
 
 export type Settings = {

@@ -164,7 +164,7 @@ export default function SettingsScreen() {
   async function importOrphan(o: CacheAudio) {
     setCacheBusy("Importing…");
     try {
-      const rec = await importOrphanAudio(o.uri, s);
+      const rec = await importOrphanAudio(o, s);
       await refreshOrphans();
       setCacheBusy("");
       Alert.alert(
@@ -375,6 +375,7 @@ export default function SettingsScreen() {
             {o.modTime ? new Date(o.modTime).toLocaleString() : "unknown time"}
             {" · "}
             {(o.size / 1048576).toFixed(1)} MB
+            {o.segments ? ` · live, ${o.segments.length} segments` : ""}
           </Text>
           <Text style={styles.cacheAction}>Import →</Text>
         </TouchableOpacity>

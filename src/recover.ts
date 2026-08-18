@@ -1,13 +1,19 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { listRecordings, audioPath } from "./recordings";
-import { processStop } from "./recordingFlow";
+import { processStop, processStopLive } from "./recordingFlow";
 import { INBOX, Recording, Settings } from "./types";
 
 export type CacheAudio = {
   uri: string;
   size: number;
   modTime: number; // ms
+  // A live session records in 20-second segments, so one conversation is
+  // hundreds of files. They're grouped into a single entry, in order.
+  segments?: string[];
 };
+
+// Live segment files: seg_<sessionId>_<index>.m4a (see RecordScreen).
+const SEG_RE = /^seg_(\d+)_(\d+)\.m4a$/;
 
 const AUDIO_RE = /\.(m4a|mp4|aac|wav|caf|3gp)$/i;
 
@@ -56,6 +62,30 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
   const found: CacheAudio[] = [];
   await scan(root, 2, found);
 
+  // Collapse each live session's segments into one row, ordered by index.
+  const sessions = new Map<string, { idx: number; f: CacheAudio }[]>();
+  const singles: CacheAudio[] = [];
+  for (const f of found) {
+    const m = SEG_RE.exec(f.uri.split("/").pop() ?? "");
+    if (m) {
+      const list = sessions.get(m[1]) ?? [];
+      list.push({ idx: Number(m[2]), f });
+      sessions.set(m[1], list);
+    } else {
+      singles.push(f);
+    }
+  }
+  const grouped: CacheAudio[] = [];
+  for (const parts of sessions.values()) {
+    parts.sort((a, b) => a.idx - b.idx);
+    grouped.push({
+      uri: parts[0].f.uri,
+      size: parts.reduce((n, p) => n + p.f.size, 0),
+      modTime: Math.max(...parts.map((p) => p.f.modTime)),
+      segments: parts.map((p) => p.f.uri),
+    });
+  }
+
   const saved = new Set<number>();
   for (const r of await listRecordings()) {
     try {
@@ -65,9 +95,9 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
       /* missing audio — nothing to match against */
     }
   }
-  return found
-    .filter((f) => !saved.has(f.size))
-    .sort((a, b) => b.modTime - a.modTime);
+  return [...singles.filter((f) => !saved.has(f.size)), ...grouped].sort(
+    (a, b) => b.modTime - a.modTime
+  );
 }
 
 /**
@@ -77,11 +107,28 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
  * the speakers on the recording's own page, then transcribe from there.
  */
 export async function importOrphanAudio(
-  uri: string,
+  file: CacheAudio,
   settings: Settings
 ): Promise<Recording> {
+  if (file.segments) {
+    // A live session: the segments have to be stitched back together in the
+    // cloud, which is exactly what the normal live-stop path does.
+    const rec = await processStopLive({
+      segmentUris: file.segments,
+      liveText: "",
+      durationSeconds: 0,
+      speakers: [],
+      folder: INBOX,
+      language: "",
+      settings,
+    });
+    // Only drop the cache copies once the merge has actually landed — until
+    // then they're the only complete copy of the audio.
+    if (!rec.mergePending) await deleteOrphanAudio([file]);
+    return rec;
+  }
   return processStop({
-    cacheUri: uri,
+    cacheUri: file.uri,
     durationSeconds: 0, // filled in from the transcript
     plannedDurationHours: 0,
     speakers: [],
@@ -91,16 +138,18 @@ export async function importOrphanAudio(
   });
 }
 
-/** Deletes the given cache files. Returns the bytes reclaimed. */
+/** Deletes the given cache files (all segments, for a live session). */
 export async function deleteOrphanAudio(files: CacheAudio[]): Promise<number> {
   let freed = 0;
   for (const f of files) {
-    try {
-      await FileSystem.deleteAsync(f.uri, { idempotent: true });
-      freed += f.size;
-    } catch {
-      /* already gone or not ours to delete */
+    for (const uri of f.segments ?? [f.uri]) {
+      try {
+        await FileSystem.deleteAsync(uri, { idempotent: true });
+      } catch {
+        /* already gone or not ours to delete */
+      }
     }
+    freed += f.size;
   }
   return freed;
 }

@@ -154,6 +154,9 @@ export default function RecordScreen() {
   const elapsedRef = useRef(0);
   const startMsRef = useRef(0);
   const recordingRef = useRef(false); // true only during a normal (non-live) take
+  const pausedRef = useRef(false); // live mode: stop the segment chain at a roll
+  const pausedMsRef = useRef(0); // live mode: total time spent paused
+  const pauseStartRef = useRef(0);
   const capFiredRef = useRef(false); // native forDuration cap ended the take
   const durationRef = useRef(durationH);
   useEffect(() => {
@@ -204,7 +207,9 @@ export default function RecordScreen() {
       // JS engine was suspended.
       let secs = elapsedRef.current + 1;
       if (liveOn.current) {
-        secs = Math.floor((Date.now() - startMsRef.current) / 1000);
+        secs = Math.floor(
+          (Date.now() - startMsRef.current - pausedMsRef.current) / 1000
+        );
       } else {
         try {
           secs = Math.floor((recorder.getStatus().durationMillis || 0) / 1000);
@@ -318,6 +323,8 @@ export default function RecordScreen() {
     segTextRef.current = [];
     recIdRef.current = String(new Date().getTime());
     startMsRef.current = Date.now();
+    pausedRef.current = false;
+    pausedMsRef.current = 0;
     liveShareId.current = null;
     liveOn.current = true;
     await activateKeepAwakeAsync();
@@ -389,7 +396,9 @@ export default function RecordScreen() {
       }
     }
 
-    if (!isFinal && liveOn.current) recordSegment(); // start next immediately
+    // Start the next segment immediately — unless we're rolling *because* of a
+    // pause, in which case the chain resumes on the Resume tap.
+    if (!isFinal && liveOn.current && !pausedRef.current) recordSegment();
 
     if (dest) {
       const job = transcribeClipText(dest, language, settings)
@@ -506,6 +515,7 @@ export default function RecordScreen() {
   }
 
   function pause() {
+    if (liveOn.current) return pauseLive();
     stopTick();
     try {
       recorder.pause();
@@ -513,7 +523,30 @@ export default function RecordScreen() {
     setPaused(true);
   }
 
+  /**
+   * Live mode can't just pause the recorder: the segment currently being
+   * recorded would sit unfinished and its audio would be lost. Roll it as a
+   * normal segment instead (so it still gets transcribed into the live text),
+   * and hold the chain until Resume.
+   */
+  async function pauseLive() {
+    pausedRef.current = true;
+    pauseStartRef.current = Date.now();
+    setPaused(true);
+    stopTick();
+    await rollSegment(false);
+  }
+
+  function resumeLive() {
+    pausedMsRef.current += Date.now() - pauseStartRef.current;
+    pausedRef.current = false;
+    setPaused(false);
+    startTick();
+    recordSegment();
+  }
+
   function resume() {
+    if (liveOn.current) return resumeLive();
     try {
       // Re-arm the native cap for the time that's left, so the limit still holds
       // after a pause/resume.
@@ -898,14 +931,7 @@ export default function RecordScreen() {
 
       {isRecording ? (
         <>
-          {liveOn.current ? (
-            <TouchableOpacity
-              style={[styles.recBtn, styles.recBtnOn]}
-              onPress={stop}
-            >
-              <Text style={styles.recTxt}>Stop & save</Text>
-            </TouchableOpacity>
-          ) : (
+          {(
             <View style={styles.controlRow}>
               <TouchableOpacity
                 style={[styles.pauseBtn]}

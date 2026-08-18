@@ -312,42 +312,17 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
     `live stop id=${id} segments=${args.segmentUris.length} dur=${args.durationSeconds}s signed=${isSignedIn()}`
   );
 
-  let audioUri = args.segmentUris[0];
-  let mergePending: { id: string; count: number } | undefined;
-  if (
-    isFirebaseConfigured &&
-    isSignedIn() &&
-    args.segmentUris.length > 1
-  ) {
-    try {
-      // Upload every segment first — these ARE the audio and stay safe in the
-      // cloud even if the merge step fails, so nothing is lost.
-      const remote: string[] = [];
-      for (let i = 0; i < args.segmentUris.length; i++) {
-        const p = liveSegmentPath(id, i);
-        await uploadToPath(args.segmentUris[i], p);
-        remote.push(p);
-      }
-      logEvent(`uploaded ${remote.length} segments, merging…`);
-      await mergeAudioSegments(remote, liveMergedPath(id));
-      const local = `${FileSystem.cacheDirectory}merged_${id}.m4a`;
-      if (await downloadRemoteFile(liveMergedPath(id), local)) {
-        audioUri = local;
-        logEvent("merge ok, downloaded merged file");
-      } else {
-        mergePending = { id, count: args.segmentUris.length };
-        logEvent("merge done but download failed → mergePending");
-      }
-    } catch (e: any) {
-      // merge/download failed, but segments are uploaded → recoverable.
-      mergePending = { id, count: args.segmentUris.length };
-      logEvent(`merge ERROR → mergePending: ${String(e?.message ?? e)}`);
-    }
-  }
-
+  const cloudMerge =
+    isFirebaseConfigured && isSignedIn() && args.segmentUris.length > 1;
   const hasTranscript = !!args.liveText.trim();
+
+  // Save FIRST, from the first segment. Uploading 200+ segments and waiting on
+  // the cloud merge takes minutes, and doing that before the save meant an app
+  // kill anywhere in there lost the entire recording — no library entry, no
+  // transcript, just orphaned segments in the cache. Now the entry always
+  // exists and the audio is upgraded in place once the merge lands.
   let rec = await saveNewRecording(
-    audioUri,
+    args.segmentUris[0],
     base,
     {
       id,
@@ -361,7 +336,9 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       transcriptStatus: hasTranscript ? "done" : "none",
       uploadStatus: "pending",
       shareId: args.shareId,
-      mergePending,
+      mergePending: cloudMerge
+        ? { id, count: args.segmentUris.length, segments: args.segmentUris }
+        : undefined,
     },
     args.folder
   );
@@ -371,10 +348,37 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
     await writeMeta(rec);
   }
 
+  if (cloudMerge) {
+    try {
+      // The segments ARE the audio — once uploaded they're safe in the cloud
+      // even if the merge itself fails.
+      const remote: string[] = [];
+      for (let i = 0; i < args.segmentUris.length; i++) {
+        const p = liveSegmentPath(id, i);
+        await uploadToPath(args.segmentUris[i], p);
+        remote.push(p);
+      }
+      logEvent(`uploaded ${remote.length} segments, merging…`);
+      await mergeAudioSegments(remote, liveMergedPath(id));
+      const local = `${FileSystem.cacheDirectory}merged_${id}.m4a`;
+      if (await downloadRemoteFile(liveMergedPath(id), local)) {
+        await FileSystem.copyAsync({ from: local, to: audioPath(rec) });
+        rec = { ...rec, mergePending: undefined };
+        await writeMeta(rec);
+        logEvent("merge ok, downloaded merged file");
+      } else {
+        logEvent("merge done but download failed → mergePending");
+      }
+    } catch (e: any) {
+      // Recoverable: retryPendingMerges finishes this on the next launch.
+      logEvent(`merge ERROR → mergePending: ${String(e?.message ?? e)}`);
+    }
+  }
+
   rec = await tryUpload(rec, args.settings);
   await writeMeta(rec);
   await notify(
-    mergePending ? "Saved — finishing audio…" : "Live recording saved",
+    rec.mergePending ? "Saved — finishing audio…" : "Live recording saved",
     rec.base
   );
   await flushLog();
@@ -392,7 +396,19 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
       const remote = Array.from({ length: mp.count }, (_, i) =>
         liveSegmentPath(mp.id, i)
       );
-      await mergeAudioSegments(remote, liveMergedPath(mp.id));
+      try {
+        await mergeAudioSegments(remote, liveMergedPath(mp.id));
+      } catch (e) {
+        // The upload can now be interrupted (the recording is saved before it
+        // runs), leaving gaps the merge chokes on. Push the local copies again.
+        if (!mp.segments) throw e;
+        logEvent(`merge failed, re-uploading ${mp.segments.length} segments`);
+        for (let i = 0; i < mp.segments.length; i++) {
+          const info = await FileSystem.getInfoAsync(mp.segments[i]);
+          if (info.exists) await uploadToPath(mp.segments[i], liveSegmentPath(mp.id, i));
+        }
+        await mergeAudioSegments(remote, liveMergedPath(mp.id));
+      }
       const local = `${FileSystem.cacheDirectory}merged_${mp.id}.m4a`;
       if (await downloadRemoteFile(liveMergedPath(mp.id), local)) {
         await FileSystem.copyAsync({ from: local, to: audioPath(r) });
