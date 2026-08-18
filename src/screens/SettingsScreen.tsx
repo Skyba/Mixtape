@@ -33,7 +33,7 @@ import { exportLog, getLogText } from "../log";
 import {
   listOrphanAudio,
   importOrphanAudio,
-  deleteOrphanAudio,
+  clearAllCacheAudio,
   CacheAudio,
 } from "../recover";
 import { isRecordingInProgress } from "../recordingFlow";
@@ -143,12 +143,20 @@ export default function SettingsScreen() {
 
   const [orphans, setOrphans] = useState<CacheAudio[]>([]);
   const [cacheBusy, setCacheBusy] = useState("");
+  const [cacheOpen, setCacheOpen] = useState(false);
 
   useEffect(() => {
     getSettings().then(setS);
-    refreshOrphans();
     return subscribeAuth(setAuthEmail);
   }, []);
+
+  // Scanning the cache tree costs a stat per file, so it only runs when the
+  // section is actually opened.
+  function toggleCache() {
+    const next = !cacheOpen;
+    setCacheOpen(next);
+    if (next) refreshOrphans();
+  }
 
   async function refreshOrphans() {
     // Never list the take that's being recorded right now — it lives in the
@@ -181,7 +189,7 @@ export default function SettingsScreen() {
     const mb = orphans.reduce((n, o) => n + o.size, 0) / 1048576;
     Alert.alert(
       "Delete cached audio?",
-      `${orphans.length} file(s), ${mb.toFixed(1)} MB. Any recording you haven't imported is gone for good.`,
+      `Frees the ${mb.toFixed(1)} MB listed here plus the recorder's working copies. Any recording you haven't imported is gone for good.`,
       [
         { text: "Keep", style: "cancel" },
         {
@@ -189,7 +197,7 @@ export default function SettingsScreen() {
           style: "destructive",
           onPress: async () => {
             setCacheBusy("Deleting…");
-            const freed = await deleteOrphanAudio(orphans);
+            const freed = await clearAllCacheAudio();
             await refreshOrphans();
             setCacheBusy("");
             Alert.alert("Cleared", `${(freed / 1048576).toFixed(1)} MB freed.`);
@@ -350,51 +358,63 @@ export default function SettingsScreen() {
 
       <TouchableOpacity
         style={[styles.updateBtn, { marginTop: 10 }]}
-        onPress={refreshOrphans}
+        onPress={toggleCache}
       >
-        <Ionicons name="refresh-outline" size={18} color="#fff" />
-        <Text style={styles.saveTxt}>
-          {orphans.length
-            ? `Unsaved audio in cache (${orphans.length})`
-            : "Check for unsaved audio"}
-        </Text>
+        <Ionicons
+          name={cacheOpen ? "chevron-down" : "chevron-forward"}
+          size={18}
+          color="#fff"
+        />
+        <Text style={styles.saveTxt}>Unsaved audio in cache</Text>
       </TouchableOpacity>
-      <Text style={styles.hint}>
-        Recordings that were discarded or never saved. Android clears this cache
-        on its own when storage runs low.
-      </Text>
 
-      {orphans.map((o) => (
-        <TouchableOpacity
-          key={o.uri}
-          style={styles.cacheRow}
-          onPress={() => importOrphan(o)}
-          disabled={!!cacheBusy}
-        >
-          <Text style={styles.cacheTxt}>
-            {o.modTime ? new Date(o.modTime).toLocaleString() : "unknown time"}
-            {" · "}
-            {(o.size / 1048576).toFixed(1)} MB
-            {o.segments ? ` · live, ${o.segments.length} segments` : ""}
+      {cacheOpen ? (
+        <>
+          <Text style={styles.hint}>
+            Recordings that were discarded or never saved. Android clears this
+            cache on its own when storage runs low.
           </Text>
-          <Text style={styles.cacheAction}>Import →</Text>
-        </TouchableOpacity>
-      ))}
 
-      {orphans.length ? (
-        <TouchableOpacity
-          style={[styles.updateBtn, { marginTop: 10 }]}
-          onPress={clearCachedAudio}
-          disabled={!!cacheBusy}
-        >
-          <Ionicons name="trash-outline" size={18} color="#f28b82" />
-          <Text style={[styles.saveTxt, { color: "#f28b82" }]}>
-            Clear cached audio (
-            {(orphans.reduce((n, o) => n + o.size, 0) / 1048576).toFixed(1)} MB)
-          </Text>
-        </TouchableOpacity>
+          {orphans.map((o) => (
+            <TouchableOpacity
+              key={o.uri}
+              style={styles.cacheRow}
+              onPress={() => importOrphan(o)}
+              disabled={!!cacheBusy}
+            >
+              <Text style={styles.cacheTxt}>
+                {o.modTime
+                  ? new Date(o.modTime).toLocaleString()
+                  : "unknown time"}
+                {" · "}
+                {(o.size / 1048576).toFixed(1)} MB
+                {o.segments ? ` · live, ${o.segments.length} segments` : ""}
+              </Text>
+              <Text style={styles.cacheAction}>Import →</Text>
+            </TouchableOpacity>
+          ))}
+
+          {orphans.length ? (
+            <TouchableOpacity
+              style={[styles.updateBtn, { marginTop: 10 }]}
+              onPress={clearCachedAudio}
+              disabled={!!cacheBusy}
+            >
+              <Ionicons name="trash-outline" size={18} color="#f28b82" />
+              <Text style={[styles.saveTxt, { color: "#f28b82" }]}>
+                Clear cached audio (
+                {(orphans.reduce((n, o) => n + o.size, 0) / 1048576).toFixed(1)}{" "}
+                MB)
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <Text style={styles.hint}>
+              {cacheBusy ? "" : "Nothing unsaved — everything is in your library."}
+            </Text>
+          )}
+          {cacheBusy ? <Text style={styles.hint}>{cacheBusy}</Text> : null}
+        </>
       ) : null}
-      {cacheBusy ? <Text style={styles.hint}>{cacheBusy}</Text> : null}
 
       <Text style={styles.label}>App</Text>
       <TouchableOpacity

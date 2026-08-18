@@ -75,7 +75,7 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
       singles.push(f);
     }
   }
-  const grouped: CacheAudio[] = [];
+  const grouped: (CacheAudio & { parts: CacheAudio[] })[] = [];
   for (const parts of sessions.values()) {
     parts.sort((a, b) => a.idx - b.idx);
     grouped.push({
@@ -83,6 +83,7 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
       size: parts.reduce((n, p) => n + p.f.size, 0),
       modTime: Math.max(...parts.map((p) => p.f.modTime)),
       segments: parts.map((p) => p.f.uri),
+      parts: parts.map((p) => p.f),
     });
   }
 
@@ -95,9 +96,15 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
       /* missing audio — nothing to match against */
     }
   }
-  return [...singles.filter((f) => !saved.has(f.size)), ...grouped].sort(
-    (a, b) => b.modTime - a.modTime
-  );
+  // Every segment exists twice: our seg_* copy and the recorder's own file it
+  // was copied from. Same bytes, same 20 seconds — list it once.
+  const segSizes = new Set<number>();
+  for (const g of grouped) for (const p of g.parts) segSizes.add(p.size);
+
+  return [
+    ...singles.filter((f) => !saved.has(f.size) && !segSizes.has(f.size)),
+    ...grouped.map(({ parts, ...g }) => g),
+  ].sort((a, b) => b.modTime - a.modTime);
 }
 
 /**
@@ -136,6 +143,27 @@ export async function importOrphanAudio(
     language: "", // empty = let AssemblyAI detect it
     settings,
   });
+}
+
+/**
+ * Deletes every audio file in the cache — including the recorder's own copies
+ * that the listing hides as duplicates. Returns the bytes reclaimed.
+ */
+export async function clearAllCacheAudio(): Promise<number> {
+  const root = FileSystem.cacheDirectory;
+  if (!root) return 0;
+  const found: CacheAudio[] = [];
+  await scan(root, 2, found);
+  let freed = 0;
+  for (const f of found) {
+    try {
+      await FileSystem.deleteAsync(f.uri, { idempotent: true });
+      freed += f.size;
+    } catch {
+      /* already gone or not ours to delete */
+    }
+  }
+  return freed;
 }
 
 /** Deletes the given cache files (all segments, for a live session). */
