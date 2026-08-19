@@ -338,6 +338,18 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         </View>
       ) : null}
 
+      {rec.damaged ? (
+        <View style={styles.damagedBox}>
+          <Text style={styles.damagedTitle}>Interrupted recording</Text>
+          <Text style={styles.damagedTxt}>
+            The recorder was killed before it could close this file (phone
+            restart or flat battery), so the audio is there but the index that
+            makes it playable is missing. It won't play or transcribe until
+            it's repaired on a computer.
+          </Text>
+        </View>
+      ) : null}
+
       {isRemote ? (
         <TouchableOpacity style={styles.primary} onPress={downloadFromCloud}>
           <Text style={styles.btnTxt}>⬇ Download from cloud</Text>
@@ -372,7 +384,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
               done && styles.transcribeDone,
               pending && styles.transcribeBusy,
             ]}
-            disabled={pending}
+            disabled={pending || !!rec.damaged}
             onPress={doTranscribe}
           >
             <Text style={styles.btnTxt}>
@@ -608,6 +620,14 @@ function LockBtn({
 
 const styles = StyleSheet.create({
   container: { backgroundColor: "#0f1115", flex: 1, padding: 20, paddingTop: 50 },
+  damagedBox: {
+    backgroundColor: "#3a1d1d",
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 14,
+  },
+  damagedTitle: { color: "#f28b82", fontSize: 15, fontWeight: "700" },
+  damagedTxt: { color: "#e8b4b0", fontSize: 12, marginTop: 6, lineHeight: 17 },
   copiedBanner: {
     color: "#4ade80",
     fontWeight: "700",

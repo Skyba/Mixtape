@@ -70,6 +70,11 @@ import {
 } from "../../modules/mixtape-wakelock";
 
 const SEGMENT_MS = 20000; // live segment length
+// Normal recordings are written in chunks this long. A file is only readable
+// once the recorder closes it, so a process death (phone restart, flat battery)
+// destroys whatever is still open — chunking caps that loss at one chunk
+// instead of the whole session. Chunks are stitched back into one file at stop.
+const SAFETY_CHUNK_MS = 180000; // 3 minutes
 
 // Global audio mode required while recording. The mode is GLOBAL mutable state,
 // so it's re-asserted at every record start — any code that sets the mode
@@ -154,6 +159,9 @@ export default function RecordScreen() {
   const elapsedRef = useRef(0);
   const startMsRef = useRef(0);
   const recordingRef = useRef(false); // true only during a normal (non-live) take
+  const chunkedRef = useRef(false); // normal take recording in safety chunks
+  const segMsRef = useRef(SEGMENT_MS); // current chunk length (live vs safety)
+  const rollingRef = useRef(false); // a roll is in flight; ignore native finishes
   const pausedRef = useRef(false); // live mode: stop the segment chain at a roll
   const pausedMsRef = useRef(0); // live mode: total time spent paused
   const pauseStartRef = useRef(0);
@@ -168,11 +176,22 @@ export default function RecordScreen() {
   // flow that a manual stop() would. Guarded so a manual stop (which clears
   // recordingRef first) and live-mode segment stops don't double-trigger it.
   onRecStatusRef.current = (s: RecordingStatus) => {
-    if (s.isFinished && recordingRef.current && !liveOn.current) {
+    if (!s.isFinished) return;
+    if (recordingRef.current && !liveOn.current && !chunkedRef.current) {
       // Only a native-initiated finish reaches here with recordingRef still
       // true (a manual stop clears it first) — i.e. the forDuration cap.
       capFiredRef.current = true;
       stop();
+      return;
+    }
+    // A chunk hit its native backstop because the JS roll timer was late
+    // (Doze). Roll it now rather than letting the chain die silently.
+    if (
+      (liveOn.current || chunkedRef.current) &&
+      !pausedRef.current &&
+      !rollingRef.current
+    ) {
+      rollSegment(false);
     }
   };
 
@@ -206,7 +225,7 @@ export default function RecordScreen() {
       // counter — so the timer stays correct even when the screen is off and the
       // JS engine was suspended.
       let secs = elapsedRef.current + 1;
-      if (liveOn.current) {
+      if (liveOn.current || chunkedRef.current) {
         secs = Math.floor(
           (Date.now() - startMsRef.current - pausedMsRef.current) / 1000
         );
@@ -277,6 +296,11 @@ export default function RecordScreen() {
       }
       return startLive();
     }
+    // Chunked recording needs the cloud to stitch the pieces back together.
+    // Offline, keep the single-file path: one continuous file is still the most
+    // robust thing available when nothing can merge it afterwards.
+    if (isFirebaseConfigured && isSignedIn()) return startChunked();
+
     try {
       setStatus("");
       setElapsed(0);
@@ -325,6 +349,7 @@ export default function RecordScreen() {
     startMsRef.current = Date.now();
     pausedRef.current = false;
     pausedMsRef.current = 0;
+    segMsRef.current = SEGMENT_MS;
     liveShareId.current = null;
     liveOn.current = true;
     await activateKeepAwakeAsync();
@@ -368,13 +393,16 @@ export default function RecordScreen() {
         // the segment stops itself instead of recording forever. Set above
         // SEGMENT_MS so the normal JS roll always wins and this only fires on a
         // freeze — the same durability the normal-mode forDuration cap gives.
-        recorder.record({ forDuration: Math.round(SEGMENT_MS / 1000) + 10 });
+        recorder.record({
+          forDuration: Math.round(segMsRef.current / 1000) + 10,
+        });
       } catch {}
-      segTimer.current = setTimeout(() => rollSegment(false), SEGMENT_MS);
+      segTimer.current = setTimeout(() => rollSegment(false), segMsRef.current);
     })();
   }
 
   async function rollSegment(isFinal: boolean) {
+    rollingRef.current = true;
     if (segTimer.current) {
       clearTimeout(segTimer.current);
       segTimer.current = null;
@@ -391,6 +419,9 @@ export default function RecordScreen() {
       try {
         await FileSystem.copyAsync({ from: uri, to: dest });
         segUris.current.push(dest);
+        // The recorder's own file is now redundant. Leaving it doubled the
+        // cache and made every chunk show up twice in the recovery list.
+        await FileSystem.deleteAsync(uri, { idempotent: true });
       } catch {
         dest = null;
       }
@@ -398,9 +429,16 @@ export default function RecordScreen() {
 
     // Start the next segment immediately — unless we're rolling *because* of a
     // pause, in which case the chain resumes on the Resume tap.
-    if (!isFinal && liveOn.current && !pausedRef.current) recordSegment();
+    if (
+      !isFinal &&
+      (liveOn.current || chunkedRef.current) &&
+      !pausedRef.current
+    ) {
+      recordSegment();
+    }
+    rollingRef.current = false;
 
-    if (dest) {
+    if (dest && liveOn.current) {
       const job = transcribeClipText(dest, language, settings)
         .then((txt) => {
           if (!txt.trim()) return;
@@ -515,7 +553,7 @@ export default function RecordScreen() {
   }
 
   function pause() {
-    if (liveOn.current) return pauseLive();
+    if (liveOn.current || chunkedRef.current) return pauseSegments();
     stopTick();
     try {
       recorder.pause();
@@ -524,12 +562,12 @@ export default function RecordScreen() {
   }
 
   /**
-   * Live mode can't just pause the recorder: the segment currently being
+   * A segmented take can't just pause the recorder: the chunk currently being
    * recorded would sit unfinished and its audio would be lost. Roll it as a
-   * normal segment instead (so it still gets transcribed into the live text),
-   * and hold the chain until Resume.
+   * normal chunk instead (so live mode still transcribes it), and hold the
+   * chain until Resume.
    */
-  async function pauseLive() {
+  async function pauseSegments() {
     pausedRef.current = true;
     pauseStartRef.current = Date.now();
     setPaused(true);
@@ -537,7 +575,7 @@ export default function RecordScreen() {
     await rollSegment(false);
   }
 
-  function resumeLive() {
+  function resumeSegments() {
     pausedMsRef.current += Date.now() - pauseStartRef.current;
     pausedRef.current = false;
     setPaused(false);
@@ -546,7 +584,7 @@ export default function RecordScreen() {
   }
 
   function resume() {
-    if (liveOn.current) return resumeLive();
+    if (liveOn.current || chunkedRef.current) return resumeSegments();
     try {
       // Re-arm the native cap for the time that's left, so the limit still holds
       // after a pause/resume.
@@ -576,6 +614,13 @@ export default function RecordScreen() {
 
   async function discard() {
     recordingRef.current = false;
+    if (chunkedRef.current) {
+      chunkedRef.current = false;
+      if (segTimer.current) {
+        clearTimeout(segTimer.current);
+        segTimer.current = null;
+      }
+    }
     if (liveOn.current) {
       liveOn.current = false;
       stopDiarization();
@@ -605,6 +650,7 @@ export default function RecordScreen() {
 
   async function stop() {
     if (liveOn.current) return stopLive();
+    if (chunkedRef.current) return stopChunked();
     if (!recordingRef.current) return; // already stopping/stopped (idempotent)
     recordingRef.current = false;
     stopTick();
@@ -649,6 +695,83 @@ export default function RecordScreen() {
         `Saved: ${rec.base}\nTranscript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
       );
       setLastRec(rec);
+      setSpeakerHist(await getSpeakerHistory());
+      setFolderHist(await getFolders());
+    } catch (e: any) {
+      setStatus("Failed: " + String(e?.message ?? e));
+    }
+  }
+
+  /**
+   * A normal take, written as SAFETY_CHUNK_MS pieces. Each finished chunk is a
+   * complete file on disk, so losing power mid-recording costs the current
+   * chunk instead of everything. Stop stitches them back into one file.
+   */
+  async function startChunked() {
+    try {
+      setStatus("");
+      setElapsed(0);
+      elapsedRef.current = 0;
+      await setAudioModeAsync(RECORDING_AUDIO_MODE);
+      segUris.current = [];
+      segTextRef.current = [];
+      recIdRef.current = String(new Date().getTime());
+      startMsRef.current = Date.now();
+      pausedRef.current = false;
+      pausedMsRef.current = 0;
+      segMsRef.current = SAFETY_CHUNK_MS;
+      chunkedRef.current = true;
+      await activateKeepAwakeAsync();
+      acquireWakelock();
+      logEvent(
+        `start chunked: cap=${durationH}h chunk=${SAFETY_CHUNK_MS / 1000}s`
+      );
+      markRecording(true);
+      setPaused(false);
+      startTick();
+      recordSegment();
+    } catch (e: any) {
+      chunkedRef.current = false;
+      Alert.alert("Could not start", String(e?.message ?? e));
+    }
+  }
+
+  async function stopChunked() {
+    if (!chunkedRef.current) return; // idempotent
+    chunkedRef.current = false;
+    stopTick();
+    const seconds = elapsedRef.current;
+    setPaused(false);
+    setStatus("Finishing last chunk…");
+    await rollSegment(true);
+    deactivateKeepAwake();
+    releaseWakelock();
+    markRecording(false);
+    logEvent(`stop chunked: chunks=${segUris.current.length} dur=${seconds}s`);
+    if (segUris.current.length === 0) {
+      setStatus("No audio captured.");
+      return;
+    }
+    setStatus("Joining chunks & saving…");
+    try {
+      const rec = await processStopLive({
+        segmentUris: segUris.current,
+        liveText: "",
+        durationSeconds: seconds,
+        speakers: resolveSpeakers(),
+        folder,
+        language,
+        settings,
+        transcribeAfterMerge: true,
+      });
+      setLastRec(rec);
+      setStatus(
+        rec.mergePending
+          ? `Saved: ${rec.base}
+Still joining the audio — it finishes on the next launch.`
+          : `Saved: ${rec.base}
+Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
+      );
       setSpeakerHist(await getSpeakerHistory());
       setFolderHist(await getFolders());
     } catch (e: any) {

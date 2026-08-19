@@ -1,5 +1,5 @@
 import * as FileSystem from "expo-file-system/legacy";
-import { listRecordings, audioPath } from "./recordings";
+import { listRecordings, audioPath, writeMeta } from "./recordings";
 import { processStop, processStopLive } from "./recordingFlow";
 import { INBOX, Recording, Settings } from "./types";
 
@@ -7,10 +7,79 @@ export type CacheAudio = {
   uri: string;
   size: number;
   modTime: number; // ms
+  // The recorder was killed before it could finalise this file (phone restart,
+  // battery death) — the audio bytes are there but the MP4 index isn't, so
+  // nothing can play or transcribe it without repair.
+  damaged?: boolean;
   // A live session records in 20-second segments, so one conversation is
   // hundreds of files. They're grouped into a single entry, in order.
   segments?: string[];
 };
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+function b64Bytes(s: string): number[] {
+  const out: number[] = [];
+  let acc = 0;
+  let bits = 0;
+  for (const ch of s) {
+    const v = B64.indexOf(ch);
+    if (v < 0) continue;
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((acc >> bits) & 0xff);
+    }
+  }
+  return out;
+}
+
+async function readBytes(uri: string, position: number, length: number) {
+  const b64 = await FileSystem.readAsStringAsync(uri, {
+    encoding: FileSystem.EncodingType.Base64,
+    position,
+    length,
+  });
+  return b64Bytes(b64);
+}
+
+const be32 = (b: number[], i: number) =>
+  ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
+
+/**
+ * True if the file carries an MP4 index. The recorder streams audio into an
+ * `mdat` box whose size field is a placeholder until it stops and writes
+ * `moov`; if the process is killed first (restart, flat battery) the
+ * placeholder is never patched, so walking the box chain runs off the rails.
+ * That's the signature of an unfinalised recording.
+ */
+export async function isPlayable(uri: string, size: number): Promise<boolean> {
+  try {
+    let pos = 0;
+    for (let i = 0; i < 8; i++) {
+      const h = await readBytes(uri, pos, 16);
+      if (h.length < 8) return false;
+      const type = String.fromCharCode(h[4], h[5], h[6], h[7]);
+      if (type === "moov") return true;
+      let boxSize = be32(h, 0);
+      let header = 8;
+      if (boxSize === 1) {
+        // 64-bit size: the high word is 0 in any real file, but stays as the
+        // writer's placeholder in one that was never closed.
+        if (h.length < 16 || be32(h, 8) !== 0) return false;
+        boxSize = be32(h, 12);
+        header = 16;
+      }
+      if (boxSize < header || pos + boxSize > size) return false;
+      pos += boxSize;
+      if (pos >= size) return false;
+    }
+    return false;
+  } catch {
+    return true; // unreadable for another reason — don't cry wolf
+  }
+}
 
 // Live segment files: seg_<sessionId>_<index>.m4a (see RecordScreen).
 const SEG_RE = /^seg_(\d+)_(\d+)\.m4a$/;
@@ -78,11 +147,19 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
   const grouped: (CacheAudio & { parts: CacheAudio[] })[] = [];
   for (const parts of sessions.values()) {
     parts.sort((a, b) => a.idx - b.idx);
+    // Only the last segment can be unfinalised (the ones before it were closed
+    // when the chain rolled). Drop it from the merge — a truncated tail would
+    // break the concat — but say so, since it's the audio nearest the end.
+    const last = parts[parts.length - 1].f;
+    const tailOk = await isPlayable(last.uri, last.size);
+    const keep = tailOk ? parts : parts.slice(0, -1);
+    if (!keep.length) continue;
     grouped.push({
-      uri: parts[0].f.uri,
-      size: parts.reduce((n, p) => n + p.f.size, 0),
+      uri: keep[0].f.uri,
+      size: keep.reduce((n, p) => n + p.f.size, 0),
       modTime: Math.max(...parts.map((p) => p.f.modTime)),
-      segments: parts.map((p) => p.f.uri),
+      segments: keep.map((p) => p.f.uri),
+      damaged: !tailOk,
       parts: parts.map((p) => p.f),
     });
   }
@@ -101,10 +178,14 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
   const segSizes = new Set<number>();
   for (const g of grouped) for (const p of g.parts) segSizes.add(p.size);
 
-  return [
-    ...singles.filter((f) => !saved.has(f.size) && !segSizes.has(f.size)),
-    ...grouped.map(({ parts, ...g }) => g),
-  ].sort((a, b) => b.modTime - a.modTime);
+  const keptSingles = singles.filter(
+    (f) => !saved.has(f.size) && !segSizes.has(f.size)
+  );
+  for (const f of keptSingles) f.damaged = !(await isPlayable(f.uri, f.size));
+
+  return [...keptSingles, ...grouped.map(({ parts, ...g }) => g)].sort(
+    (a, b) => b.modTime - a.modTime
+  );
 }
 
 /**
@@ -134,7 +215,7 @@ export async function importOrphanAudio(
     if (!rec.mergePending) await deleteOrphanAudio([file]);
     return rec;
   }
-  return processStop({
+  const rec = await processStop({
     cacheUri: file.uri,
     durationSeconds: 0, // filled in from the transcript
     plannedDurationHours: 0,
@@ -143,6 +224,14 @@ export async function importOrphanAudio(
     language: "", // empty = let AssemblyAI detect it
     settings,
   });
+  // Import it either way — the bytes are worth keeping — but don't let it pose
+  // as a normal recording that just happens not to play.
+  if (file.damaged) {
+    const next = { ...rec, damaged: true };
+    await writeMeta(next);
+    return next;
+  }
+  return rec;
 }
 
 /**

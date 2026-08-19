@@ -388,7 +388,8 @@ export default function SettingsScreen() {
                   : "unknown time"}
                 {" · "}
                 {(o.size / 1048576).toFixed(1)} MB
-                {o.segments ? ` · live, ${o.segments.length} segments` : ""}
+                {o.segments ? ` · ${o.segments.length} chunks` : ""}
+                {o.damaged ? " · interrupted" : ""}
               </Text>
               <Text style={styles.cacheAction}>Import →</Text>
             </TouchableOpacity>

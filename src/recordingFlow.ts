@@ -292,6 +292,10 @@ export type LiveStopArgs = {
   language: string;
   settings: Settings;
   shareId?: string; // if live-shared, carry it onto the saved recording
+  // Hand the merged file to the backend for transcription (a chunked normal
+  // take). Only set once the merge lands — otherwise the server would
+  // transcribe the placeholder first chunk.
+  transcribeAfterMerge?: boolean;
 };
 
 /**
@@ -364,7 +368,20 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       if (await downloadRemoteFile(liveMergedPath(id), local)) {
         await FileSystem.copyAsync({ from: local, to: audioPath(rec) });
         rec = { ...rec, mergePending: undefined };
+        if (
+          args.transcribeAfterMerge &&
+          args.speakers.length &&
+          rec.transcriptStatus === "none"
+        ) {
+          rec = { ...rec, transcriptStatus: "pending" };
+        }
         await writeMeta(rec);
+        // Merged and saved — the pieces are no longer the only copy, so don't
+        // leave them filling the cache and posing as unsaved audio.
+        for (const uri of args.segmentUris) {
+          await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+        }
+        await FileSystem.deleteAsync(local, { idempotent: true }).catch(() => {});
         logEvent("merge ok, downloaded merged file");
       } else {
         logEvent("merge done but download failed → mergePending");
@@ -413,6 +430,11 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
       if (await downloadRemoteFile(liveMergedPath(mp.id), local)) {
         await FileSystem.copyAsync({ from: local, to: audioPath(r) });
         const next: Recording = { ...r, mergePending: undefined };
+        // The audio is only now complete, so this is the moment to let the
+        // backend transcribe it.
+        if (next.speakers.length && next.transcriptStatus === "none") {
+          next.transcriptStatus = "pending";
+        }
         await writeMeta(next);
         await tryUpload(next, settings);
         await writeMeta(next);

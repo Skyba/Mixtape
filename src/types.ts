@@ -23,6 +23,9 @@ export type Recording = {
   // live segments awaiting cloud merge. `segments` are the local cache files,
   // kept so the merge can be retried even if their upload was interrupted.
   mergePending?: { id: string; count: number; segments?: string[] };
+  // Recorder killed before it could finalise the file: audio bytes present, no
+  // MP4 index, so it won't play or transcribe until it's repaired.
+  damaged?: boolean;
 };
 
 export type Settings = {
