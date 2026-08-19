@@ -34,6 +34,30 @@ export const FOLDERS: FolderSpec[] = [
   { name: "nllm", tags: ["founder-talk"] },
 ];
 
+/** Starting icon per folder; overridable in Settings ▸ Folder icons. */
+export const DEFAULT_ICONS: Record<string, string> = {
+  Inbox: "📥",
+  self: "🪞",
+  erica: "👩",
+  chainlabs: "⛓️",
+  "cell & sat": "🛰️",
+  retrace: "🔎",
+  volt: "⚡",
+  martin: "🚀",
+  famille: "👨‍👩‍👧",
+  "boys club": "🍻",
+  "olivier coste": "📘",
+  "kim-fundraising": "💰",
+  "varia personal": "🗂️",
+  egypt: "🏜️",
+  nllm: "🤖",
+};
+
+/** Icon for a folder: your override, else the default, else a plain folder. */
+export function iconFor(folder: string, overrides: Record<string, string>): string {
+  return overrides[folder] || DEFAULT_ICONS[folder] || "📁";
+}
+
 const KNOWN = new Set(FOLDERS.map((f) => f.name.toLowerCase()));
 
 /** A folder the archive doesn't know about yet — recordings land at its root. */

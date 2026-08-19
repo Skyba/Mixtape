@@ -14,12 +14,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { Ionicons } from "@expo/vector-icons";
 import {
-  audioPath,
   listRecordings,
   deleteRecording,
   moveToFolder,
 } from "../recordings";
-import AudioPlayerBar from "../components/AudioPlayerBar";
 import {
   isFirebaseConfigured,
   isSignedIn,
@@ -30,15 +28,9 @@ import {
   uploadRecording,
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
-import { getSettings } from "../storage";
+import { iconFor } from "../placement";
+import { getFolderIcons, getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
-
-type SortKey = "newest" | "longest" | "az";
-const SORTS: { key: SortKey; label: string }[] = [
-  { key: "newest", label: "Newest" },
-  { key: "longest", label: "Longest" },
-  { key: "az", label: "A–Z" },
-];
 import type { RootStackParamList } from "../../App";
 
 type Nav = NativeStackNavigationProp<RootStackParamList>;
@@ -49,25 +41,22 @@ export default function LibraryScreen() {
   const [remote, setRemote] = useState<Recording[]>([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [authEmail, setAuthEmail] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [sort, setSort] = useState<SortKey>("newest");
+  const [folderFilter, setFolderFilter] = useState<string | null>(null);
+  const [icons, setIcons] = useState<Record<string, string>>({});
   const insets = useSafeAreaInsets();
 
   useEffect(() => subscribeAuth(setAuthEmail), []);
+  useEffect(() => {
+    getFolderIcons().then(setIcons);
+  }, []);
 
   function sortRecs(arr: Recording[]): Recording[] {
-    const a = [...arr];
-    if (sort === "longest") a.sort((x, y) => y.durationSeconds - x.durationSeconds);
-    else if (sort === "az") a.sort((x, y) => x.base.localeCompare(y.base));
-    else a.sort((x, y) => (y.recordedAt || "").localeCompare(x.recordedAt || ""));
-    return a;
-  }
-
-  function togglePlayer(id: string) {
-    setExpandedId((cur) => (cur === id ? null : id));
+    return [...arr].sort((x, y) =>
+      (y.recordedAt || "").localeCompare(x.recordedAt || "")
+    );
   }
 
   const load = useCallback(async () => {
@@ -94,7 +83,6 @@ export default function LibraryScreen() {
   useFocusEffect(
     useCallback(() => {
       load();
-      return () => setExpandedId(null);
     }, [load])
   );
 
@@ -125,7 +113,6 @@ export default function LibraryScreen() {
           text: "Delete",
           style: "destructive",
           onPress: async () => {
-            setExpandedId((id) => (id === rec.id ? null : id));
             setMsg("Deleting…");
             try {
               if (!isRemoteOnly) await deleteRecording(rec);
@@ -173,7 +160,6 @@ export default function LibraryScreen() {
           text: "Delete",
           style: "destructive",
           onPress: async () => {
-            setExpandedId(null);
             setMsg(`Deleting ${targets.length}…`);
             for (const r of targets) {
               const isRemoteOnly = !local.some((l) => l.id === r.id);
@@ -282,19 +268,33 @@ export default function LibraryScreen() {
       {msg ? <Text style={styles.msg}>{msg}</Text> : null}
       {hasAny && !selectMode ? (
         <View style={styles.sortRow}>
-          {SORTS.map((s) => (
+          <TouchableOpacity
+            style={[styles.sortChip, !folderFilter && styles.sortChipOn]}
+            onPress={() => setFolderFilter(null)}
+          >
+            <Text
+              style={[
+                styles.sortChipTxt,
+                !folderFilter && styles.sortChipTxtOn,
+              ]}
+            >
+              all {local.length}
+            </Text>
+          </TouchableOpacity>
+          {folders.map((f) => (
             <TouchableOpacity
-              key={s.key}
-              style={[styles.sortChip, sort === s.key && styles.sortChipOn]}
-              onPress={() => setSort(s.key)}
+              key={f}
+              style={[styles.sortChip, folderFilter === f && styles.sortChipOn]}
+              onPress={() => setFolderFilter(folderFilter === f ? null : f)}
             >
               <Text
                 style={[
                   styles.sortChipTxt,
-                  sort === s.key && styles.sortChipTxtOn,
+                  folderFilter === f && styles.sortChipTxtOn,
                 ]}
               >
-                {s.label}
+                {iconFor(f, icons)} {f}{" "}
+                {local.filter((r) => r.folder === f).length}
               </Text>
             </TouchableOpacity>
           ))}
@@ -304,23 +304,19 @@ export default function LibraryScreen() {
         <ActivityIndicator color="#fff" style={{ marginTop: 40 }} />
       ) : null}
 
-      {folders.map((folder) => (
-        <View key={folder}>
-          <Text style={styles.section}>{folder}</Text>
-          {sortRecs(local.filter((r) => r.folder === folder)).map((r) => (
-              <Row
-                key={r.id}
-                rec={r}
-                playing={expandedId === r.id}
-                onPlay={() => togglePlayer(r.id)}
-                onPress={() => navigation.navigate("Detail", { rec: r })}
-                onDelete={() => remove(r, false)}
-                selectMode={selectMode}
-                selected={selected.has(r.id)}
-                onToggle={() => toggleSelect(r.id)}
-              />
-            ))}
-        </View>
+      {sortRecs(
+        folderFilter ? local.filter((r) => r.folder === folderFilter) : local
+      ).map((r) => (
+        <Row
+          key={r.id}
+          rec={r}
+          icon={iconFor(r.folder, icons)}
+          onPress={() => navigation.navigate("Detail", { rec: r })}
+          onDelete={() => remove(r, false)}
+          selectMode={selectMode}
+          selected={selected.has(r.id)}
+          onToggle={() => toggleSelect(r.id)}
+        />
       ))}
 
       {remote.length > 0 && (
@@ -330,6 +326,7 @@ export default function LibraryScreen() {
             <Row
               key={r.id}
               rec={r}
+              icon={iconFor(r.folder, icons)}
               remote
               onPress={() =>
                 navigation.navigate("Detail", { rec: r, remote: true })
@@ -388,20 +385,18 @@ function syncInfo(
 
 function Row({
   rec,
+  icon,
   onPress,
-  onPlay,
   onDelete,
-  playing,
   remote,
   selectMode,
   selected,
   onToggle,
 }: {
   rec: Recording;
+  icon: string;
   onPress: () => void;
-  onPlay?: () => void;
   onDelete?: () => void;
-  playing?: boolean;
   remote?: boolean;
   selectMode?: boolean;
   selected?: boolean;
@@ -424,14 +419,11 @@ function Row({
             color={selected ? "#3b82f6" : "#6b7280"}
           />
         </TouchableOpacity>
-      ) : !remote ? (
-        <TouchableOpacity
-          style={[styles.play, playing && styles.playOn]}
-          onPress={onPlay}
-        >
-          <Text style={styles.playTxt}>{playing ? "⏸" : "▶"}</Text>
-        </TouchableOpacity>
-      ) : null}
+      ) : (
+        <View style={styles.play}>
+          <Text style={styles.folderIcon}>{icon}</Text>
+        </View>
+      )}
       <TouchableOpacity
         style={styles.rowBody}
         onPress={selectMode ? onToggle : onPress}
@@ -441,6 +433,11 @@ function Row({
         </Text>
         <Text style={styles.rowSub} numberOfLines={1}>
           {(rec.speakers ?? []).join(", ") || "no speakers"}
+          {rec.private ? "  🔒" : ""}
+        </Text>
+        <Text style={styles.rowFiling} numberOfLines={1}>
+          {rec.folder}
+          {rec.tags?.length ? `  ${rec.tags.map((t) => `#${t}`).join(" ")}` : ""}
         </Text>
         <View style={styles.metaRow}>
           {date ? <Text style={styles.rowDate}>{date}</Text> : null}
@@ -475,7 +472,6 @@ function Row({
         </TouchableOpacity>
       ) : null}
     </View>
-    {playing && !remote ? <AudioPlayerBar uri={audioPath(rec)} /> : null}
     </View>
   );
 }
@@ -570,6 +566,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   playOn: { backgroundColor: "#3b82f6" },
+  folderIcon: { fontSize: 22 },
+  rowFiling: { color: "#7c828a", fontSize: 11.5, marginTop: 2 },
   playTxt: { color: "#fff", fontSize: 16 },
   rowSel: { backgroundColor: "#1e2740" },
   rowBody: { flex: 1 },

@@ -6,6 +6,7 @@ const K = {
   speakers: "speakerHistory",
   folders: "folderList",
   tags: "folderTags",
+  icons: "folderIcons",
 };
 
 async function getJSON<T>(key: string, fallback: T): Promise<T> {
@@ -50,6 +51,18 @@ export async function rememberSpeakers(items: string[]): Promise<void> {
 
 export async function rememberFolder(folder: string): Promise<void> {
   await mergeHistory(K.folders, [folder]);
+}
+
+/** Folder icon overrides, keyed by folder name. */
+export async function getFolderIcons(): Promise<Record<string, string>> {
+  return getJSON<Record<string, string>>(K.icons, {});
+}
+
+export async function setFolderIcon(folder: string, icon: string): Promise<void> {
+  const all = await getFolderIcons();
+  if (icon.trim()) all[folder] = icon.trim();
+  else delete all[folder];
+  await setJSON(K.icons, all);
 }
 
 /** Tags added by hand, per folder, on top of the routes.json vocabulary. */

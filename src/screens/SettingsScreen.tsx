@@ -37,6 +37,8 @@ import {
   CacheAudio,
 } from "../recover";
 import { isRecordingInProgress } from "../recordingFlow";
+import { FOLDERS, INBOX, iconFor } from "../placement";
+import { getFolderIcons, setFolderIcon } from "../storage";
 import { DEFAULT_SETTINGS, Settings } from "../types";
 import type { RootStackParamList } from "../../App";
 
@@ -144,11 +146,19 @@ export default function SettingsScreen() {
   const [orphans, setOrphans] = useState<CacheAudio[]>([]);
   const [cacheBusy, setCacheBusy] = useState("");
   const [cacheOpen, setCacheOpen] = useState(false);
+  const [icons, setIcons] = useState<Record<string, string>>({});
+  const [iconsOpen, setIconsOpen] = useState(false);
 
   useEffect(() => {
     getSettings().then(setS);
+    getFolderIcons().then(setIcons);
     return subscribeAuth(setAuthEmail);
   }, []);
+
+  async function changeIcon(folder: string, icon: string) {
+    setIcons((cur) => ({ ...cur, [folder]: icon }));
+    await setFolderIcon(folder, icon);
+  }
 
   // Scanning the cache tree costs a stat per file, so it only runs when the
   // section is actually opened.
@@ -358,6 +368,40 @@ export default function SettingsScreen() {
 
       <TouchableOpacity
         style={[styles.updateBtn, { marginTop: 10 }]}
+        onPress={() => setIconsOpen((v) => !v)}
+      >
+        <Ionicons
+          name={iconsOpen ? "chevron-down" : "chevron-forward"}
+          size={18}
+          color="#fff"
+        />
+        <Text style={styles.saveTxt}>Folder icons</Text>
+      </TouchableOpacity>
+
+      {iconsOpen ? (
+        <>
+          <Text style={styles.hint}>
+            Shown on the Record screen and in the library. Any emoji; clear it
+            to go back to the default.
+          </Text>
+          {[INBOX, ...FOLDERS.map((f) => f.name)].map((f) => (
+            <View key={f} style={styles.iconRow}>
+              <TextInput
+                style={styles.iconInput}
+                value={icons[f] ?? ""}
+                onChangeText={(v) => changeIcon(f, v)}
+                placeholder={iconFor(f, {})}
+                placeholderTextColor="#4b5563"
+                maxLength={4}
+              />
+              <Text style={styles.iconName}>{f}</Text>
+            </View>
+          ))}
+        </>
+      ) : null}
+
+      <TouchableOpacity
+        style={[styles.updateBtn, { marginTop: 10 }]}
         onPress={toggleCache}
       >
         <Ionicons
@@ -560,6 +604,17 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   devRow: { flexDirection: "row", gap: 10 },
+  iconRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 8 },
+  iconInput: {
+    width: 56,
+    textAlign: "center",
+    backgroundColor: "#1a1d23",
+    borderRadius: 8,
+    color: "#fff",
+    paddingVertical: 7,
+    fontSize: 18,
+  },
+  iconName: { color: "#c9cdd3", fontSize: 13 },
   cacheRow: {
     flexDirection: "row",
     justifyContent: "space-between",
