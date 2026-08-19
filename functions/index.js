@@ -546,12 +546,15 @@ exports.startTranscription = onObjectFinalized(
         expires: Date.now() + 6 * 60 * 60 * 1000,
       });
       const body = { audio_url: signed, speaker_labels: true };
-      // Without a count AAI can split one person into two labels; the extra
-      // letter has no name to bind to and renders as "Speaker D". A max (not an
-      // exact count) still allows a named participant to stay silent. Never cap
-      // at 1 — that merges a whole conversation into a single blob.
-      if (meta.speakers.length > 1) {
-        body.speaker_options = { max_speakers_expected: meta.speakers.length };
+      // The speaker count is a FLOOR, not just a ceiling: left to itself the
+      // model can return one label for a two-person conversation. The ceiling
+      // is one above, so an unexpected extra voice gets its own label rather
+      // than being merged into someone else. Mirrors src/transcription.ts.
+      if (meta.speakers.length) {
+        body.speaker_options = {
+          min_speakers_expected: Math.max(1, meta.speakers.length),
+          max_speakers_expected: Math.max(2, meta.speakers.length + 1),
+        };
       }
       const lang = LANG_CODES[meta.language];
       if (lang) body.language_code = lang;

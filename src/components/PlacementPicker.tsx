@@ -33,20 +33,28 @@ export type Placement = {
 function Chip({
   label,
   on,
-  dim,
+  ghost,
   onPress,
 }: {
   label: string;
   on?: boolean;
-  dim?: boolean;
+  ghost?: boolean;
   onPress: () => void;
 }) {
   return (
     <TouchableOpacity
-      style={[styles.chip, on && styles.chipOn, dim && styles.chipDim]}
+      style={[styles.chip, on && styles.chipOn, ghost && styles.chipGhost]}
       onPress={onPress}
     >
-      <Text style={[styles.chipTxt, on && styles.chipTxtOn]}>{label}</Text>
+      <Text
+        style={[
+          styles.chipTxt,
+          on && styles.chipTxtOn,
+          ghost && styles.chipTxtGhost,
+        ]}
+      >
+        {label}
+      </Text>
     </TouchableOpacity>
   );
 }
@@ -55,7 +63,7 @@ function Chip({
  * Sets where a recording is filed in the transcript archive: folder, privacy
  * and tags. Folders come from a hand-kept mirror of routes.json; tags are that
  * folder's vocabulary, so the row changes with the folder. Everything is a
- * chip — one tap, no dropdowns, and the folder row stays a single line until
+ * chip — one tap, no dropdowns — and the folder row stays a single line until
  * you ask for the full list.
  */
 export default function PlacementPicker({
@@ -91,6 +99,7 @@ export default function PlacementPicker({
   const shown = expanded ? folders : folders.slice(0, COLLAPSED_FOLDERS);
   const tags = [...builtinTags(value.folder), ...(custom[value.folder] ?? [])];
   const forcedPrivate = alwaysPrivate(value.folder);
+  const isPrivate = value.private || forcedPrivate;
 
   function pickFolder(name: string) {
     // Tags belong to a folder's vocabulary, so they don't survive the move.
@@ -137,7 +146,28 @@ export default function PlacementPicker({
   }
 
   return (
-    <View>
+    <View style={styles.card}>
+      <View style={styles.head}>
+        <Text style={styles.section}>FOLDER</Text>
+        <TouchableOpacity
+          style={[styles.lock, isPrivate && styles.lockOn]}
+          onPress={() => {
+            if (forcedPrivate) {
+              Alert.alert(
+                "Always private",
+                `Recordings in "${value.folder}" are private by default in routes.json, and privacy only ever goes up.`
+              );
+              return;
+            }
+            onChange({ ...value, private: !value.private });
+          }}
+        >
+          <Text style={[styles.lockTxt, isPrivate && styles.lockTxtOn]}>
+            {isPrivate ? "🔒 private" : "private"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
       <View style={styles.row}>
         {shown.map((f) => (
           <Chip
@@ -149,40 +179,36 @@ export default function PlacementPicker({
         ))}
         {folders.length > COLLAPSED_FOLDERS ? (
           <Chip
-            label={expanded ? "less" : "···"}
-            dim
+            label={expanded ? "less" : `+${folders.length - COLLAPSED_FOLDERS}`}
+            ghost
             onPress={() => setExpanded((e) => !e)}
           />
         ) : null}
         {expanded ? (
-          <Chip label="+ folder" dim onPress={() => setAdding("folder")} />
+          <Chip label="new folder" ghost onPress={() => setAdding("folder")} />
         ) : null}
       </View>
 
+      {isUnknownFolder(value.folder) ? (
+        <Text style={styles.note}>
+          Not in routes.json — add it there, or the archive files this at the
+          root.
+        </Text>
+      ) : null}
+
+      <View style={styles.divider} />
+
+      <Text style={styles.section}>TAGS</Text>
       <View style={styles.row}>
-          {tags.map((t) => (
-            <Chip
-              key={t}
-              label={t}
-              on={value.tags.includes(t)}
-              onPress={() => toggleTag(t)}
-            />
-          ))}
-          <Chip label="+" dim onPress={() => setAdding("tag")} />
+        {tags.map((t) => (
           <Chip
-            label={value.private || forcedPrivate ? "🔒 private" : "private"}
-            on={value.private || forcedPrivate}
-            onPress={() => {
-              if (forcedPrivate) {
-                Alert.alert(
-                  "Always private",
-                  `Recordings in "${value.folder}" are private by default in routes.json, and privacy can only ever go up.`
-                );
-                return;
-              }
-              onChange({ ...value, private: !value.private });
-            }}
-        />
+            key={t}
+            label={`#${t}`}
+            on={value.tags.includes(t)}
+            onPress={() => toggleTag(t)}
+          />
+        ))}
+        <Chip label="new tag" ghost onPress={() => setAdding("tag")} />
       </View>
 
       {adding ? (
@@ -191,7 +217,7 @@ export default function PlacementPicker({
             style={styles.input}
             value={draft}
             onChangeText={setDraft}
-            placeholder={adding === "folder" ? "new folder" : "new tag"}
+            placeholder={adding === "folder" ? "folder name" : "tag name"}
             placeholderTextColor="#6b7280"
             autoCapitalize="none"
             autoCorrect={false}
@@ -203,33 +229,62 @@ export default function PlacementPicker({
           </TouchableOpacity>
         </View>
       ) : null}
-
-      {isUnknownFolder(value.folder) ? (
-        <Text style={styles.note}>
-          Not in routes.json — add it there or the archive files this at the root.
-        </Text>
-      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 6 },
+  // Its own surface, so filing reads as one block rather than more chips
+  // running on from the speaker list above it.
+  card: {
+    backgroundColor: "#15181d",
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 14,
+  },
+  head: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  section: {
+    color: "#7c828a",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1.1,
+  },
+  divider: { height: 1, backgroundColor: "#23262d", marginTop: 12, marginBottom: 12 },
+  row: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
   chip: {
     backgroundColor: "#23262d",
-    borderRadius: 14,
-    paddingVertical: 5,
-    paddingHorizontal: 10,
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 11,
   },
   chipOn: { backgroundColor: "#2f6fd0" },
-  chipDim: { backgroundColor: "#191c22" },
-  chipTxt: { color: "#c9cdd3", fontSize: 12 },
+  chipGhost: {
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: "#2d323b",
+  },
+  chipTxt: { color: "#c9cdd3", fontSize: 12.5 },
   chipTxtOn: { color: "#fff", fontWeight: "700" },
-  addRow: { flexDirection: "row", gap: 8, marginTop: 8, alignItems: "center" },
+  chipTxtGhost: { color: "#7c828a", fontSize: 12 },
+  lock: {
+    borderRadius: 8,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: "#2d323b",
+  },
+  lockOn: { backgroundColor: "#4a2a2a", borderColor: "#7a3b3b" },
+  lockTxt: { color: "#7c828a", fontSize: 12 },
+  lockTxtOn: { color: "#f28b82", fontWeight: "700" },
+  addRow: { flexDirection: "row", gap: 8, marginTop: 10, alignItems: "center" },
   input: {
     flex: 1,
-    backgroundColor: "#1a1d23",
-    borderRadius: 10,
+    backgroundColor: "#0f1115",
+    borderRadius: 8,
     color: "#fff",
     paddingHorizontal: 12,
     paddingVertical: 8,
@@ -237,10 +292,10 @@ const styles = StyleSheet.create({
   },
   addBtn: {
     backgroundColor: "#2f6fd0",
-    borderRadius: 10,
+    borderRadius: 8,
     paddingHorizontal: 14,
     paddingVertical: 9,
   },
   addTxt: { color: "#fff", fontSize: 13, fontWeight: "700" },
-  note: { color: "#fbbf24", fontSize: 11, marginTop: 6, lineHeight: 15 },
+  note: { color: "#fbbf24", fontSize: 11, marginTop: 8, lineHeight: 15 },
 });

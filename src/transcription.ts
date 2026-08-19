@@ -14,6 +14,21 @@ const LANG_CODES: Record<string, string> = {
   Arabic: "ar",
 };
 
+/**
+ * How many speakers to tell AssemblyAI to expect. The count you set is used as
+ * a FLOOR, not just a ceiling: left to itself the model can return a single
+ * label for a two-person conversation (one 13-minute block, both voices in it),
+ * and a cap alone doesn't prevent that. The ceiling is one above the count so
+ * an unexpected extra voice gets its own label instead of being merged into
+ * someone else — an extra label is fixable in the app, a merge isn't.
+ */
+export function speakerOptions(count: number) {
+  return {
+    min_speakers_expected: Math.max(1, count),
+    max_speakers_expected: Math.max(2, count + 1),
+  };
+}
+
 export type Utterance = {
   speaker: string;
   start: number;
@@ -93,15 +108,7 @@ async function transcribeUrl(
     audio_url: audioUrl,
     speaker_labels: true,
   };
-  // Without this AAI picks its own speaker count and can split one person into
-  // two labels — the extra letter has no name to bind to and renders as
-  // "Speaker D". A max (rather than exact speakers_expected) still allows a
-  // named participant to stay silent; the two options are mutually exclusive.
-  // Never cap at 1: that merges a real conversation into a single blob, and a
-  // one-speaker selection is more often a stale default than the truth.
-  if (rec.speakers.length > 1) {
-    body.speaker_options = { max_speakers_expected: rec.speakers.length };
-  }
+  if (rec.speakers.length) body.speaker_options = speakerOptions(rec.speakers.length);
   if (langCode) body.language_code = langCode;
   else body.language_detection = true;
 
@@ -204,9 +211,7 @@ export async function diarizeFromUrl(
     audio_url: audioUrl,
     speaker_labels: true,
   };
-  if (speakerCount > 1) {
-    body.speaker_options = { max_speakers_expected: speakerCount };
-  }
+  if (speakerCount) body.speaker_options = speakerOptions(speakerCount);
   if (langCode) body.language_code = langCode;
   else body.language_detection = true;
   const create = await fetch(`${AAI}/transcript`, {
