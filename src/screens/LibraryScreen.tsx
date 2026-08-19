@@ -28,8 +28,8 @@ import {
   uploadRecording,
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
-import { iconFor } from "../placement";
-import { getFolderIcons, getSettings } from "../storage";
+import { iconOf, useFolderIcons } from "../folderIcons";
+import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
 import type { RootStackParamList } from "../../App";
 
@@ -45,13 +45,10 @@ export default function LibraryScreen() {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [folderFilter, setFolderFilter] = useState<string | null>(null);
-  const [icons, setIcons] = useState<Record<string, string>>({});
+  const icons = useFolderIcons();
   const insets = useSafeAreaInsets();
 
   useEffect(() => subscribeAuth(setAuthEmail), []);
-  useEffect(() => {
-    getFolderIcons().then(setIcons);
-  }, []);
 
   function sortRecs(arr: Recording[]): Recording[] {
     return [...arr].sort((x, y) =>
@@ -293,7 +290,7 @@ export default function LibraryScreen() {
                   folderFilter === f && styles.sortChipTxtOn,
                 ]}
               >
-                {iconFor(f, icons)} {f}{" "}
+                {iconOf(f, icons)} {f}{" "}
                 {local.filter((r) => r.folder === f).length}
               </Text>
             </TouchableOpacity>
@@ -310,7 +307,7 @@ export default function LibraryScreen() {
         <Row
           key={r.id}
           rec={r}
-          icon={iconFor(r.folder, icons)}
+          icon={iconOf(r.folder, icons)}
           onPress={() => navigation.navigate("Detail", { rec: r })}
           onDelete={() => remove(r, false)}
           selectMode={selectMode}
@@ -326,7 +323,7 @@ export default function LibraryScreen() {
             <Row
               key={r.id}
               rec={r}
-              icon={iconFor(r.folder, icons)}
+              icon={iconOf(r.folder, icons)}
               remote
               onPress={() =>
                 navigation.navigate("Detail", { rec: r, remote: true })

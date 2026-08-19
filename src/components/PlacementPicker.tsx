@@ -12,17 +12,16 @@ import {
   INBOX,
   alwaysPrivate,
   builtinTags,
-  iconFor,
   isUnknownFolder,
   normalizeTag,
 } from "../placement";
 import {
   getCustomTags,
-  getFolderIcons,
   getFolders,
   rememberFolder,
   rememberTag,
 } from "../storage";
+import { iconOf, useFolderIcons } from "../folderIcons";
 
 const COLLAPSED_FOLDERS = 6;
 
@@ -77,7 +76,7 @@ export default function PlacementPicker({
 }) {
   const [history, setHistory] = useState<string[]>([]);
   const [custom, setCustom] = useState<Record<string, string[]>>({});
-  const [icons, setIcons] = useState<Record<string, string>>({});
+  const icons = useFolderIcons();
   const [expanded, setExpanded] = useState(false);
   const [adding, setAdding] = useState<"folder" | "tag" | null>(null);
   const [draft, setDraft] = useState("");
@@ -85,7 +84,6 @@ export default function PlacementPicker({
   useEffect(() => {
     getFolders().then(setHistory);
     getCustomTags().then(setCustom);
-    getFolderIcons().then(setIcons);
   }, []);
 
   // Recently used first, then the rest of the mirror — so the folders actually
@@ -176,7 +174,7 @@ export default function PlacementPicker({
         {shown.map((f) => (
           <Chip
             key={f}
-            label={`${iconFor(f, icons)} ${f}`}
+            label={`${iconOf(f, icons)} ${f}`}
             on={f === value.folder}
             onPress={() => pickFolder(f)}
           />

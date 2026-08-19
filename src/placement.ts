@@ -53,11 +53,6 @@ export const DEFAULT_ICONS: Record<string, string> = {
   nllm: "🤖",
 };
 
-/** Icon for a folder: your override, else the default, else a plain folder. */
-export function iconFor(folder: string, overrides: Record<string, string>): string {
-  return overrides[folder] || DEFAULT_ICONS[folder] || "📁";
-}
-
 const KNOWN = new Set(FOLDERS.map((f) => f.name.toLowerCase()));
 
 /** A folder the archive doesn't know about yet — recordings land at its root. */

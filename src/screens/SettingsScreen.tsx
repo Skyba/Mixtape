@@ -37,8 +37,13 @@ import {
   CacheAudio,
 } from "../recover";
 import { isRecordingInProgress } from "../recordingFlow";
-import { FOLDERS, INBOX, iconFor } from "../placement";
-import { getFolderIcons, setFolderIcon } from "../storage";
+import { FOLDERS, INBOX } from "../placement";
+import {
+  ICON_CHOICES,
+  iconOf,
+  saveFolderIcon,
+  useFolderIcons,
+} from "../folderIcons";
 import { DEFAULT_SETTINGS, Settings } from "../types";
 import type { RootStackParamList } from "../../App";
 
@@ -146,18 +151,18 @@ export default function SettingsScreen() {
   const [orphans, setOrphans] = useState<CacheAudio[]>([]);
   const [cacheBusy, setCacheBusy] = useState("");
   const [cacheOpen, setCacheOpen] = useState(false);
-  const [icons, setIcons] = useState<Record<string, string>>({});
+  const icons = useFolderIcons();
   const [iconsOpen, setIconsOpen] = useState(false);
+  const [pickFor, setPickFor] = useState<string | null>(null);
 
   useEffect(() => {
     getSettings().then(setS);
-    getFolderIcons().then(setIcons);
     return subscribeAuth(setAuthEmail);
   }, []);
 
   async function changeIcon(folder: string, icon: string) {
-    setIcons((cur) => ({ ...cur, [folder]: icon }));
-    await setFolderIcon(folder, icon);
+    setPickFor(null);
+    await saveFolderIcon(folder, icon);
   }
 
   // Scanning the cache tree costs a stat per file, so it only runs when the
@@ -381,20 +386,43 @@ export default function SettingsScreen() {
       {iconsOpen ? (
         <>
           <Text style={styles.hint}>
-            Shown on the Record screen and in the library. Any emoji; clear it
-            to go back to the default.
+            Shown on the Record screen and in the library. Tap a folder to pick
+            its icon.
           </Text>
           {[INBOX, ...FOLDERS.map((f) => f.name)].map((f) => (
-            <View key={f} style={styles.iconRow}>
-              <TextInput
-                style={styles.iconInput}
-                value={icons[f] ?? ""}
-                onChangeText={(v) => changeIcon(f, v)}
-                placeholder={iconFor(f, {})}
-                placeholderTextColor="#4b5563"
-                maxLength={4}
-              />
-              <Text style={styles.iconName}>{f}</Text>
+            <View key={f}>
+              <TouchableOpacity
+                style={styles.iconRow}
+                onPress={() => setPickFor(pickFor === f ? null : f)}
+              >
+                <View
+                  style={[
+                    styles.iconBox,
+                    pickFor === f && styles.iconBoxOn,
+                  ]}
+                >
+                  <Text style={styles.iconGlyph}>{iconOf(f, icons)}</Text>
+                </View>
+                <Text style={styles.iconName}>{f}</Text>
+                {icons[f] ? (
+                  <TouchableOpacity onPress={() => changeIcon(f, "")}>
+                    <Text style={styles.iconReset}>reset</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </TouchableOpacity>
+              {pickFor === f ? (
+                <View style={styles.palette}>
+                  {ICON_CHOICES.map((e) => (
+                    <TouchableOpacity
+                      key={e}
+                      style={styles.paletteCell}
+                      onPress={() => changeIcon(f, e)}
+                    >
+                      <Text style={styles.iconGlyph}>{e}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ) : null}
             </View>
           ))}
         </>
@@ -605,16 +633,29 @@ const styles = StyleSheet.create({
   },
   devRow: { flexDirection: "row", gap: 10 },
   iconRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 8 },
-  iconInput: {
-    width: 56,
-    textAlign: "center",
+  iconBox: {
+    width: 46,
+    alignItems: "center",
     backgroundColor: "#1a1d23",
     borderRadius: 8,
-    color: "#fff",
-    paddingVertical: 7,
-    fontSize: 18,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: "transparent",
   },
-  iconName: { color: "#c9cdd3", fontSize: 13 },
+  iconBoxOn: { borderColor: "#2f6fd0" },
+  iconGlyph: { fontSize: 20 },
+  iconName: { color: "#c9cdd3", fontSize: 13, flex: 1 },
+  iconReset: { color: "#7c828a", fontSize: 11 },
+  palette: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 4,
+    backgroundColor: "#12151a",
+    borderRadius: 10,
+    padding: 8,
+    marginTop: 6,
+  },
+  paletteCell: { width: 40, height: 36, alignItems: "center", justifyContent: "center" },
   cacheRow: {
     flexDirection: "row",
     justifyContent: "space-between",
