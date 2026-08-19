@@ -5,6 +5,7 @@ const K = {
   settings: "settings",
   speakers: "speakerHistory",
   folders: "folderList",
+  tags: "folderTags",
 };
 
 async function getJSON<T>(key: string, fallback: T): Promise<T> {
@@ -49,4 +50,16 @@ export async function rememberSpeakers(items: string[]): Promise<void> {
 
 export async function rememberFolder(folder: string): Promise<void> {
   await mergeHistory(K.folders, [folder]);
+}
+
+/** Tags added by hand, per folder, on top of the routes.json vocabulary. */
+export async function getCustomTags(): Promise<Record<string, string[]>> {
+  return getJSON<Record<string, string[]>>(K.tags, {});
+}
+
+export async function rememberTag(folder: string, tag: string): Promise<void> {
+  const all = await getCustomTags();
+  const cur = all[folder] ?? [];
+  if (!cur.includes(tag)) all[folder] = [...cur, tag];
+  await setJSON(K.tags, all);
 }

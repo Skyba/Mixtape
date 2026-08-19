@@ -21,12 +21,12 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import SpeakerSelector from "../components/SpeakerSelector";
-import FolderDropdown from "../components/FolderDropdown";
+import PlacementPicker, { Placement } from "../components/PlacementPicker";
 import Select from "../components/Select";
 import QRCode from "../components/QRCode";
 import SpeakerTimeline from "../components/SpeakerTimeline";
 import { colorForLetter } from "../colors";
-import { getSettings, getSpeakerHistory, getFolders } from "../storage";
+import { getSettings, getSpeakerHistory } from "../storage";
 import {
   isFirebaseConfigured,
   isSignedIn,
@@ -115,10 +115,11 @@ export default function RecordScreen() {
   const [count, setCount] = useState(1);
   const [names, setNames] = useState<(string | null)[]>([null]);
   const [folder, setFolder] = useState(INBOX);
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [tags, setTags] = useState<string[]>([]);
   const [durationH, setDurationH] = useState(2);
   const [language, setLanguage] = useState("English");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
-  const [folderHist, setFolderHist] = useState<string[]>([]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
 
   const [isRecording, setIsRecording] = useState(false);
@@ -201,7 +202,6 @@ export default function RecordScreen() {
       if (!perm.granted) Alert.alert("Microphone permission denied");
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
       setSpeakerHist(await getSpeakerHistory());
-      setFolderHist(await getFolders());
       setSettings(await getSettings());
     })();
   }, []);
@@ -696,7 +696,6 @@ export default function RecordScreen() {
       );
       setLastRec(rec);
       setSpeakerHist(await getSpeakerHistory());
-      setFolderHist(await getFolders());
     } catch (e: any) {
       setStatus("Failed: " + String(e?.message ?? e));
     }
@@ -762,6 +761,8 @@ export default function RecordScreen() {
         folder,
         language,
         settings,
+        private: isPrivate,
+        tags,
         transcribeAfterMerge: true,
       });
       setLastRec(rec);
@@ -773,7 +774,6 @@ Still joining the audio — it finishes on the next launch.`
 Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
       );
       setSpeakerHist(await getSpeakerHistory());
-      setFolderHist(await getFolders());
     } catch (e: any) {
       setStatus("Failed: " + String(e?.message ?? e));
     }
@@ -804,6 +804,8 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         folder,
         language,
         settings,
+        private: isPrivate,
+        tags,
         shareId: liveShareId.current ?? undefined,
       });
       if (liveShareId.current) {
@@ -845,7 +847,6 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
       }
       setDiarUtt([]);
       setSpeakerHist(await getSpeakerHistory());
-      setFolderHist(await getFolders());
     } catch (e: any) {
       setStatus("Live save failed: " + String(e?.message ?? e));
     }
@@ -1018,7 +1019,14 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         }}
       />
 
-      <FolderDropdown value={folder} options={folderHist} onChange={setFolder} />
+      <PlacementPicker
+        value={{ folder, private: isPrivate, tags }}
+        onChange={(p: Placement) => {
+          setFolder(p.folder);
+          setIsPrivate(p.private);
+          setTags(p.tags);
+        }}
+      />
 
       <Text style={styles.label}>
         {isRecording ? "Time limit (hours)" : "Max duration (hours)"}

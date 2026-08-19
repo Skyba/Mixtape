@@ -26,6 +26,10 @@ export type Recording = {
   // Recorder killed before it could finalise the file: audio bytes present, no
   // MP4 index, so it won't play or transcribe until it's repaired.
   damaged?: boolean;
+  // Filing hints for the transcript archive (comm-relay). All optional: left
+  // unset, the archive behaves exactly as it did before they existed.
+  private?: boolean;
+  tags?: string[];
 };
 
 export type Settings = {

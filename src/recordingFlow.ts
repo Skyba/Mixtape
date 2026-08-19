@@ -127,6 +127,9 @@ export type StopArgs = {
   folder: string;
   language: string;
   settings: Settings;
+  // Filing hints for the archive. Optional — omitted, nothing changes.
+  private?: boolean;
+  tags?: string[];
 };
 
 export async function processStop(args: StopArgs): Promise<Recording> {
@@ -157,6 +160,8 @@ export async function processStop(args: StopArgs): Promise<Recording> {
       language: args.language,
       transcriptStatus: "none",
       uploadStatus: "pending",
+      private: args.private,
+      tags: args.tags,
     },
     args.folder
   );
@@ -291,6 +296,8 @@ export type LiveStopArgs = {
   folder: string;
   language: string;
   settings: Settings;
+  private?: boolean;
+  tags?: string[];
   shareId?: string; // if live-shared, carry it onto the saved recording
   // Hand the merged file to the backend for transcription (a chunked normal
   // take). Only set once the merge lands — otherwise the server would
@@ -339,6 +346,8 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       // accurate diarized speakers from the merged file.
       transcriptStatus: hasTranscript ? "done" : "none",
       uploadStatus: "pending",
+      private: args.private,
+      tags: args.tags,
       shareId: args.shareId,
       mergePending: cloudMerge
         ? { id, count: args.segmentUris.length, segments: args.segmentUris }

@@ -18,7 +18,7 @@ import AudioPlayerBar from "../components/AudioPlayerBar";
 import SpeakerSelector from "../components/SpeakerSelector";
 import SpeakerRemap from "../components/SpeakerRemap";
 import SpeakerTimeline from "../components/SpeakerTimeline";
-import FolderDropdown from "../components/FolderDropdown";
+import PlacementPicker, { Placement } from "../components/PlacementPicker";
 import Select from "../components/Select";
 import { colorForLetter } from "../colors";
 import {
@@ -53,12 +53,11 @@ import {
 } from "../transcription";
 import {
   getSettings,
-  getFolders,
   getSpeakerHistory,
   rememberFolder,
   rememberSpeakers,
 } from "../storage";
-import { INBOX, Recording } from "../types";
+import { Recording } from "../types";
 
 import { DEFAULT_SUMMARY_PROMPT, PROMPT_PRESETS } from "../prompts";
 import type { RootStackParamList } from "../../App";
@@ -83,7 +82,6 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const [isRemote, setIsRemote] = useState(!!route.params.remote);
   const [transcript, setTranscript] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
-  const [folderHist, setFolderHist] = useState<string[]>([INBOX]);
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
   const [summaryPrompt, setSummaryPrompt] = useState(DEFAULT_SUMMARY_PROMPT);
   const [presetKey, setPresetKey] = useState("summary");
@@ -101,7 +99,6 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   useEffect(() => {
     (async () => {
-      setFolderHist(Array.from(new Set([INBOX, ...(await getFolders())])));
       setSpeakerHist(await getSpeakerHistory());
       if (!isRemote) {
         setTranscript(await readTranscript(rec));
@@ -249,13 +246,30 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setBusy("");
   }
 
-  async function changeFolder(folder: string) {
+  async function changeFolder(folder: string, p?: Placement) {
     if (folder === rec.folder) return;
     setBusy("Moving…");
     const moved = await moveToFolder(rec, folder);
+    // Tags belong to the folder's vocabulary, so a move clears them.
+    const next = p ? { ...moved, private: p.private, tags: p.tags } : moved;
+    if (p) await writeMeta(next);
     await rememberFolder(folder);
-    setRec(moved);
+    setRec(next);
+    if (p && isFirebaseConfigured && isSignedIn()) {
+      await uploadRecording(next).catch(() => {});
+    }
     setBusy("");
+  }
+
+  /** Filing for the archive. The folder is a real move; the rest is metadata. */
+  async function savePlacement(p: Placement) {
+    if (p.folder !== rec.folder) return changeFolder(p.folder, p);
+    const next = { ...rec, private: p.private, tags: p.tags };
+    setRec(next);
+    await writeMeta(next);
+    if (isFirebaseConfigured && isSignedIn()) {
+      await uploadRecording(next).catch(() => {});
+    }
   }
 
   async function saveSpeakers(names: (string | null)[]) {
@@ -398,10 +412,13 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         </>
       )}
 
-      <FolderDropdown
-        value={rec.folder}
-        options={folderHist}
-        onChange={changeFolder}
+      <PlacementPicker
+        value={{
+          folder: rec.folder,
+          private: !!rec.private,
+          tags: rec.tags ?? [],
+        }}
+        onChange={savePlacement}
       />
       <SpeakerSelector
         count={rec.speakers.length}

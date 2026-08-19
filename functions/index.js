@@ -139,6 +139,10 @@ router.get("/recordings", async (req, res) => {
         topic: m.topic || null,
         transcriptStatus: m.transcriptStatus,
         summary: m.summary || null,
+        // Filing hints set in the app; absent on anything recorded before
+        // they existed, which the archive treats exactly as it did then.
+        private: typeof m.private === "boolean" ? m.private : undefined,
+        tags: Array.isArray(m.tags) ? m.tags : undefined,
       });
     } catch {}
   }
