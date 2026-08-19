@@ -249,14 +249,19 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   async function changeFolder(folder: string, p?: Placement) {
     if (folder === rec.folder) return;
     setBusy("Moving…");
+    const from = rec;
     const moved = await moveToFolder(rec, folder);
     // Tags belong to the folder's vocabulary, so a move clears them.
     const next = p ? { ...moved, private: p.private, tags: p.tags } : moved;
     if (p) await writeMeta(next);
     await rememberFolder(folder);
     setRec(next);
-    if (p && isFirebaseConfigured && isSignedIn()) {
+    if (isFirebaseConfigured && isSignedIn()) {
+      // The cloud copy carries the folder in its path, so a move is a
+      // re-upload — and the old path has to go, or the API lists the
+      // recording twice, once with its stale folder.
       await uploadRecording(next).catch(() => {});
+      await deleteRemoteRecording(from).catch(() => {});
     }
     setBusy("");
   }
