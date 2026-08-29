@@ -443,6 +443,53 @@ function speakerStats(utterances) {
     .join("; ");
 }
 
+// AssemblyAI's speaker identification maps letters to names by reading the
+// conversation (no voice enrollment). Mirrors src/transcription.ts.
+function speakerIdentification(meta) {
+  const named = (meta.speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
+  if (!named.length) return undefined;
+  const owner = ((meta.owner && meta.owner.name) || "").trim().toLowerCase();
+  const bio = ((meta.owner && meta.owner.bio) || "").trim();
+  return {
+    request: {
+      speaker_identification: {
+        speaker_type: "name",
+        speakers: named.map((name) =>
+          owner && name.trim().toLowerCase() === owner && bio
+            ? { name, description: bio }
+            : { name }
+        ),
+      },
+    },
+  };
+}
+
+// Only trust an identification when the transcript actually says someone's
+// name. Measured against the archive: with a name spoken it is exact, without
+// one it returns the wrong person and still reports "success".
+function acceptSpeakerMapping(mapping, text, speakers) {
+  if (!mapping) return null;
+  const named = (speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
+  const spoken = named.some((n) => {
+    const first = n.trim().split(/\s+/)[0];
+    return (
+      first.length > 2 &&
+      new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text)
+    );
+  });
+  if (!spoken) return null;
+  const mayShare = Object.keys(mapping).length > (speakers || []).length;
+  const used = new Set();
+  const clean = {};
+  for (const [letter, name] of Object.entries(mapping)) {
+    if (!named.includes(name)) continue;
+    if (!mayShare && used.has(name)) continue;
+    used.add(name);
+    clean[letter] = name;
+  }
+  return Object.keys(clean).length ? clean : null;
+}
+
 async function inferSpeakerMap(utterances, speakers, anthropicKey) {
   if (!anthropicKey || !utterances.length) return null;
   const named = (speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
@@ -576,6 +623,8 @@ exports.startTranscription = onObjectFinalized(
           max_speakers_expected: Math.max(2, meta.speakers.length + 1),
         };
       }
+      const su = speakerIdentification(meta);
+      if (su) body.speech_understanding = su;
       const lang = LANG_CODES[meta.language];
       if (lang) body.language_code = lang;
       else body.language_detection = true;
@@ -658,7 +707,16 @@ exports.transcriptionWebhook = onRequest(
       ).json();
       const utterances = data.utterances || [];
       const speakers = job.speakers || [];
-      const speakerMap = await inferSpeakerMap(utterances, speakers, process.env.ANTHROPIC_KEY);
+      // AssemblyAI reads the whole transcript for identification; our own pass
+      // only sees a sample, so it's the fallback when nothing comes back.
+      const identified = acceptSpeakerMapping(
+        (((t.speech_understanding || {}).response || {}).speaker_identification || {}).mapping,
+        utterances.map((u) => u.text).join(" "),
+        speakers
+      );
+      const speakerMap =
+        identified ||
+        (await inferSpeakerMap(utterances, speakers, process.env.ANTHROPIC_KEY));
       const text = renderTranscript(utterances, speakers, speakerMap);
       const topic = await inferTopic(text, process.env.ANTHROPIC_KEY);
       const audioDurationSec = data.audio_duration || 0;

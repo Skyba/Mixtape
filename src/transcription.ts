@@ -29,6 +29,69 @@ export function speakerOptions(count: number) {
   };
 }
 
+/**
+ * AssemblyAI's speaker identification: it maps letters to the names we give it
+ * by reading the conversation — no voice enrollment. Descriptions sharpen it,
+ * so the phone's owner carries a bio when one is set.
+ */
+export function speakerIdentification(
+  speakers: string[],
+  settings: Settings
+): Record<string, unknown> | undefined {
+  const named = speakers.filter((s) => !/^Speaker \d+$/.test(s));
+  if (!named.length) return undefined;
+  const owner = settings.ownerName.trim().toLowerCase();
+  return {
+    request: {
+      speaker_identification: {
+        speaker_type: "name",
+        speakers: named.map((name) =>
+          owner && name.trim().toLowerCase() === owner && settings.ownerBio.trim()
+            ? { name, description: settings.ownerBio.trim() }
+            : { name }
+        ),
+      },
+    },
+  };
+}
+
+/**
+ * Accepts an identification mapping only when the transcript actually contains
+ * evidence — someone's name said out loud. Measured on the real archive: with a
+ * name spoken it is exact, without one it confidently returns the wrong person,
+ * and it reports "success" either way. No evidence, no names: the speakers stay
+ * "Speaker 2", "Speaker 3", which is honest rather than wrong.
+ */
+export function acceptSpeakerMapping(
+  mapping: Record<string, string> | undefined,
+  transcriptText: string,
+  speakers: string[]
+): Record<string, string> | undefined {
+  if (!mapping) return undefined;
+  const named = speakers.filter((s) => !/^Speaker \d+$/.test(s));
+  const spoken = named.some((n) => {
+    const first = n.trim().split(/\s+/)[0];
+    return (
+      first.length > 2 &&
+      new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(
+        transcriptText
+      )
+    );
+  });
+  if (!spoken) return undefined;
+  const letters = Object.keys(mapping);
+  const mayShare = letters.length > speakers.length;
+  const used = new Set<string>();
+  const clean: Record<string, string> = {};
+  for (const [letter, name] of Object.entries(mapping)) {
+    if (!named.includes(name)) continue; // it echoes the letter back when unsure
+    if (!mayShare && used.has(name)) continue;
+    used.add(name);
+    clean[letter] = name;
+  }
+  return Object.keys(clean).length ? clean : undefined;
+}
+
 export type Utterance = {
   speaker: string;
   start: number;
@@ -76,6 +139,11 @@ type CompletedTranscript = {
   utterances?: Utterance[];
   audio_duration?: number;
   text?: string;
+  speech_understanding?: {
+    response?: {
+      speaker_identification?: { mapping?: Record<string, string> };
+    };
+  };
 };
 
 async function poll(id: string, key: string): Promise<CompletedTranscript> {
@@ -99,6 +167,8 @@ export type TranscribeResult = {
   transcriptId: string;
   audioDurationSec: number;
   utterances: Utterance[];
+  /** From AssemblyAI's speaker identification, once it clears the gate. */
+  speakerMap?: Record<string, string>;
 };
 
 /** Kicks off a transcript job from an already-hosted URL and polls it. */
@@ -113,6 +183,8 @@ async function transcribeUrl(
     speaker_labels: true,
   };
   if (rec.speakers.length) body.speaker_options = speakerOptions(rec.speakers.length);
+  const su = speakerIdentification(rec.speakers, settings);
+  if (su) body.speech_understanding = su;
   if (langCode) body.language_code = langCode;
   else body.language_detection = true;
 
@@ -127,11 +199,17 @@ async function transcribeUrl(
   const { id } = await create.json();
   const data = await poll(id, settings.assemblyAiKey);
   const utterances = data.utterances ?? [];
+  const speakerMap = acceptSpeakerMapping(
+    data.speech_understanding?.response?.speaker_identification?.mapping,
+    utterances.map((u) => u.text).join(" "),
+    rec.speakers
+  );
   return {
-    text: renderTranscript(utterances, rec.speakers, rec.speakerMap),
+    text: renderTranscript(utterances, rec.speakers, speakerMap ?? rec.speakerMap),
     transcriptId: id,
     audioDurationSec: data.audio_duration ?? rec.durationSeconds,
     utterances,
+    speakerMap,
   };
 }
 

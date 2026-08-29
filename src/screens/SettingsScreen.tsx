@@ -275,6 +275,29 @@ export default function SettingsScreen() {
         placeholder="paste key"
       />
 
+      <Text style={styles.label}>Who you are</Text>
+      <Text style={styles.hint}>
+        Given to AssemblyAI's speaker identification so it can pick you out.
+        It only helps when the conversation gives identity away — otherwise
+        speakers stay "Speaker 2" rather than being guessed at.
+      </Text>
+      <TextInput
+        style={styles.input}
+        value={s.ownerName}
+        onChangeText={(v) => setS({ ...s, ownerName: v })}
+        placeholder="your name, as you'd label it (e.g. Basile)"
+        placeholderTextColor="#6b7280"
+        autoCapitalize="words"
+      />
+      <TextInput
+        style={[styles.input, { height: 78, textAlignVertical: "top" }]}
+        value={s.ownerBio}
+        onChangeText={(v) => setS({ ...s, ownerBio: v })}
+        placeholder="a line or two about you: what you work on, the languages you speak, the role you usually play in these conversations"
+        placeholderTextColor="#6b7280"
+        multiline
+      />
+
       <Text style={styles.label}>Topic / summary model</Text>
       <Select
         value={

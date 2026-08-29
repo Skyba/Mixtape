@@ -30,12 +30,19 @@ export type Recording = {
   // unset, the archive behaves exactly as it did before they existed.
   private?: boolean;
   tags?: string[];
+  // Copied from Settings at save time: the backend transcribes without
+  // access to the app's settings, and speaker identification wants it.
+  owner?: { name: string; bio: string };
 };
 
 export type Settings = {
   assemblyAiKey: string;
   anthropicKey: string;
   topicModel: string;
+  // Who the phone belongs to. Fed to AssemblyAI's speaker identification so
+  // it can tell which voice is yours when the conversation gives it away.
+  ownerName: string;
+  ownerBio: string;
   uploadOnCellular: boolean; // false = Wi-Fi only
   googleWebClientId: string; // OAuth 2.0 Web client ID (Google Cloud Console)
 };
@@ -44,6 +51,8 @@ export const DEFAULT_SETTINGS: Settings = {
   assemblyAiKey: "",
   anthropicKey: "",
   topicModel: "claude-3-5-haiku-latest",
+  ownerName: "",
+  ownerBio: "",
   uploadOnCellular: false,
   googleWebClientId: "",
 };

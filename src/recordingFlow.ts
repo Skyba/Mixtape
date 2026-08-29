@@ -162,6 +162,13 @@ export async function processStop(args: StopArgs): Promise<Recording> {
       uploadStatus: "pending",
       private: args.private,
       tags: args.tags,
+      owner:
+        args.settings.ownerName.trim() && args.settings.ownerBio.trim()
+          ? {
+              name: args.settings.ownerName.trim(),
+              bio: args.settings.ownerBio.trim(),
+            }
+          : undefined,
     },
     args.folder
   );
@@ -198,13 +205,18 @@ export async function processStop(args: StopArgs): Promise<Recording> {
     await notify("Transcribing…", rec.base);
     activeTranscriptions.add(id);
     try {
-      const { text, transcriptId, audioDurationSec, utterances } =
-        await runTranscribe(rec, args.settings);
-      const speakerMap = await inferSpeakerMap(
+      const {
+        text,
+        transcriptId,
+        audioDurationSec,
         utterances,
-        args.speakers,
-        args.settings
-      );
+        speakerMap: identified,
+      } = await runTranscribe(rec, args.settings);
+      // AssemblyAI reads the whole transcript for this; our own pass only sees a
+      // sample, so it's the fallback for when identification returns nothing.
+      const speakerMap =
+        identified ??
+        (await inferSpeakerMap(utterances, args.speakers, args.settings));
       const rendered = speakerMap
         ? renderTranscript(utterances, args.speakers, speakerMap)
         : text;
@@ -250,9 +262,15 @@ export async function transcribeExisting(
   try {
     let r: Recording = { ...rec, transcriptStatus: "pending" };
     await writeMeta(r);
-    const { text, transcriptId, audioDurationSec, utterances } =
-      await runTranscribe(r, settings);
-    const speakerMap = await inferSpeakerMap(utterances, r.speakers, settings);
+    const {
+      text,
+      transcriptId,
+      audioDurationSec,
+      utterances,
+      speakerMap: identified,
+    } = await runTranscribe(r, settings);
+    const speakerMap =
+      identified ?? (await inferSpeakerMap(utterances, r.speakers, settings));
     const rendered = speakerMap
       ? renderTranscript(utterances, r.speakers, speakerMap)
       : text;
@@ -348,6 +366,13 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       uploadStatus: "pending",
       private: args.private,
       tags: args.tags,
+      owner:
+        args.settings.ownerName.trim() && args.settings.ownerBio.trim()
+          ? {
+              name: args.settings.ownerName.trim(),
+              bio: args.settings.ownerBio.trim(),
+            }
+          : undefined,
       shareId: args.shareId,
       mergePending: cloudMerge
         ? { id, count: args.segmentUris.length, segments: args.segmentUris }
