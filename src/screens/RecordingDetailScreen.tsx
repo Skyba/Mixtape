@@ -24,6 +24,7 @@ import { colorForLetter } from "../colors";
 import {
   audioPath,
   transcriptPath,
+  aaiJsonPath,
   readTranscript,
   writeTranscript,
   readAaiJson,
@@ -250,6 +251,20 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     if (folder === rec.folder) return;
     setBusy("Moving…");
     const from = rec;
+    // The cloud copy can hold files this phone never had — a transcript
+    // repaired server-side, for instance. The move re-uploads what's local and
+    // deletes the old path, so anything only in the cloud has to come down
+    // first or it goes with the old folder.
+    if (isFirebaseConfigured && isSignedIn()) {
+      await downloadRemoteFile(
+        remoteObjectPath(rec, "txt"),
+        transcriptPath(rec)
+      ).catch(() => {});
+      await downloadRemoteFile(
+        remoteObjectPath(rec, "aai.json"),
+        aaiJsonPath(rec)
+      ).catch(() => {});
+    }
     const moved = await moveToFolder(rec, folder);
     // Tags belong to the folder's vocabulary, so a move clears them.
     const next = p ? { ...moved, private: p.private, tags: p.tags } : moved;
