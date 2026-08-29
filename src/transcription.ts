@@ -50,8 +50,12 @@ export function nameForSpeaker(
 ): string {
   if (speakerMap?.[letter]) return speakerMap[letter];
   const idx = letter.charCodeAt(0) - 65; // "A" -> 0
-  if (idx >= 0 && idx < speakers.length) return speakers[idx];
-  return `Speaker ${letter}`;
+  const slot = idx >= 0 && idx < speakers.length ? speakers[idx] : "";
+  // Letter order is arbitrary, so the positional slot is only a guess — never
+  // let it hand back a name the map already gave to another letter.
+  const taken = new Set(Object.values(speakerMap ?? {}));
+  if (slot && !taken.has(slot)) return slot;
+  return `Speaker ${idx + 1}`;
 }
 
 /** Renders the labelled transcript text from utterances + a speaker→name map. */
@@ -308,18 +312,29 @@ export async function inferSpeakerMap(
   if (named.length < 1) return undefined;
   const letters = [...new Set(utterances.map((u) => u.speaker))].sort();
   if (letters.length < 2) return undefined; // one speaker: nothing to disambiguate
+  const unnamed = speakers.length - named.length;
   const prompt =
     `A conversation transcript is labelled with anonymous speaker letters ` +
     `(${letters.join(", ")}), speaking ${speakerStats(utterances)}.\n` +
-    `The participants are: ${named.join(", ")}.\n\n` +
-    `Assign a participant name to EVERY letter, reasoning only from the content:\n` +
-    `- A speaker talked ABOUT in the third person ("X wants…", "ask X") is NOT the ` +
-    `speaker of that line — this is the strongest signal available.\n` +
-    `- "I'm X" / "this is X" names the speaker of that line.\n` +
-    `- When someone is addressed by name, the person who answers next is usually them.\n` +
-    `- Diarization can split one person across two letters, so two letters may ` +
-    `share a name — assign the best fit rather than leaving a letter out.\n\n` +
-    `Output ONLY a JSON object with one entry per letter, e.g. {"A":"Name","B":"Name"}.\n\n` +
+    `There are ${speakers.length} participants: ${named.join(", ")}` +
+    (unnamed
+      ? `, plus ${unnamed} whose name is not known (they stay "Speaker N").\n\n`
+      : `.\n\n`) +
+    `Map letters to names, reasoning only from the content:\n` +
+    `- A speaker talked ABOUT in the third person ("X wants...", "ask X") is NOT ` +
+    `the speaker of that line — this is the strongest signal available.\n` +
+    `- "I am X" / "this is X" names the speaker of that line.\n` +
+    `- When someone is addressed by name, the person who answers next is ` +
+    `usually them.\n` +
+    `- Only include a letter whose name the content actually supports. Leave ` +
+    `out the letters belonging to unnamed participants — a neutral ` +
+    `"Speaker N" beats a guess.\n` +
+    (letters.length > speakers.length
+      ? `- There are more letters than people, so diarization split someone ` +
+        `in two: here, and only here, two letters may share a name.\n`
+      : `- Never give the same name to two letters.\n`) +
+    `\nOutput ONLY a JSON object, e.g. {"A":"Name"} — it may be empty, and ` +
+    `it does not need an entry for every letter.\n\n` +
     `Transcript:\n${speakerSample(utterances, named)}`;
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -343,8 +358,16 @@ export async function inferSpeakerMap(
     if (!json) return undefined;
     const parsed = JSON.parse(json) as Record<string, string>;
     const clean: Record<string, string> = {};
+    // Two letters may only share a name when diarization actually produced more
+    // labels than there are people. Otherwise the one known name gets stamped on
+    // everyone and the transcript reads as Basile talking to Basile.
+    const mayShare = letters.length > speakers.length;
+    const used = new Set<string>();
     for (const [letter, name] of Object.entries(parsed)) {
-      if (named.includes(name)) clean[letter] = name;
+      if (!named.includes(name)) continue;
+      if (!mayShare && used.has(name)) continue;
+      used.add(name);
+      clean[letter] = name;
     }
     return Object.keys(clean).length ? clean : undefined;
   } catch {

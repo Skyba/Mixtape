@@ -449,18 +449,29 @@ async function inferSpeakerMap(utterances, speakers, anthropicKey) {
   if (named.length < 1) return null;
   const letters = [...new Set(utterances.map((u) => u.speaker))].sort();
   if (letters.length < 2) return null;
+  const unnamed = (speakers || []).length - named.length;
   const prompt =
     `A conversation transcript is labelled with anonymous speaker letters ` +
     `(${letters.join(", ")}), speaking ${speakerStats(utterances)}.\n` +
-    `The participants are: ${named.join(", ")}.\n\n` +
-    `Assign a participant name to EVERY letter, reasoning only from the content:\n` +
-    `- A speaker talked ABOUT in the third person ("X wants…", "ask X") is NOT the ` +
-    `speaker of that line — this is the strongest signal available.\n` +
-    `- "I'm X" / "this is X" names the speaker of that line.\n` +
-    `- When someone is addressed by name, the person who answers next is usually them.\n` +
-    `- Diarization can split one person across two letters, so two letters may ` +
-    `share a name — assign the best fit rather than leaving a letter out.\n\n` +
-    `Output ONLY a JSON object with one entry per letter, e.g. {"A":"Name","B":"Name"}.\n\n` +
+    `There are ${(speakers || []).length} participants: ${named.join(", ")}` +
+    (unnamed
+      ? `, plus ${unnamed} whose name is not known (they stay "Speaker N").\n\n`
+      : `.\n\n`) +
+    `Map letters to names, reasoning only from the content:\n` +
+    `- A speaker talked ABOUT in the third person ("X wants...", "ask X") is NOT ` +
+    `the speaker of that line — this is the strongest signal available.\n` +
+    `- "I am X" / "this is X" names the speaker of that line.\n` +
+    `- When someone is addressed by name, the person who answers next is ` +
+    `usually them.\n` +
+    `- Only include a letter whose name the content actually supports. Leave ` +
+    `out the letters belonging to unnamed participants — a neutral ` +
+    `"Speaker N" beats a guess.\n` +
+    (letters.length > speakers.length
+      ? `- There are more letters than people, so diarization split someone ` +
+        `in two: here, and only here, two letters may share a name.\n`
+      : `- Never give the same name to two letters.\n`) +
+    `\nOutput ONLY a JSON object, e.g. {"A":"Name"} — it may be empty, and ` +
+    `it does not need an entry for every letter.\n\n` +
     `Transcript:\n${speakerSample(utterances, named)}`;
   try {
     // 2000 tokens: room to think before the tiny JSON answer — too small a
@@ -470,7 +481,16 @@ async function inferSpeakerMap(utterances, speakers, anthropicKey) {
     if (!json) return null;
     const parsed = JSON.parse(json[0]);
     const clean = {};
-    for (const [letter, name] of Object.entries(parsed)) if (named.includes(name)) clean[letter] = name;
+    // Only let two letters share a name when there are more labels than
+    // people; otherwise one known name gets stamped on everyone.
+    const mayShare = letters.length > (speakers || []).length;
+    const used = new Set();
+    for (const [letter, name] of Object.entries(parsed)) {
+      if (!named.includes(name)) continue;
+      if (!mayShare && used.has(name)) continue;
+      used.add(name);
+      clean[letter] = name;
+    }
     return Object.keys(clean).length ? clean : null;
   } catch {
     return null;
