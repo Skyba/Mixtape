@@ -14,6 +14,7 @@ import RecordingDetailScreen from "./src/screens/RecordingDetailScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import LoginScreen from "./src/screens/LoginScreen";
 import ApiKeysScreen from "./src/screens/ApiKeysScreen";
+import VoiceEnrollScreen from "./src/screens/VoiceEnrollScreen";
 import { initNotifications } from "./src/notifications";
 import {
   flushPendingUploads,
@@ -31,6 +32,7 @@ export type RootStackParamList = {
   Detail: { rec: Recording; remote?: boolean };
   Login: undefined;
   ApiKeys: undefined;
+  VoiceEnroll: undefined;
 };
 
 const Tab = createBottomTabNavigator();
@@ -154,6 +156,11 @@ export default function App() {
             name="ApiKeys"
             component={ApiKeysScreen}
             options={{ title: "API access" }}
+          />
+          <Stack.Screen
+            name="VoiceEnroll"
+            component={VoiceEnrollScreen}
+            options={{ title: "Your voice" }}
           />
         </Stack.Navigator>
       </NavigationContainer>

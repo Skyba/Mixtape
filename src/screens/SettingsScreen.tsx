@@ -298,6 +298,20 @@ export default function SettingsScreen() {
         multiline
       />
 
+      <TouchableOpacity
+        style={[styles.updateBtn, { marginTop: 10 }]}
+        onPress={() => navigation.navigate("VoiceEnroll")}
+      >
+        <Ionicons name="mic-outline" size={20} color="#fff" />
+        <Text style={styles.saveTxt}>
+          {s.voiceEnrolledAt ? "Your voice — enrolled" : "Teach it your voice"}
+        </Text>
+      </TouchableOpacity>
+      <Text style={styles.hint}>
+        A minute of you speaking, matched against future recordings instead of
+        guessed at from the conversation.
+      </Text>
+
       <Text style={styles.label}>Topic / summary model</Text>
       <Select
         value={

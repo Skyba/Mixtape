@@ -43,6 +43,8 @@ export type Settings = {
   // it can tell which voice is yours when the conversation gives it away.
   ownerName: string;
   ownerBio: string;
+  /** ISO date of the enrolled voice sample, or "" if never recorded. */
+  voiceEnrolledAt: string;
   uploadOnCellular: boolean; // false = Wi-Fi only
   googleWebClientId: string; // OAuth 2.0 Web client ID (Google Cloud Console)
 };
@@ -53,6 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
   topicModel: "claude-3-5-haiku-latest",
   ownerName: "",
   ownerBio: "",
+  voiceEnrolledAt: "",
   uploadOnCellular: false,
   googleWebClientId: "",
 };
