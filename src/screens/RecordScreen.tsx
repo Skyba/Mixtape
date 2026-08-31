@@ -766,6 +766,7 @@ export default function RecordScreen() {
         private: isPrivate,
         tags,
         transcribeAfterMerge: true,
+        provisionalTopic: "untitled",
       });
       setLastRec(rec);
       setStatus(

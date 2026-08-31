@@ -322,6 +322,9 @@ export type LiveStopArgs = {
   private?: boolean;
   tags?: string[];
   shareId?: string; // if live-shared, carry it onto the saved recording
+  /** Provisional name before a topic exists. Chunked normal takes are not
+   *  "live notes" — they just share this save path. */
+  provisionalTopic?: string;
   // Hand the merged file to the backend for transcription (a chunked normal
   // take). Only set once the merge lands — otherwise the server would
   // transcribe the placeholder first chunk.
@@ -341,7 +344,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
     args.speakers.filter((s) => !/^Speaker \d+$/.test(s))
   );
   await rememberFolder(args.folder);
-  const base = buildBase(recordedAt, args.speakers, "live notes");
+  const base = buildBase(recordedAt, args.speakers, args.provisionalTopic ?? "live notes");
   logEvent(
     `live stop id=${id} segments=${args.segmentUris.length} dur=${args.durationSeconds}s signed=${isSignedIn()}`
   );

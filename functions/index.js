@@ -719,7 +719,7 @@ exports.transcriptionWebhook = onRequest(
       // AssemblyAI reads the whole transcript for identification; our own pass
       // only sees a sample, so it's the fallback when nothing comes back.
       const identified = acceptSpeakerMapping(
-        (((t.speech_understanding || {}).response || {}).speaker_identification || {}).mapping,
+        (((data.speech_understanding || {}).response || {}).speaker_identification || {}).mapping,
         utterances.map((u) => u.text).join(" "),
         speakers
       );
@@ -740,6 +740,12 @@ exports.transcriptionWebhook = onRequest(
         audioDurationSec,
         transcribedAt: new Date().toISOString(),
         estCostUsd: (audioDurationSec / 3600) * AAI_RATE_PER_HOUR,
+        // Record what the audio actually was, so it stops saying "Auto".
+        ...(job.language && LANG_CODES[job.language]
+          ? {}
+          : data.language_code
+            ? { language: LANG_NAMES[data.language_code] || data.language_code }
+            : {}),
       });
       // A cap-stopped take reports durationSeconds 0 from the phone; AAI's
       // measured audio length is ground truth, so backfill it server-side.
