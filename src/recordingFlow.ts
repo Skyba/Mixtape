@@ -211,6 +211,7 @@ export async function processStop(args: StopArgs): Promise<Recording> {
         audioDurationSec,
         utterances,
         speakerMap: identified,
+        detectedLanguage,
       } = await runTranscribe(rec, args.settings);
       // AssemblyAI reads the whole transcript for this; our own pass only sees a
       // sample, so it's the fallback for when identification returns nothing.
@@ -227,6 +228,8 @@ export async function processStop(args: StopArgs): Promise<Recording> {
         ...rec,
         topic,
         speakerMap,
+        // Record what it actually was, so the archive doesn't keep saying "Auto".
+        language: detectedLanguage ?? rec.language,
         transcriptStatus: "done",
         aaiTranscriptId: transcriptId,
         audioDurationSec,
@@ -268,6 +271,7 @@ export async function transcribeExisting(
       audioDurationSec,
       utterances,
       speakerMap: identified,
+      detectedLanguage,
     } = await runTranscribe(r, settings);
     const speakerMap =
       identified ?? (await inferSpeakerMap(utterances, r.speakers, settings));
@@ -281,6 +285,7 @@ export async function transcribeExisting(
       ...r,
       topic,
       speakerMap: speakerMap ?? r.speakerMap,
+      language: detectedLanguage ?? r.language,
       transcriptStatus: "done",
       aaiTranscriptId: transcriptId,
       audioDurationSec,

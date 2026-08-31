@@ -368,6 +368,9 @@ exports.askSonnet = onRequest(
 const AAI = "https://api.assemblyai.com/v2";
 const AAI_RATE_PER_HOUR = 0.12; // matches the app's estimate
 const LANG_CODES = { English: "en", French: "fr", Spanish: "es", Arabic: "ar" };
+const LANG_NAMES = Object.fromEntries(
+  Object.entries(LANG_CODES).map(([name, code]) => [code, name])
+);
 const TOPIC_MODEL = "claude-haiku-4-5-20251001";
 // A wrong speaker map mislabels every line of the transcript, so that call gets
 // a stronger model than the throwaway topic title. Mirrors src/transcription.ts.
@@ -626,8 +629,14 @@ exports.startTranscription = onObjectFinalized(
       const su = speakerIdentification(meta);
       if (su) body.speech_understanding = su;
       const lang = LANG_CODES[meta.language];
-      if (lang) body.language_code = lang;
-      else body.language_detection = true;
+      if (lang) {
+        body.language_code = lang;
+      } else {
+        // Detection beats a wrong pin, and code switching keeps English terms
+        // intact inside a French conversation. Mirrors src/transcription.ts.
+        body.language_detection = true;
+        body.language_detection_options = { code_switching: true };
+      }
       body.webhook_url = `https://${process.env.GCLOUD_PROJECT}.web.app/hooks/transcription`;
       body.webhook_auth_header_name = "x-mixtape-secret";
       body.webhook_auth_header_value = process.env.TRANSCRIBE_WEBHOOK_SECRET;

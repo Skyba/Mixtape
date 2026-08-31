@@ -93,7 +93,9 @@ import type { RootStackParamList } from "../../App";
 type Nav = NativeStackNavigationProp<RootStackParamList>;
 
 const DURATION_PRESETS = [0.5, 1, 2, 3, 4];
-const LANGUAGES = ["English", "French", "Arabic", "Spanish", "Other"];
+// "Auto" is first and is the default: a forgotten language setting used to
+// force the wrong one onto the whole recording.
+const LANGUAGES = ["Auto", "English", "French", "Arabic", "Spanish"];
 
 function fmt(t: number) {
   const h = Math.floor(t / 3600);
@@ -118,7 +120,7 @@ export default function RecordScreen() {
   const [isPrivate, setIsPrivate] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
   const [durationH, setDurationH] = useState(2);
-  const [language, setLanguage] = useState("English");
+  const [language, setLanguage] = useState("Auto");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
 

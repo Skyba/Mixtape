@@ -14,6 +14,22 @@ const LANG_CODES: Record<string, string> = {
   Arabic: "ar",
 };
 
+/** Reverse of LANG_CODES, for showing what was actually detected. */
+export const LANG_NAMES: Record<string, string> = Object.fromEntries(
+  Object.entries(LANG_CODES).map(([name, code]) => [code, name])
+);
+
+/**
+ * What to send when no language is pinned. Detection beats a wrong pin by a
+ * mile — a French conversation forced to "en" comes back as phonetic nonsense —
+ * and code switching keeps the English terms intact in a French conversation
+ * instead of transliterating them.
+ */
+export const AUTO_LANGUAGE = {
+  language_detection: true,
+  language_detection_options: { code_switching: true },
+};
+
 /**
  * How many speakers to tell AssemblyAI to expect. The count you set is used as
  * a FLOOR, not just a ceiling: left to itself the model can return a single
@@ -139,6 +155,7 @@ type CompletedTranscript = {
   utterances?: Utterance[];
   audio_duration?: number;
   text?: string;
+  language_code?: string;
   speech_understanding?: {
     response?: {
       speaker_identification?: { mapping?: Record<string, string> };
@@ -169,6 +186,8 @@ export type TranscribeResult = {
   utterances: Utterance[];
   /** From AssemblyAI's speaker identification, once it clears the gate. */
   speakerMap?: Record<string, string>;
+  /** What the audio turned out to be in, when it wasn't pinned. */
+  detectedLanguage?: string;
 };
 
 /** Kicks off a transcript job from an already-hosted URL and polls it. */
@@ -186,7 +205,7 @@ async function transcribeUrl(
   const su = speakerIdentification(rec.speakers, settings);
   if (su) body.speech_understanding = su;
   if (langCode) body.language_code = langCode;
-  else body.language_detection = true;
+  else Object.assign(body, AUTO_LANGUAGE);
 
   const create = await fetch(`${AAI}/transcript`, {
     method: "POST",
@@ -210,6 +229,9 @@ async function transcribeUrl(
     audioDurationSec: data.audio_duration ?? rec.durationSeconds,
     utterances,
     speakerMap,
+    detectedLanguage: data.language_code
+      ? LANG_NAMES[data.language_code] ?? data.language_code
+      : undefined,
   };
 }
 
@@ -263,7 +285,7 @@ export async function transcribeClipText(
   const langCode = LANG_CODES[language];
   const body: Record<string, unknown> = { audio_url: uploadUrl };
   if (langCode) body.language_code = langCode;
-  else body.language_detection = true;
+  else Object.assign(body, AUTO_LANGUAGE);
   const create = await fetch(`${AAI}/transcript`, {
     method: "POST",
     headers: {
@@ -295,7 +317,7 @@ export async function diarizeFromUrl(
   };
   if (speakerCount) body.speaker_options = speakerOptions(speakerCount);
   if (langCode) body.language_code = langCode;
-  else body.language_detection = true;
+  else Object.assign(body, AUTO_LANGUAGE);
   const create = await fetch(`${AAI}/transcript`, {
     method: "POST",
     headers: {

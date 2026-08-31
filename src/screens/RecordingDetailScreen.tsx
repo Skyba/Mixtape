@@ -65,6 +65,9 @@ import type { RootStackParamList } from "../../App";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Detail">;
 
+// Mirrors the Record screen. "Auto" detects instead of pinning.
+const DETAIL_LANGUAGES = ["Auto", "English", "French", "Arabic", "Spanish"];
+
 function tstamp(ms: number): string {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
@@ -230,7 +233,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     await Sharing.shareAsync(uri);
   }
 
-  async function doTranscribe() {
+  async function doTranscribe(target: Recording = rec) {
     const settings = await getSettings();
     if (!settings.assemblyAiKey) {
       Alert.alert("Add your AssemblyAI key in Settings first");
@@ -238,7 +241,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     }
     setBusy("Transcribing… (this can take minutes)");
     try {
-      const updated = await transcribeExisting(rec, settings);
+      const updated = await transcribeExisting(target, settings);
       setRec(updated);
       setTranscript(await readTranscript(updated));
     } catch (e: any) {
@@ -279,6 +282,33 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       await deleteRemoteRecording(from).catch(() => {});
     }
     setBusy("");
+  }
+
+  /**
+   * The language pins what AssemblyAI transcribes in — a wrong pin produces
+   * phonetic nonsense rather than a rough transcript — so changing it offers to
+   * run again. "Auto" means detect, which is what a forgotten setting should be.
+   */
+  async function changeLanguage(language: string) {
+    if (language === rec.language) return;
+    const next = { ...rec, language };
+    setRec(next);
+    await writeMeta(next);
+    if (isFirebaseConfigured && isSignedIn()) {
+      await uploadRecording(next).catch(() => {});
+    }
+    if (rec.transcriptStatus === "done") {
+      Alert.alert(
+        "Language changed",
+        `The transcript was made in ${rec.language || "auto"}. Run it again in ${
+          language === "Auto" ? "auto-detect" : language
+        }?`,
+        [
+          { text: "Later", style: "cancel" },
+          { text: "Transcribe again", onPress: () => doTranscribe(next) },
+        ]
+      );
+    }
   }
 
   /** Filing for the archive. The folder is a real move; the rest is metadata. */
@@ -419,7 +449,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
               pending && styles.transcribeBusy,
             ]}
             disabled={pending || !!rec.damaged}
-            onPress={doTranscribe}
+            onPress={() => doTranscribe()}
           >
             <Text style={styles.btnTxt}>
               {done
@@ -440,6 +470,26 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         }}
         onChange={savePlacement}
       />
+      <Text style={styles.sectionLabel}>Language</Text>
+      <View style={styles.langRow}>
+        {DETAIL_LANGUAGES.map((l) => (
+          <TouchableOpacity
+            key={l}
+            style={[styles.langChip, l === rec.language && styles.langChipOn]}
+            onPress={() => changeLanguage(l)}
+          >
+            <Text
+              style={[
+                styles.langTxt,
+                l === rec.language && styles.langTxtOn,
+              ]}
+            >
+              {l}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
       <SpeakerSelector
         count={rec.speakers.length}
         names={toNames(rec.speakers)}
@@ -657,6 +707,16 @@ function LockBtn({
 
 const styles = StyleSheet.create({
   container: { backgroundColor: "#0f1115", flex: 1, padding: 20, paddingTop: 50 },
+  langRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
+  langChip: {
+    backgroundColor: "#23262d",
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 11,
+  },
+  langChipOn: { backgroundColor: "#2f6fd0" },
+  langTxt: { color: "#c9cdd3", fontSize: 12.5 },
+  langTxtOn: { color: "#fff", fontWeight: "700" },
   damagedBox: {
     backgroundColor: "#3a1d1d",
     borderRadius: 12,
