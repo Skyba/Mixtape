@@ -92,7 +92,10 @@ import type { RootStackParamList } from "../../App";
 
 type Nav = NativeStackNavigationProp<RootStackParamList>;
 
-const DURATION_PRESETS = [0.5, 1, 2, 3, 4];
+// 10h is AssemblyAI's ceiling — anything longer can't be transcribed at all,
+// so it's the top of the range rather than a value you can overshoot. 5h is the
+// default: long enough for anything real, short enough to stay transcribable.
+const DURATION_PRESETS = [0.5, 1, 2, 3, 5, 10];
 // "Auto" is first and is the default: a forgotten language setting used to
 // force the wrong one onto the whole recording.
 const LANGUAGES = ["Auto", "English", "French", "Arabic", "Spanish"];
@@ -119,7 +122,7 @@ export default function RecordScreen() {
   const [folder, setFolder] = useState(INBOX);
   const [isPrivate, setIsPrivate] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
-  const [durationH, setDurationH] = useState(2);
+  const [durationH, setDurationH] = useState(5);
   const [language, setLanguage] = useState("Auto");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
