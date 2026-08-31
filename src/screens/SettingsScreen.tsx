@@ -38,12 +38,8 @@ import {
 } from "../recover";
 import { isRecordingInProgress } from "../recordingFlow";
 import { FOLDERS, INBOX } from "../placement";
-import {
-  ICON_CHOICES,
-  iconOf,
-  saveFolderIcon,
-  useFolderIcons,
-} from "../folderIcons";
+import { iconOf, saveFolderIcon, useFolderIcons } from "../folderIcons";
+import IconPicker from "../components/IconPicker";
 import { DEFAULT_SETTINGS, Settings } from "../types";
 import type { RootStackParamList } from "../../App";
 
@@ -447,21 +443,16 @@ export default function SettingsScreen() {
                   </TouchableOpacity>
                 ) : null}
               </TouchableOpacity>
-              {pickFor === f ? (
-                <View style={styles.palette}>
-                  {ICON_CHOICES.map((e) => (
-                    <TouchableOpacity
-                      key={e}
-                      style={styles.paletteCell}
-                      onPress={() => changeIcon(f, e)}
-                    >
-                      <Text style={styles.iconGlyph}>{e}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              ) : null}
             </View>
           ))}
+          {pickFor ? (
+            <IconPicker
+              folder={pickFor}
+              current={iconOf(pickFor, icons)}
+              onPick={(e) => changeIcon(pickFor, e)}
+              onClose={() => setPickFor(null)}
+            />
+          ) : null}
         </>
       ) : null}
 

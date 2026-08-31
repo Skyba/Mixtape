@@ -2,16 +2,13 @@ import { useEffect, useState } from "react";
 import { DEFAULT_ICONS } from "./placement";
 import { getFolderIcons, setFolderIcon } from "./storage";
 
-/** A pick-one palette — free text let letters, spaces and emoji pairs through. */
-export const ICON_CHOICES = [
-  "📥", "🗂️", "📁", "📌", "⭐", "🔖",
-  "👩", "👨", "🧑", "👶", "👨‍👩‍👧", "❤️",
-  "🍻", "🎉", "🎧", "🎬", "🎨", "📚",
-  "💼", "🏢", "🤝", "📈", "💰", "⚖️",
-  "⛓️", "🤖", "💻", "🛰️", "⚡", "🔋",
-  "🔎", "🧪", "🛠️", "🚀", "✈️", "🚗",
-  "🏠", "🏜️", "🏔️", "🌍", "🌊", "☀️",
-  "🪞", "🧘", "💡", "📝", "🎯", "🔥",
+/** Grouped so an icon can be found by what the folder is about. */
+export const ICON_GROUPS: { label: string; icons: string[] }[] = [
+  { label: "People", icons: ["👩", "👨", "🧑", "👶", "👨‍👩‍👧", "❤️", "🍻", "🤝"] },
+  { label: "Work", icons: ["💼", "🏢", "📈", "💰", "⚖️", "🤖", "💻", "⛓️"] },
+  { label: "Places", icons: ["🏠", "🏔️", "🏜️", "🌍", "✈️", "🚗", "🛰️", "🌊"] },
+  { label: "Things", icons: ["📥", "🗂️", "📁", "📌", "🔖", "📚", "🎧", "🎬"] },
+  { label: "Ideas", icons: ["💡", "📝", "🎯", "🔥", "🪞", "🧘", "🔎", "⚡"] },
 ];
 
 // One shared copy for the whole app. Per-screen state meant editing an icon in

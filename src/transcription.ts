@@ -526,7 +526,9 @@ export async function inferTopic(
           {
             role: "user",
             content:
-              "Give a 2-5 word topic title for this meeting transcript. " +
+              "Give a 2-5 word topic title for this meeting transcript, " +
+              "written in the same language the conversation is in — a " +
+              "French conversation gets a French title.\n" +
               "Output only the title, no quotes or punctuation.\n\n" +
               transcript.slice(0, 6000),
           },

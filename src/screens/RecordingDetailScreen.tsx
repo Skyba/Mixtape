@@ -204,7 +204,16 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   async function remapSpeaker(letter: string, name: string) {
     if (!utterances) return;
-    const nextMap = { ...(rec.speakerMap ?? {}), [letter]: name };
+    // A name belongs to one letter unless there are more letters than people,
+    // so assigning it here takes it away from whichever letter had it.
+    const mayShare =
+      new Set(utterances.map((u) => u.speaker)).size > rec.speakers.length;
+    const base = Object.fromEntries(
+      Object.entries(rec.speakerMap ?? {}).filter(
+        ([l, n]) => mayShare || l === letter || n !== name
+      )
+    );
+    const nextMap = { ...base, [letter]: name };
     const nextText = renderTranscript(utterances, rec.speakers, nextMap);
     const next = { ...rec, speakerMap: nextMap };
     setRec(next);
@@ -322,12 +331,40 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     }
   }
 
+  /**
+   * Every view resolves a speaker through nameForSpeaker, where speakerMap wins
+   * over the speakers list — so renaming a slot changed nothing at all while a
+   * map existed: talk time, the transcript and the remap rows all kept the old
+   * names. The rename now carries through the map by position, re-renders the
+   * stored transcript, and pushes both to the cloud.
+   */
   async function saveSpeakers(names: (string | null)[]) {
     const speakers = toSpeakers(names);
-    const next = { ...rec, speakers };
+    const renamed: Record<string, string> = {};
+    rec.speakers.forEach((old, i) => {
+      if (speakers[i] && speakers[i] !== old) renamed[old] = speakers[i];
+    });
+    const nextMap = rec.speakerMap
+      ? Object.fromEntries(
+          Object.entries(rec.speakerMap)
+            .map(([letter, name]) => [letter, renamed[name] ?? name])
+            // a name that no longer exists would pin the letter to a ghost
+            .filter(([, name]) => speakers.includes(name as string))
+        )
+      : undefined;
+    const next: Recording = { ...rec, speakers, speakerMap: nextMap };
     setRec(next);
     await writeMeta(next);
     await rememberSpeakers(speakers.filter((s) => !/^Speaker \d+$/.test(s)));
+
+    if (utterances && utterances.length) {
+      const text = renderTranscript(utterances, speakers, nextMap);
+      setTranscript(text);
+      await writeTranscript(next, text);
+    }
+    if (isFirebaseConfigured && isSignedIn()) {
+      await uploadRecording(next).catch(() => {});
+    }
   }
 
   function confirmDelete() {

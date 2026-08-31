@@ -28,7 +28,8 @@ import {
   uploadRecording,
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
-import { iconOf, useFolderIcons } from "../folderIcons";
+import { iconOf, saveFolderIcon, useFolderIcons } from "../folderIcons";
+import IconPicker from "../components/IconPicker";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
 import type { RootStackParamList } from "../../App";
@@ -46,6 +47,7 @@ export default function LibraryScreen() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [folderFilter, setFolderFilter] = useState<string | null>(null);
   const icons = useFolderIcons();
+  const [iconFor, setIconFor] = useState<string | null>(null);
   const insets = useSafeAreaInsets();
 
   useEffect(() => subscribeAuth(setAuthEmail), []);
@@ -308,6 +310,7 @@ export default function LibraryScreen() {
           key={r.id}
           rec={r}
           icon={iconOf(r.folder, icons)}
+          onIcon={() => setIconFor(r.folder)}
           onPress={() => navigation.navigate("Detail", { rec: r })}
           onDelete={() => remove(r, false)}
           selectMode={selectMode}
@@ -315,6 +318,18 @@ export default function LibraryScreen() {
           onToggle={() => toggleSelect(r.id)}
         />
       ))}
+
+      {iconFor ? (
+        <IconPicker
+          folder={iconFor}
+          current={iconOf(iconFor, icons)}
+          onPick={(e) => {
+            saveFolderIcon(iconFor, e);
+            setIconFor(null);
+          }}
+          onClose={() => setIconFor(null)}
+        />
+      ) : null}
 
       {remote.length > 0 && (
         <View>
@@ -383,6 +398,7 @@ function syncInfo(
 function Row({
   rec,
   icon,
+  onIcon,
   onPress,
   onDelete,
   remote,
@@ -392,6 +408,7 @@ function Row({
 }: {
   rec: Recording;
   icon: string;
+  onIcon?: () => void;
   onPress: () => void;
   onDelete?: () => void;
   remote?: boolean;
@@ -417,9 +434,9 @@ function Row({
           />
         </TouchableOpacity>
       ) : (
-        <View style={styles.play}>
+        <TouchableOpacity style={styles.play} onPress={onIcon} disabled={!onIcon}>
           <Text style={styles.folderIcon}>{icon}</Text>
-        </View>
+        </TouchableOpacity>
       )}
       <TouchableOpacity
         style={styles.rowBody}
@@ -432,10 +449,11 @@ function Row({
           {(rec.speakers ?? []).join(", ") || "no speakers"}
           {rec.private ? "  🔒" : ""}
         </Text>
-        <Text style={styles.rowFiling} numberOfLines={1}>
-          {rec.folder}
-          {rec.tags?.length ? `  ${rec.tags.map((t) => `#${t}`).join(" ")}` : ""}
-        </Text>
+        {rec.tags?.length ? (
+          <Text style={styles.rowFiling} numberOfLines={1}>
+            {rec.tags.map((t) => `#${t}`).join(" ")}
+          </Text>
+        ) : null}
         <View style={styles.metaRow}>
           {date ? <Text style={styles.rowDate}>{date}</Text> : null}
           <Text style={styles.rowMeta}>{fmtDur(rec.durationSeconds)}</Text>
