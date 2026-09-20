@@ -67,7 +67,9 @@ import {
 } from "../battery";
 import { DEFAULT_SETTINGS, INBOX, Recording, Settings } from "../types";
 import {
+  AudioInput,
   acquireWakelock,
+  externalInput,
   releaseWakelock,
 } from "../../modules/mixtape-wakelock";
 
@@ -131,9 +133,9 @@ export default function RecordScreen() {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [savingPreset, setSavingPreset] = useState(false);
   const [presetName, setPresetName] = useState("");
-  // What the recorder is actually listening to. Only knowable once it's
-  // prepared, and only truthful while recording — see micLabel below.
-  const [micName, setMicName] = useState("");
+  // The plugged-in mic, or null when we're on the phone's own mic.
+  const [mic, setMic] = useState<AudioInput | null>(null);
+  const extRef = useRef<AudioInput | null>(null);
 
   const [isRecording, setIsRecording] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -220,17 +222,40 @@ export default function RecordScreen() {
     })();
   }, []);
 
+  // Watch for the dongle being plugged in or pulled out. Cheap local query,
+  // so polling beats wiring up a native device-change callback.
+  useEffect(() => {
+    refreshMic();
+    const t = setInterval(refreshMic, 2500);
+    return () => clearInterval(t);
+  }, []);
+
   /**
-   * Which microphone is in use. expo-audio only reports the truly routed device
-   * while recording; before that it falls back to the built-in mic, so an
-   * attached dongle stays invisible until the take starts.
+   * Which microphone we'd record with. Asks the system directly rather than
+   * going through expo-audio: its getAvailableInputs() hides USB devices, and
+   * its getCurrentInput() pins the built-in mic as the preferred device when
+   * nothing is recording yet, which would route a take away from the dongle.
    */
-  async function refreshMic() {
+  function refreshMic() {
+    const ext = externalInput();
+    extRef.current = ext;
+    setMic(ext);
+  }
+
+  /**
+   * Point the recorder at the dongle. Android usually routes to USB on its own,
+   * but saying so explicitly survives anything that pinned the built-in mic.
+   * Must run after prepareToRecordAsync: with no prepared recorder underneath,
+   * expo-audio's setInput silently does nothing.
+   */
+  function preferExternalMic() {
+    const ext = extRef.current;
+    if (!ext) return;
     try {
-      const input = await recorder.getCurrentInput();
-      setMicName(input?.name ? String(input.name) : "");
+      recorder.setInput(String(ext.id));
     } catch {
-      setMicName("");
+      // A device that refuses to be the preferred input is not worth failing
+      // the recording over — the system routing still applies.
     }
   }
 
@@ -379,6 +404,7 @@ export default function RecordScreen() {
       // on screen-off.
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
       await recorder.prepareToRecordAsync();
+      preferExternalMic();
       // forDuration is a native hard cap: the OS recorder stops itself at the
       // deadline even with the screen off / JS timer suspended. The JS interval
       // below is now just a display + foreground fallback.
@@ -458,6 +484,7 @@ export default function RecordScreen() {
     (async () => {
       try {
         await recorder.prepareToRecordAsync();
+        preferExternalMic();
         // Native backstop: if the JS roll timer is suspended (screen off / Doze)
         // the segment stops itself instead of recording forever. Set above
         // SEGMENT_MS so the normal JS roll always wins and this only fires on a
@@ -971,12 +998,11 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         </View>
       ) : null}
 
-      {micName ? (
-        <Text style={styles.micLine}>
-          🎙 {micName}
-          {isRecording ? "" : "  (last used)"}
-        </Text>
-      ) : null}
+      <Text style={[styles.micLine, mic ? styles.micLineOn : null]}>
+        {mic
+          ? `🎙 ${mic.name}${mic.channels.includes(2) ? " · stereo" : ""}`
+          : "🎙 Phone mic"}
+      </Text>
 
       {isRecording && (
         <View style={styles.timerBox}>
@@ -1353,6 +1379,7 @@ const styles = StyleSheet.create({
   },
   presetSaveTxt: { color: "#fff", fontSize: 13, fontWeight: "700" },
   micLine: { color: "#7c828a", fontSize: 12, marginTop: 8 },
+  micLineOn: { color: "#6fd08c", fontWeight: "700" },
   viewBtn: {
     backgroundColor: "#23262d",
     padding: 14,
