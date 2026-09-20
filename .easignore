@@ -1,0 +1,60 @@
+# EAS Build uploads the project using this file INSTEAD of .gitignore.
+# It is a copy of .gitignore minus firebaseConfig.ts: that file is deliberately
+# untracked, but the bundler needs it (src/screens/LoginScreen.tsx imports it),
+# so without this the JS bundle fails on the builder with "Unable to resolve
+# module ../../firebaseConfig". Keep the two files in step.
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files + secrets
+.env
+.env.*
+!.env.example
+
+# firebase cli cache
+.firebase/
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+/ios
+/android
+
+# CLI logs + local build artifacts
+firebase-debug.log
+firebase-debug.*.log
+*-debug.log
+apk-qr.png
+
+public/index.html
+.firebaserc
+.gstack/
