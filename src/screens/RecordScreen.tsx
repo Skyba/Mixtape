@@ -5,6 +5,7 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
@@ -46,6 +47,7 @@ import {
   setRecordingInProgress,
 } from "../recordingFlow";
 import { logEvent } from "../log";
+import { Preset, deletePreset, getPresets, savePreset } from "../presets";
 import {
   transcribeClipText,
   diarizeFromUrl,
@@ -93,8 +95,7 @@ import type { RootStackParamList } from "../../App";
 type Nav = NativeStackNavigationProp<RootStackParamList>;
 
 // 10h is AssemblyAI's ceiling — anything longer can't be transcribed at all,
-// so it's the top of the range rather than a value you can overshoot. 5h is the
-// default: long enough for anything real, short enough to stay transcribable.
+// so it's the top of the range rather than a value you can overshoot.
 const DURATION_PRESETS = [0.5, 1, 2, 3, 5, 10];
 // "Auto" is first and is the default: a forgotten language setting used to
 // force the wrong one onto the whole recording.
@@ -122,10 +123,17 @@ export default function RecordScreen() {
   const [folder, setFolder] = useState(INBOX);
   const [isPrivate, setIsPrivate] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
-  const [durationH, setDurationH] = useState(5);
+  const [durationH, setDurationH] = useState(2);
   const [language, setLanguage] = useState("Auto");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetName, setPresetName] = useState("");
+  // What the recorder is actually listening to. Only knowable once it's
+  // prepared, and only truthful while recording — see micLabel below.
+  const [micName, setMicName] = useState("");
 
   const [isRecording, setIsRecording] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -208,8 +216,63 @@ export default function RecordScreen() {
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
       setSpeakerHist(await getSpeakerHistory());
       setSettings(await getSettings());
+      setPresets(await getPresets());
     })();
   }, []);
+
+  /**
+   * Which microphone is in use. expo-audio only reports the truly routed device
+   * while recording; before that it falls back to the built-in mic, so an
+   * attached dongle stays invisible until the take starts.
+   */
+  async function refreshMic() {
+    try {
+      const input = await recorder.getCurrentInput();
+      setMicName(input?.name ? String(input.name) : "");
+    } catch {
+      setMicName("");
+    }
+  }
+
+  function applyPreset(p: Preset) {
+    setDurationH(p.durationH);
+    setNames(p.names);
+    setCount(p.names.length);
+    setLanguage(p.language);
+    setFolder(p.folder);
+    setTags(p.tags);
+    setIsPrivate(p.private);
+    setStatus(`Preset: ${p.name}`);
+  }
+
+  async function storePreset() {
+    const name = presetName.trim();
+    setPresetName("");
+    setSavingPreset(false);
+    if (!name) return;
+    setPresets(
+      await savePreset({
+        name: name.slice(0, 24),
+        durationH,
+        names,
+        language,
+        folder,
+        tags,
+        private: isPrivate,
+      })
+    );
+  }
+
+  function confirmDeletePreset(p: Preset) {
+    Alert.alert(`Delete "${p.name}"?`, "The preset only, not any recording.", [
+      { text: "Keep", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => setPresets(await deletePreset(p.name)),
+      },
+    ]);
+  }
 
   // Mirrors the recording state into module scope so the cache tools in
   // Settings never offer to delete the take that's still being written.
@@ -324,6 +387,7 @@ export default function RecordScreen() {
       await activateKeepAwakeAsync();
       acquireWakelock();
       logEvent(`start normal: recording, cap=${durationH}h`);
+      refreshMic();
       markRecording(true);
       setPaused(false);
       startTick();
@@ -730,6 +794,7 @@ export default function RecordScreen() {
       logEvent(
         `start chunked: cap=${durationH}h chunk=${SAFETY_CHUNK_MS / 1000}s`
       );
+      refreshMic();
       markRecording(true);
       setPaused(false);
       startTick();
@@ -867,6 +932,51 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>Record</Text>
+
+      {!isRecording ? (
+        <View style={styles.presetRow}>
+          {presets.map((p) => (
+            <TouchableOpacity
+              key={p.name}
+              style={styles.presetChip}
+              onPress={() => applyPreset(p)}
+              onLongPress={() => confirmDeletePreset(p)}
+            >
+              <Text style={styles.presetTxt}>{p.name}</Text>
+            </TouchableOpacity>
+          ))}
+          <TouchableOpacity
+            style={[styles.presetChip, styles.presetGhost]}
+            onPress={() => setSavingPreset((v) => !v)}
+          >
+            <Text style={styles.presetGhostTxt}>save as preset</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {savingPreset && !isRecording ? (
+        <View style={styles.presetSave}>
+          <TextInput
+            style={styles.presetInput}
+            value={presetName}
+            onChangeText={setPresetName}
+            placeholder="preset name (e.g. Erica convo)"
+            placeholderTextColor="#6b7280"
+            autoFocus
+            onSubmitEditing={storePreset}
+          />
+          <TouchableOpacity style={styles.presetSaveBtn} onPress={storePreset}>
+            <Text style={styles.presetSaveTxt}>Save</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {micName ? (
+        <Text style={styles.micLine}>
+          🎙 {micName}
+          {isRecording ? "" : "  (last used)"}
+        </Text>
+      ) : null}
 
       {isRecording && (
         <View style={styles.timerBox}>
@@ -1211,6 +1321,38 @@ const styles = StyleSheet.create({
   cancelBtn: { paddingVertical: 12, alignItems: "center", marginTop: 6 },
   cancelTxt: { color: "#9aa0a6", fontSize: 14, fontWeight: "600" },
   status: { color: "#9aa0a6", fontSize: 13, marginTop: 16, lineHeight: 19 },
+  presetRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 10 },
+  presetChip: {
+    backgroundColor: "#1f3350",
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 11,
+  },
+  presetTxt: { color: "#cfe0ff", fontSize: 12.5, fontWeight: "700" },
+  presetGhost: {
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: "#2d323b",
+  },
+  presetGhostTxt: { color: "#7c828a", fontSize: 12 },
+  presetSave: { flexDirection: "row", gap: 8, marginTop: 8, alignItems: "center" },
+  presetInput: {
+    flex: 1,
+    backgroundColor: "#1a1d23",
+    borderRadius: 8,
+    color: "#fff",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 13,
+  },
+  presetSaveBtn: {
+    backgroundColor: "#2f6fd0",
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  presetSaveTxt: { color: "#fff", fontSize: 13, fontWeight: "700" },
+  micLine: { color: "#7c828a", fontSize: 12, marginTop: 8 },
   viewBtn: {
     backgroundColor: "#23262d",
     padding: 14,
