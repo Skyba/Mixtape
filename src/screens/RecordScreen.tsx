@@ -140,6 +140,9 @@ export default function RecordScreen() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
 
   const [presets, setPresets] = useState<Preset[]>([]);
+  // The preset the current settings came from, if any. Deliberately not
+  // persisted: arriving at the screen starts with nothing selected.
+  const [applied, setApplied] = useState<Preset | null>(null);
   const [savingPreset, setSavingPreset] = useState(false);
   const [presetName, setPresetName] = useState("");
   // The plugged-in mic, or null when we're on the phone's own mic.
@@ -299,7 +302,62 @@ export default function RecordScreen() {
     setFolder(p.folder);
     setTags(p.tags);
     setIsPrivate(p.private);
-    setStatus(`Preset: ${p.name}`);
+    setApplied(p);
+    setSavingPreset(false);
+  }
+
+  /** Everything a preset covers, as it stands right now. */
+  function currentAs(name: string): Preset {
+    return {
+      name,
+      durationH,
+      names,
+      language,
+      folder,
+      tags,
+      private: isPrivate,
+    };
+  }
+
+  /**
+   * Whether the settings still match the preset they came from. Comparing the
+   * values beats intercepting every setter: whatever moves a field — a chip,
+   * the speaker rows, the placement picker — shows up here.
+   */
+  function matchesPreset(p: Preset) {
+    const tagsOf = (t: string[]) => [...t].sort().join(" ");
+    return (
+      p.durationH === durationH &&
+      p.language === language &&
+      p.folder === folder &&
+      p.private === isPrivate &&
+      p.names.length === names.length &&
+      p.names.every((n, i) => (n ?? "") === (names[i] ?? "")) &&
+      tagsOf(p.tags) === tagsOf(tags)
+    );
+  }
+
+  const onPreset = applied !== null && matchesPreset(applied);
+
+  async function updatePreset(target: Preset) {
+    const next = currentAs(target.name);
+    setPresets(await savePreset(next));
+    setApplied(next);
+  }
+
+  function presetMenu(target: Preset) {
+    Alert.alert(target.name, undefined, [
+      {
+        text: "Update to current settings",
+        onPress: () => updatePreset(target),
+      },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: () => confirmDeletePreset(target),
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
   }
 
   async function storePreset() {
@@ -307,17 +365,9 @@ export default function RecordScreen() {
     setPresetName("");
     setSavingPreset(false);
     if (!name) return;
-    setPresets(
-      await savePreset({
-        name: name.slice(0, 24),
-        durationH,
-        names,
-        language,
-        folder,
-        tags,
-        private: isPrivate,
-      })
-    );
+    const next = currentAs(name.slice(0, 24));
+    setPresets(await savePreset(next));
+    setApplied(next);
   }
 
   function confirmDeletePreset(p: Preset) {
@@ -326,7 +376,10 @@ export default function RecordScreen() {
       {
         text: "Delete",
         style: "destructive",
-        onPress: async () => setPresets(await deletePreset(p.name)),
+        onPress: async () => {
+          setPresets(await deletePreset(p.name));
+          setApplied((cur) => (cur?.name === p.name ? null : cur));
+        },
       },
     ]);
   }
@@ -996,16 +1049,33 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
 
       {!isRecording ? (
         <View style={styles.presetRow}>
-          {presets.map((p) => (
+          {presets.map((p) => {
+            const on = onPreset && applied?.name === p.name;
+            return (
+              <TouchableOpacity
+                key={p.name}
+                style={[styles.presetChip, on ? styles.presetChipOn : null]}
+                onPress={() => applyPreset(p)}
+                onLongPress={() => presetMenu(p)}
+              >
+                <Text
+                  style={[styles.presetTxt, on ? styles.presetTxtOn : null]}
+                >
+                  {p.name}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+          {applied && !onPreset ? (
             <TouchableOpacity
-              key={p.name}
-              style={styles.presetChip}
-              onPress={() => applyPreset(p)}
-              onLongPress={() => confirmDeletePreset(p)}
+              style={[styles.presetChip, styles.presetGhost]}
+              onPress={() => updatePreset(applied)}
             >
-              <Text style={styles.presetTxt}>{p.name}</Text>
+              <Text style={styles.presetGhostTxt}>
+                update &ldquo;{applied.name}&rdquo;
+              </Text>
             </TouchableOpacity>
-          ))}
+          ) : null}
           <TouchableOpacity
             style={[styles.presetChip, styles.presetGhost]}
             onPress={() => setSavingPreset((v) => !v)}
@@ -1013,6 +1083,12 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
             <Text style={styles.presetGhostTxt}>save as preset</Text>
           </TouchableOpacity>
         </View>
+      ) : null}
+
+      {presets.length > 0 && !isRecording ? (
+        <Text style={styles.presetHint}>
+          Long-press a preset to update or delete it.
+        </Text>
       ) : null}
 
       {savingPreset && !isRecording ? (
@@ -1396,6 +1472,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 11,
   },
   presetTxt: { color: "#cfe0ff", fontSize: 12.5, fontWeight: "700" },
+  presetChipOn: { backgroundColor: "#2f6fd0" },
+  presetTxtOn: { color: "#fff" },
+  presetHint: { color: "#6b7280", fontSize: 11, marginTop: 6 },
   presetGhost: {
     backgroundColor: "transparent",
     borderWidth: 1,
