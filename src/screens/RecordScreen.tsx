@@ -84,6 +84,15 @@ const SAFETY_CHUNK_MS = 180000; // 3 minutes
 // so it's re-asserted at every record start — any code that sets the mode
 // without shouldPlayInBackground (expo-audio resets omitted fields) would
 // otherwise make the native recorder pause the moment the screen locks.
+// Mono. The phone's own mic already hands us the same room mix on both
+// channels, so stereo bought nothing — and a mono-only USB mic can be ruled
+// out entirely when the recorder insists on two channels, which silently
+// sends the take back to the built-in mic. Half the bytes, too.
+const RECORDING_OPTIONS = {
+  ...RecordingPresets.HIGH_QUALITY,
+  numberOfChannels: 1,
+};
+
 const RECORDING_AUDIO_MODE = {
   playsInSilentMode: true,
   allowsRecording: true,
@@ -115,7 +124,7 @@ export default function RecordScreen() {
   // The status listener delegates through a ref so it always runs the latest
   // closure (stop/refs), not the one captured on first render.
   const onRecStatusRef = useRef<(s: RecordingStatus) => void>(() => {});
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY, (s) =>
+  const recorder = useAudioRecorder(RECORDING_OPTIONS, (s) =>
     onRecStatusRef.current(s)
   );
 
@@ -136,6 +145,11 @@ export default function RecordScreen() {
   // The plugged-in mic, or null when we're on the phone's own mic.
   const [mic, setMic] = useState<AudioInput | null>(null);
   const extRef = useRef<AudioInput | null>(null);
+  // Fallback for builds without the native input list: what the recorder
+  // actually ended up routed to, which is only knowable mid-take.
+  const [routed, setRouted] = useState<{ name: string; ext: boolean } | null>(
+    null
+  );
 
   const [isRecording, setIsRecording] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -248,6 +262,24 @@ export default function RecordScreen() {
    * Must run after prepareToRecordAsync: with no prepared recorder underneath,
    * expo-audio's setInput silently does nothing.
    */
+  /**
+   * Read back the device the take is actually on. Only used where the native
+   * list isn't available, and only once the route has settled: asking too
+   * early makes expo-audio pin the built-in mic as the preferred device,
+   * which would drag a live take off the dongle.
+   */
+  async function probeRoutedMic() {
+    if (extRef.current) return;
+    try {
+      const input: any = await recorder.getCurrentInput();
+      if (!input?.name) return;
+      setRouted({
+        name: String(input.name),
+        ext: input.type !== "MicrophoneBuiltIn",
+      });
+    } catch {}
+  }
+
   function preferExternalMic() {
     const ext = extRef.current;
     if (!ext) return;
@@ -414,6 +446,7 @@ export default function RecordScreen() {
       acquireWakelock();
       logEvent(`start normal: recording, cap=${durationH}h`);
       refreshMic();
+      setTimeout(probeRoutedMic, 3000);
       markRecording(true);
       setPaused(false);
       startTick();
@@ -822,6 +855,7 @@ export default function RecordScreen() {
         `start chunked: cap=${durationH}h chunk=${SAFETY_CHUNK_MS / 1000}s`
       );
       refreshMic();
+      setTimeout(probeRoutedMic, 3000);
       markRecording(true);
       setPaused(false);
       startTick();
@@ -998,10 +1032,17 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         </View>
       ) : null}
 
-      <Text style={[styles.micLine, mic ? styles.micLineOn : null]}>
+      <Text
+        style={[
+          styles.micLine,
+          mic || routed?.ext ? styles.micLineOn : null,
+        ]}
+      >
         {mic
           ? `🎙 ${mic.name}${mic.channels.includes(2) ? " · stereo" : ""}`
-          : "🎙 Phone mic"}
+          : routed
+            ? `🎙 ${routed.name}${routed.ext ? "" : " (phone mic)"}`
+            : "🎙 Phone mic"}
       </Text>
 
       {isRecording && (
