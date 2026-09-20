@@ -38,6 +38,9 @@ yarn-error.*
 # your own Firebase web config (copy firebaseConfig.example.ts → firebaseConfig.ts)
 firebaseConfig.ts
 
+# your own folder taxonomy (copy src/placement.local.example.ts → src/placement.local.ts)
+src/placement.local.ts
+
 # firebase cli cache
 .firebase/
 
@@ -58,3 +61,4 @@ apk-qr.png
 # copy the .example versions and paste your own before deploying
 public/index.html
 .firebaserc
+.gstack/

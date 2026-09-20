@@ -50,12 +50,15 @@ npm install
 cp firebaseConfig.example.ts firebaseConfig.ts       # app's Firebase config
 cp public/index.example.html public/index.html       # share-viewer's Firebase config
 cp .firebaserc.example .firebaserc                    # your Firebase project id
-# now fill each of the three in (step 3)
+cp src/placement.local.example.ts src/placement.local.ts  # your folders and tags
+# now fill each of them in (step 3)
 ```
 
-These three copies (`firebaseConfig.ts`, `public/index.html`, `.firebaserc`) are
-**gitignored** — your project's config/ids never get committed. Only the
-`*.example` templates are in the repo.
+These four copies (`firebaseConfig.ts`, `public/index.html`, `.firebaserc`,
+`src/placement.local.ts`) are **gitignored** — your project's config and your
+folder list never get committed. Only the `*.example` templates are in the repo.
+The app will not bundle until `firebaseConfig.ts` and `src/placement.local.ts`
+exist, so do not skip them.
 
 ## 2. Create your Firebase project
 
