@@ -33,6 +33,7 @@ import { getFunctions, httpsCallable } from "firebase/functions";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystem from "expo-file-system/legacy";
 import type { Utterance } from "./transcription";
+import * as Crypto from "expo-crypto";
 import { firebaseConfig, isFirebaseConfigured } from "../firebaseConfig";
 import { logEvent } from "./log";
 import { Recording } from "./types";
@@ -258,10 +259,23 @@ export async function downloadUrlForPath(path: string): Promise<string> {
 // Firebase Hosting default domain for this project — used for share links.
 const SHARE_BASE = `https://${firebaseConfig.projectId}.web.app/r/`;
 
+/**
+ * A share id is a bearer token: anyone holding it can read the transcript, so
+ * it comes from the system CSPRNG. Math.random is V8's xorshift128+, whose
+ * state can be recovered from output, which would let someone holding a few of
+ * your links work out the others. Bytes at or above `max` are discarded so no
+ * character is favoured by the modulo.
+ */
 function randomId(): string {
   const c = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const max = 256 - (256 % c.length);
   let s = "";
-  for (let i = 0; i < 20; i++) s += c[Math.floor(Math.random() * c.length)];
+  while (s.length < 20) {
+    const bytes = Crypto.getRandomBytes(24);
+    for (let i = 0; i < bytes.length && s.length < 20; i++) {
+      if (bytes[i] < max) s += c[bytes[i] % c.length];
+    }
+  }
   return s;
 }
 

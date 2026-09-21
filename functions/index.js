@@ -294,6 +294,10 @@ function speakerName(s, letter) {
 // Public-page prompt box: proxies to Anthropic with a server-side key so the
 // key is never exposed in the browser. invoker:"public" allows the public page
 // (and the hosting /api/ask rewrite) to call it; cors:true handles preflight.
+// Questions allowed per share per day. Generous for a reader, useless for
+// anyone trying to run up the bill.
+const ASK_DAILY_LIMIT = 50;
+
 exports.askSonnet = onRequest(
   {
     region: "us-central1",
@@ -325,6 +329,21 @@ exports.askSonnet = onRequest(
         return;
       }
       const s = snap.data();
+
+      // This endpoint is public — a share id is the only thing gating it — and
+      // every call spends the project's Anthropic budget. Capping the prompt
+      // bounds one call; this bounds the number of them. The counter lives on
+      // the share doc, so it costs no extra read.
+      const today = new Date().toISOString().slice(0, 10);
+      const askedToday = s.askDay === today ? s.askCount || 0 : 0;
+      if (askedToday >= ASK_DAILY_LIMIT) {
+        res.status(429).json({ error: "daily question limit reached" });
+        return;
+      }
+      snap.ref
+        .set({ askDay: today, askCount: askedToday + 1 }, { merge: true })
+        .catch(() => {});
+
       const transcript = (s.utterances || [])
         .map((u) => `${speakerName(s, u.speaker)}: ${u.text}`)
         .join("\n");
@@ -756,21 +775,34 @@ exports.transcriptionWebhook = onRequest(
       }
 
       if (meta.shareId) {
-        await admin
-          .firestore()
-          .doc(`shares/${meta.shareId}`)
-          .set(
-            {
-              utterances,
-              speakerMap: speakerMap,
-              topic: topic,
-              durationSeconds: meta.durationSeconds || 0,
-              speakers,
-              language: meta.language || "",
-            },
-            { merge: true }
-          )
-          .catch(() => {});
+        // meta came out of the uploaded sidecar, so shareId is whatever the
+        // client put there — and this runs with admin rights, which bypass the
+        // Firestore rules. Without an ownership check anyone who knows one of
+        // someone else's /r/<id> links could name it here and have their own
+        // transcript published in its place.
+        const shareRef = admin.firestore().doc(`shares/${meta.shareId}`);
+        const shareSnap = await shareRef.get().catch(() => null);
+        const ownsShare =
+          shareSnap && shareSnap.exists && shareSnap.data().ownerUid === job.uid;
+        if (ownsShare) {
+          await shareRef
+            .set(
+              {
+                utterances,
+                speakerMap: speakerMap,
+                topic: topic,
+                durationSeconds: meta.durationSeconds || 0,
+                speakers,
+                language: meta.language || "",
+              },
+              { merge: true }
+            )
+            .catch(() => {});
+        } else {
+          console.warn(
+            `share ${meta.shareId} not owned by ${job.uid} — not updating`
+          );
+        }
       }
       await lockRef.delete().catch(() => {});
       res.status(200).json({ ok: true });
