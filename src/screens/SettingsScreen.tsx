@@ -18,7 +18,7 @@ import { APP_VERSION } from "../version";
 const MODEL_OPTIONS = [
   { label: "Haiku 4.5 — cheapest", value: "claude-haiku-4-5-20251001" },
   { label: "Sonnet 4.6 — balanced", value: "claude-sonnet-4-6" },
-  { label: "Opus 4.8 — best", value: "claude-opus-4-8" },
+  { label: "Opus 5.5 — best", value: "claude-opus-5-5" },
 ];
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";

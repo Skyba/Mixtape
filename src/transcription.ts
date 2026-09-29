@@ -521,7 +521,11 @@ export async function inferTopic(
       },
       body: JSON.stringify({
         model: settings.topicModel,
-        max_tokens: 24,
+        // Opus 5.5 always thinks — thinking cannot be disabled on it at any
+        // effort — so a 24-token ceiling was spent entirely before the title
+        // was written and this returned "". The title itself is still a few
+        // tokens; the headroom is for the thinking that precedes it.
+        max_tokens: 1000,
         messages: [
           {
             role: "user",
