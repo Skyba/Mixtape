@@ -3,15 +3,23 @@ package expo.modules.mixtapewakelock
 import android.content.Context
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.media.AudioRecordingConfiguration
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
 class MixtapeWakelockModule : Module() {
   private var wakeLock: PowerManager.WakeLock? = null
+  private var recordingCallback: AudioManager.AudioRecordingCallback? = null
+  private var lastSilenced = false
 
   override fun definition() = ModuleDefinition {
     Name("MixtapeWakelock")
+
+    Events("onRecordingSilenced")
 
     // Hold a partial wakelock so the CPU keeps running (screen can be off) and
     // the audio recording thread isn't starved during Doze.
@@ -56,6 +64,48 @@ class MixtapeWakelockModule : Module() {
           "channels" to device.channelCounts.toList()
         )
       }
+    }
+
+    // Android hands an ordinary app SILENCE, not an error, when something with
+    // a higher-priority use case holds the mic — a VoIP call is the case that
+    // matters here. The take then runs to completion and the file is a
+    // well-formed, entirely empty recording. isClientSilenced() is the only
+    // way to know it happened, so watch it and let the screen say so while
+    // there is still time to do something about it.
+    Function("startSilenceWatch") {
+      val context = appContext.reactContext ?: return@Function
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return@Function
+      if (recordingCallback != null) return@Function
+      val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+      lastSilenced = false
+      val cb = object : AudioManager.AudioRecordingCallback() {
+        override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>?) {
+          val silenced =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+              configs?.any { it.isClientSilenced } ?: false
+            else false
+          if (silenced != lastSilenced) {
+            lastSilenced = silenced
+            this@MixtapeWakelockModule.sendEvent(
+              "onRecordingSilenced",
+              mapOf("silenced" to silenced)
+            )
+          }
+        }
+      }
+      am.registerAudioRecordingCallback(cb, Handler(Looper.getMainLooper()))
+      recordingCallback = cb
+    }
+
+    Function("stopSilenceWatch") {
+      val context = appContext.reactContext
+      val cb = recordingCallback
+      if (context != null && cb != null) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.unregisterAudioRecordingCallback(cb)
+      }
+      recordingCallback = null
+      lastSilenced = false
     }
   }
 

@@ -71,6 +71,7 @@ import {
   acquireWakelock,
   externalInput,
   releaseWakelock,
+  watchSilence,
 } from "../../modules/mixtape-wakelock";
 
 const SEGMENT_MS = 20000; // live segment length
@@ -238,6 +239,26 @@ export default function RecordScreen() {
       setPresets(await getPresets());
     })();
   }, []);
+
+  // A VoIP call takes the mic and Android feeds this app silence instead of
+  // failing, so a take during a WhatsApp or Meet call records a well-formed
+  // empty file. Say so while it is still happening — afterwards the only
+  // evidence is a file with nothing in it.
+  useEffect(
+    () =>
+      watchSilence((silenced) => {
+        logEvent(`mic silenced=${silenced}`);
+        if (silenced) {
+          Alert.alert(
+            "Nothing is being recorded",
+            "Another app has the microphone — a call, usually. Android gives " +
+              "this app silence rather than an error, so the recording is " +
+              "running but empty. End the call to get the mic back."
+          );
+        }
+      }),
+    []
+  );
 
   // Watch for the dongle being plugged in or pulled out. Cheap local query,
   // so polling beats wiring up a native device-change callback.
