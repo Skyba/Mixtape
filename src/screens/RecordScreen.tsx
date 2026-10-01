@@ -630,10 +630,22 @@ export default function RecordScreen() {
       }
     }
 
+    // The duration cap in startTick() lives in a setInterval, so it stops
+    // firing the moment the screen locks and the JS engine suspends. Normal
+    // mode survives that on the native forDuration cap; chunked mode had
+    // nothing, which is how a take ran for 51 hours. This boundary is driven
+    // by the native recorder finishing, so it still runs with the screen off —
+    // and it reads wall-clock, because elapsedRef goes stale for exactly the
+    // same reason the interval does.
+    const capMs = durationRef.current * 3600 * 1000;
+    const ranMs = Date.now() - startMsRef.current - pausedMsRef.current;
+    const capReached = !isFinal && ranMs >= capMs;
+
     // Start the next segment immediately — unless we're rolling *because* of a
     // pause, in which case the chain resumes on the Resume tap.
     if (
       !isFinal &&
+      !capReached &&
       (liveOn.current || chunkedRef.current) &&
       !pausedRef.current
     ) {
@@ -657,6 +669,11 @@ export default function RecordScreen() {
         })
         .catch(() => {});
       if (isFinal) await job; // wait for the last segment before saving
+    }
+
+    if (capReached) {
+      logEvent(`chunked cap ${durationRef.current}h reached → stopping`);
+      await stop();
     }
   }
 

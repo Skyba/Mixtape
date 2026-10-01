@@ -33,7 +33,6 @@ import {
   remoteObjectPath,
   fetchRemoteMeta,
   liveSegmentPath,
-  liveMergedPath,
   uploadDebugLog,
 } from "./firebase";
 import { notify } from "./notifications";
@@ -405,19 +404,24 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
         remote.push(p);
       }
       logEvent(`uploaded ${remote.length} segments, merging…`);
-      await mergeAudioSegments(remote, liveMergedPath(id));
+      // Merge straight to the recording's own object. The merged audio is then
+      // complete in the cloud the moment the call returns, so transcription no
+      // longer waits on the round trip back down to this phone — that download
+      // is only for local playback, and failing it used to strand the whole
+      // recording at transcriptStatus "none".
+      await mergeAudioSegments(remote, remoteObjectPath(rec, "m4a"));
+      rec = { ...rec, mergePending: undefined };
+      if (
+        args.transcribeAfterMerge &&
+        args.speakers.length &&
+        rec.transcriptStatus === "none"
+      ) {
+        rec = { ...rec, transcriptStatus: "pending" };
+      }
+      await writeMeta(rec);
       const local = `${FileSystem.cacheDirectory}merged_${id}.m4a`;
-      if (await downloadRemoteFile(liveMergedPath(id), local)) {
+      if (await downloadRemoteFile(remoteObjectPath(rec, "m4a"), local)) {
         await FileSystem.copyAsync({ from: local, to: audioPath(rec) });
-        rec = { ...rec, mergePending: undefined };
-        if (
-          args.transcribeAfterMerge &&
-          args.speakers.length &&
-          rec.transcriptStatus === "none"
-        ) {
-          rec = { ...rec, transcriptStatus: "pending" };
-        }
-        await writeMeta(rec);
         // Merged and saved — the pieces are no longer the only copy, so don't
         // leave them filling the cache and posing as unsaved audio.
         for (const uri of args.segmentUris) {
@@ -426,7 +430,9 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
         await FileSystem.deleteAsync(local, { idempotent: true }).catch(() => {});
         logEvent("merge ok, downloaded merged file");
       } else {
-        logEvent("merge done but download failed → mergePending");
+        // Cloud copy is complete and queued for transcription; only the local
+        // playback copy is missing, so keep the segments to rebuild it from.
+        logEvent("merge ok in cloud, local download failed");
       }
     } catch (e: any) {
       // Recoverable: retryPendingMerges finishes this on the next launch.
@@ -456,7 +462,7 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
         liveSegmentPath(mp.id, i)
       );
       try {
-        await mergeAudioSegments(remote, liveMergedPath(mp.id));
+        await mergeAudioSegments(remote, remoteObjectPath(r, "m4a"));
       } catch (e) {
         // The upload can now be interrupted (the recording is saved before it
         // runs), leaving gaps the merge chokes on. Push the local copies again.
@@ -466,23 +472,23 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
           const info = await FileSystem.getInfoAsync(mp.segments[i]);
           if (info.exists) await uploadToPath(mp.segments[i], liveSegmentPath(mp.id, i));
         }
-        await mergeAudioSegments(remote, liveMergedPath(mp.id));
+        await mergeAudioSegments(remote, remoteObjectPath(r, "m4a"));
       }
+      // The cloud audio is complete now, so mark it transcribable before
+      // attempting the local copy — the download is for playback only.
+      const next: Recording = { ...r, mergePending: undefined };
+      if (next.speakers.length && next.transcriptStatus === "none") {
+        next.transcriptStatus = "pending";
+      }
+      await writeMeta(next);
+      await tryUpload(next, settings);
+      await writeMeta(next);
+      fixed++;
       const local = `${FileSystem.cacheDirectory}merged_${mp.id}.m4a`;
-      if (await downloadRemoteFile(liveMergedPath(mp.id), local)) {
+      if (await downloadRemoteFile(remoteObjectPath(r, "m4a"), local)) {
         await FileSystem.copyAsync({ from: local, to: audioPath(r) });
-        const next: Recording = { ...r, mergePending: undefined };
-        // The audio is only now complete, so this is the moment to let the
-        // backend transcribe it.
-        if (next.speakers.length && next.transcriptStatus === "none") {
-          next.transcriptStatus = "pending";
-        }
-        await writeMeta(next);
-        await tryUpload(next, settings);
-        await writeMeta(next);
-        fixed++;
-        logEvent(`recovered merge for ${r.base}`);
       }
+      logEvent(`recovered merge for ${r.base}`);
     } catch (e: any) {
       logEvent(`retry merge failed ${r.base}: ${String(e?.message ?? e)}`);
     }

@@ -227,8 +227,14 @@ exports.api = onRequest({ region: "us-central1", invoker: "public" }, apiApp);
 
 // Concatenates a user's audio segments into one m4a (same codec → stream copy).
 // Used by live mode (reassemble segments) and the standalone merge feature.
+// /tmp is a tmpfs on Cloud Functions, so every byte downloaded here counts
+// against this memory limit alongside ffmpeg's own usage. The byte budget
+// below is sized against it; raising one without the other trades a clean
+// error for an OOM kill.
+const MERGE_MAX_BYTES = 1_500_000_000;
+
 exports.mergeAudio = onCall(
-  { region: "us-central1", memory: "1GiB", timeoutSeconds: 540 },
+  { region: "us-central1", memory: "4GiB", timeoutSeconds: 540 },
   async (req) => {
     const uid = req.auth && req.auth.uid;
     if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
@@ -249,14 +255,47 @@ exports.mergeAudio = onCall(
     }
 
     const bucket = admin.storage().bucket();
+
+    // Merging is retried — by the app on relaunch, and by hand. Doing the work
+    // again when the result is already there is what turns one slow merge into
+    // a permanently failing one.
+    const [destExists] = await bucket.file(dest).exists();
+    if (destExists) return { path: dest, reused: true };
+
+    // Fail with something readable rather than being OOM-killed mid-ffmpeg.
+    const sizes = await Promise.all(
+      segments.map(async (p) => {
+        const [md] = await bucket.file(p).getMetadata();
+        return Number(md.size || 0);
+      })
+    );
+    const total = sizes.reduce((a, b) => a + b, 0);
+    if (total > MERGE_MAX_BYTES) {
+      throw new HttpsError(
+        "invalid-argument",
+        `segments total ${Math.round(total / 1e6)}MB, over the ${Math.round(
+          MERGE_MAX_BYTES / 1e6
+        )}MB merge budget — split the recording.`
+      );
+    }
+
     const work = await fsp.mkdtemp(path.join(os.tmpdir(), "merge-"));
     try {
-      const local = [];
-      for (let i = 0; i < segments.length; i++) {
-        const f = path.join(work, `seg${String(i).padStart(4, "0")}.m4a`);
-        await bucket.file(segments[i]).download({ destination: f });
-        local.push(f);
-      }
+      // Downloading one at a time made the round trips, not the bytes, the
+      // cost: a 20-segment hour spent most of a minute waiting. Bounded so a
+      // long recording doesn't open hundreds of sockets at once.
+      const local = new Array(segments.length);
+      const CONCURRENCY = 8;
+      let next = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, segments.length) }, async () => {
+          for (let i = next++; i < segments.length; i = next++) {
+            const f = path.join(work, `seg${String(i).padStart(4, "0")}.m4a`);
+            await bucket.file(segments[i]).download({ destination: f });
+            local[i] = f;
+          }
+        })
+      );
       const listFile = path.join(work, "list.txt");
       await fsp.writeFile(
         listFile,
