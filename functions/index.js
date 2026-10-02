@@ -268,11 +268,11 @@ exports.mergeAudio = onCall(
 
     const bucket = admin.storage().bucket();
 
-    // Merging is retried — by the app on relaunch, and by hand. Doing the work
-    // again when the result is already there is what turns one slow merge into
-    // a permanently failing one.
-    const [destExists] = await bucket.file(dest).exists();
-    if (destExists) return { path: dest, reused: true };
+    // No "already exists, skip" shortcut here. dest is the recording's own
+    // object, and a failed take leaves a stub there — the first segment that
+    // was uploaded before the merge gave up. Treating that as a finished merge
+    // reports success, and the caller then marks a 3-minute stub transcribable
+    // in place of the hour it stands for.
 
     // Fail with something readable rather than being OOM-killed mid-ffmpeg.
     let total = 0;
