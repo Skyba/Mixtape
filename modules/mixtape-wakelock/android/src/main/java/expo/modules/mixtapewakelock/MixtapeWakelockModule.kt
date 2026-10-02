@@ -72,29 +72,38 @@ class MixtapeWakelockModule : Module() {
     // well-formed, entirely empty recording. isClientSilenced() is the only
     // way to know it happened, so watch it and let the screen say so while
     // there is still time to do something about it.
+    // Guarded with a single condition rather than early returns: this builder
+    // types its body as Any?, and a bare return@Function is Unit.
     Function("startSilenceWatch") {
-      val context = appContext.reactContext ?: return@Function
-      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return@Function
-      if (recordingCallback != null) return@Function
-      val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-      lastSilenced = false
-      val cb = object : AudioManager.AudioRecordingCallback() {
-        override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>?) {
-          val silenced =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-              configs?.any { it.isClientSilenced } ?: false
-            else false
-          if (silenced != lastSilenced) {
-            lastSilenced = silenced
-            this@MixtapeWakelockModule.sendEvent(
-              "onRecordingSilenced",
-              mapOf("silenced" to silenced)
-            )
+      val context = appContext.reactContext
+      if (
+        context != null &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+        recordingCallback == null
+      ) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        lastSilenced = false
+        val cb = object : AudioManager.AudioRecordingCallback() {
+          override fun onRecordingConfigChanged(
+            configs: MutableList<AudioRecordingConfiguration>?
+          ) {
+            val silenced =
+              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                configs?.any { it.isClientSilenced } ?: false
+              else false
+            if (silenced != lastSilenced) {
+              lastSilenced = silenced
+              this@MixtapeWakelockModule.sendEvent(
+                "onRecordingSilenced",
+                mapOf("silenced" to silenced)
+              )
+            }
           }
         }
+        am.registerAudioRecordingCallback(cb, Handler(Looper.getMainLooper()))
+        recordingCallback = cb
       }
-      am.registerAudioRecordingCallback(cb, Handler(Looper.getMainLooper()))
-      recordingCallback = cb
+      null
     }
 
     Function("stopSilenceWatch") {
@@ -106,6 +115,7 @@ class MixtapeWakelockModule : Module() {
       }
       recordingCallback = null
       lastSilenced = false
+      null
     }
   }
 
