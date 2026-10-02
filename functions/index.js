@@ -233,6 +233,18 @@ exports.api = onRequest({ region: "us-central1", invoker: "public" }, apiApp);
 // error for an OOM kill.
 const MERGE_MAX_BYTES = 1_500_000_000;
 
+// Runs fn over items with at most `limit` in flight. A long recording is
+// hundreds of segments; firing them all at once trades one bottleneck for a
+// burst of sockets.
+async function pooled(items, limit, fn) {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      for (let i = next++; i < items.length; i = next++) await fn(items[i], i);
+    })
+  );
+}
+
 exports.mergeAudio = onCall(
   { region: "us-central1", memory: "4GiB", timeoutSeconds: 540 },
   async (req) => {
@@ -263,13 +275,11 @@ exports.mergeAudio = onCall(
     if (destExists) return { path: dest, reused: true };
 
     // Fail with something readable rather than being OOM-killed mid-ffmpeg.
-    const sizes = await Promise.all(
-      segments.map(async (p) => {
-        const [md] = await bucket.file(p).getMetadata();
-        return Number(md.size || 0);
-      })
-    );
-    const total = sizes.reduce((a, b) => a + b, 0);
+    let total = 0;
+    await pooled(segments, 16, async (p) => {
+      const [md] = await bucket.file(p).getMetadata();
+      total += Number(md.size || 0);
+    });
     if (total > MERGE_MAX_BYTES) {
       throw new HttpsError(
         "invalid-argument",
@@ -285,17 +295,11 @@ exports.mergeAudio = onCall(
       // cost: a 20-segment hour spent most of a minute waiting. Bounded so a
       // long recording doesn't open hundreds of sockets at once.
       const local = new Array(segments.length);
-      const CONCURRENCY = 8;
-      let next = 0;
-      await Promise.all(
-        Array.from({ length: Math.min(CONCURRENCY, segments.length) }, async () => {
-          for (let i = next++; i < segments.length; i = next++) {
-            const f = path.join(work, `seg${String(i).padStart(4, "0")}.m4a`);
-            await bucket.file(segments[i]).download({ destination: f });
-            local[i] = f;
-          }
-        })
-      );
+      await pooled(segments, 8, async (seg, i) => {
+        const f = path.join(work, `seg${String(i).padStart(4, "0")}.m4a`);
+        await bucket.file(seg).download({ destination: f });
+        local[i] = f;
+      });
       const listFile = path.join(work, "list.txt");
       await fsp.writeFile(
         listFile,
