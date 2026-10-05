@@ -186,9 +186,17 @@ async function putFile(localUri: string, dest: string, contentType: string) {
   logEvent(`upload ok ${dest.split("/").pop()} size=${info.size ?? 0}`);
 }
 
-export async function uploadRecording(r: Recording): Promise<void> {
+export async function uploadRecording(
+  r: Recording,
+  opts?: { skipAudio?: boolean }
+): Promise<void> {
   await ensureSignedIn();
-  await putFile(audioPath(r), remotePath(r, "m4a"), "audio/mp4");
+  // After a cloud merge the remote .m4a is the whole recording while the local
+  // file is still the first segment the entry was saved from. Uploading that
+  // would overwrite an hour with three minutes.
+  if (!opts?.skipAudio) {
+    await putFile(audioPath(r), remotePath(r, "m4a"), "audio/mp4");
+  }
   await putFile(metaPath(r), remotePath(r, "json"), "application/json");
   await putFile(transcriptPath(r), remotePath(r, "txt"), "text/plain");
   await putFile(aaiJsonPath(r), remotePath(r, "aai.json"), "application/json");

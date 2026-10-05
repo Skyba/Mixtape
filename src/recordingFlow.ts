@@ -106,12 +106,16 @@ function buildBase(
   return sanitize(`${date} ${speakersLabel(speakers)} - ${topic || "untitled"}`);
 }
 
-async function tryUpload(r: Recording, settings: Settings): Promise<Recording> {
+async function tryUpload(
+  r: Recording,
+  settings: Settings,
+  opts?: { skipAudio?: boolean }
+): Promise<Recording> {
   if (!isFirebaseConfigured) return { ...r, uploadStatus: "skipped" };
   if (!isSignedIn()) return { ...r, uploadStatus: "pending" };
   if (!(await canUploadNow(settings))) return { ...r, uploadStatus: "pending" };
   try {
-    await uploadRecording(r);
+    await uploadRecording(r, opts);
     return { ...r, uploadStatus: "uploaded" };
   } catch {
     return { ...r, uploadStatus: "pending" };
@@ -393,6 +397,9 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
     await writeMeta(rec);
   }
 
+  // Set once the merged audio is in its final place in the cloud, so the
+  // upload below leaves it alone.
+  let mergedToCloud = false;
   if (cloudMerge) {
     try {
       // The segments ARE the audio — once uploaded they're safe in the cloud
@@ -410,6 +417,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       // is only for local playback, and failing it used to strand the whole
       // recording at transcriptStatus "none".
       await mergeAudioSegments(remote, remoteObjectPath(rec, "m4a"));
+      mergedToCloud = true;
       rec = { ...rec, mergePending: undefined };
       if (
         args.transcribeAfterMerge &&
@@ -440,7 +448,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
     }
   }
 
-  rec = await tryUpload(rec, args.settings);
+  rec = await tryUpload(rec, args.settings, { skipAudio: mergedToCloud });
   await writeMeta(rec);
   await notify(
     rec.mergePending ? "Saved — finishing audio…" : "Live recording saved",
@@ -481,7 +489,7 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
         next.transcriptStatus = "pending";
       }
       await writeMeta(next);
-      await tryUpload(next, settings);
+      await tryUpload(next, settings, { skipAudio: true });
       await writeMeta(next);
       fixed++;
       const local = `${FileSystem.cacheDirectory}merged_${mp.id}.m4a`;

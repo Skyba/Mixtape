@@ -213,6 +213,7 @@ export default function RecordScreen() {
   const pauseStartRef = useRef(0);
   const capFiredRef = useRef(false); // native forDuration cap ended the take
   const deadSegsRef = useRef(0); // consecutive segments that recorded silence
+  const silenceWarnedRef = useRef(false); // isClientSilenced warning, once per take
   const deadWarnedRef = useRef(false); // warn once per take, not every segment
   const durationRef = useRef(durationH);
   useEffect(() => {
@@ -262,13 +263,16 @@ export default function RecordScreen() {
     () =>
       watchSilence((silenced) => {
         logEvent(`mic silenced=${silenced}`);
-        if (silenced) {
-          Alert.alert(
+        // A notification, not an Alert: this fires precisely when another app
+        // has taken the mic, which means that app is in front and an Alert
+        // would be drawn behind it. It also re-arms on each segment, so only
+        // say it once per take.
+        if (silenced && !silenceWarnedRef.current) {
+          silenceWarnedRef.current = true;
+          notify(
             "Nothing is being recorded",
-            "Another app has the microphone — a call, usually. Android gives " +
-              "this app silence rather than an error, so the recording is " +
-              "running but empty. End the call to get the mic back."
-          );
+            "Another app has the microphone — a call, usually. Android gives this app silence rather than an error, so the recording is running but empty."
+          ).catch(() => {});
         }
       }),
     []
@@ -520,6 +524,7 @@ export default function RecordScreen() {
       elapsedRef.current = 0;
     deadSegsRef.current = 0;
     deadWarnedRef.current = false;
+    silenceWarnedRef.current = false;
       capFiredRef.current = false;
       // Re-assert the recording mode: the global mode may have been changed
       // since mount, and without shouldPlayInBackground the recorder pauses
@@ -552,6 +557,7 @@ export default function RecordScreen() {
     elapsedRef.current = 0;
     deadSegsRef.current = 0;
     deadWarnedRef.current = false;
+    silenceWarnedRef.current = false;
     // Same re-assert as start(): keeps segments recording with the screen off.
     try {
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
@@ -970,6 +976,7 @@ export default function RecordScreen() {
       elapsedRef.current = 0;
     deadSegsRef.current = 0;
     deadWarnedRef.current = false;
+    silenceWarnedRef.current = false;
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
       segUris.current = [];
       segTextRef.current = [];
