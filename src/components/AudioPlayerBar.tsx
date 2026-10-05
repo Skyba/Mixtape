@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import {
+  AppState,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 
 function mmss(sec: number): string {
@@ -21,6 +27,18 @@ export default function AudioPlayerBar({ uri }: { uri: string }) {
   // made the native recorder pause on screen-off for any recording started after
   // the player had been opened. Playback works fine under the recording mode set
   // by RecordScreen (allowsRecording has no effect on Android playback).
+
+  // The audio mode is global and RecordScreen sets shouldPlayInBackground so
+  // the recorder survives screen-off, which leaves playback free to carry on
+  // after you have left the app — easy to start and forget. Pausing on the way
+  // out gets the behaviour you want without touching the mode, which is what
+  // the note above says not to do.
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next !== "active") player.pause();
+    });
+    return () => sub.remove();
+  }, [player]);
 
   // restart from the top once playback reaches the end
   useEffect(() => {
