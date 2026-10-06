@@ -23,6 +23,10 @@ export type Recording = {
   // live segments awaiting cloud merge. `segments` are the local cache files,
   // kept so the merge can be retried even if their upload was interrupted.
   mergePending?: { id: string; count: number; segments?: string[] };
+  // The cloud object is the merged recording and the local file may still be
+  // the first segment the entry was saved from. Anything uploading this
+  // recording must leave the audio alone, or it replaces hours with minutes.
+  mergedInCloud?: boolean;
   // Recorder killed before it could finalise the file: audio bytes present, no
   // MP4 index, so it won't play or transcribe until it's repaired.
   damaged?: boolean;

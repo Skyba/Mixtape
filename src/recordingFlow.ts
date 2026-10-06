@@ -418,7 +418,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       // recording at transcriptStatus "none".
       await mergeAudioSegments(remote, remoteObjectPath(rec, "m4a"));
       mergedToCloud = true;
-      rec = { ...rec, mergePending: undefined };
+      rec = { ...rec, mergePending: undefined, mergedInCloud: true };
       if (
         args.transcribeAfterMerge &&
         args.speakers.length &&
@@ -484,7 +484,11 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
       }
       // The cloud audio is complete now, so mark it transcribable before
       // attempting the local copy — the download is for playback only.
-      const next: Recording = { ...r, mergePending: undefined };
+      const next: Recording = {
+        ...r,
+        mergePending: undefined,
+        mergedInCloud: true,
+      };
       if (next.speakers.length && next.transcriptStatus === "none") {
         next.transcriptStatus = "pending";
       }
@@ -558,7 +562,10 @@ export async function flushPendingUploads(settings: Settings): Promise<number> {
   let n = 0;
   for (const r of all.filter((x) => x.uploadStatus === "pending")) {
     try {
-      await uploadRecording(r);
+      // Never the audio for a cloud-merged take: this runs on a timer and has
+      // overwritten a finished merge with segment zero while the merge was
+      // still being downloaded.
+      await uploadRecording(r, { skipAudio: !!r.mergedInCloud || !!r.mergePending });
       await writeMeta({ ...r, uploadStatus: "uploaded" });
       n++;
     } catch {

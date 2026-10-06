@@ -97,14 +97,12 @@ const RECORDING_OPTIONS = {
   isMeteringEnabled: true,
 };
 
-// A live microphone in a silent room still has a noise floor; it does not read
-// below about -60 dBFS. Anything at or under this is a device handing us
-// digital zero — Android silencing the app behind a call, or a USB receiver
-// still enumerating after its transmitters have died.
-const DEAD_INPUT_DBFS = -80;
-// Three segments is nine minutes. Long enough that a brief glitch cannot
-// trigger it, short enough to be worth telling someone about.
-const DEAD_INPUT_SEGMENTS = 3;
+// NOTE: getStatus().metering is not usable as a silence check here. A 30-minute
+// take whose segments all measured -22 to -25 dBFS in the file reported -160.0
+// at every probe, so acting on it switched a working dongle to the built-in mic
+// on the first boundary. The level is still logged, to see whether it ever
+// becomes meaningful, but nothing decides anything on it. isClientSilenced,
+// which is a real signal, still covers the case of another app taking the mic.
 // Every take on the USB receiver went silent at the first segment boundary —
 // 194.0s, 194.8s and 194.9s on three different days. Segment zero and every
 // segment after it run the same code; the only thing that differs is that the
@@ -221,10 +219,7 @@ export default function RecordScreen() {
   const pausedMsRef = useRef(0); // live mode: total time spent paused
   const pauseStartRef = useRef(0);
   const capFiredRef = useRef(false); // native forDuration cap ended the take
-  const deadSegsRef = useRef(0); // consecutive segments that recorded silence
   const silenceWarnedRef = useRef(false); // isClientSilenced warning, once per take
-  const extFailedRef = useRef(false); // external mic went dead; use the built-in
-  const deadWarnedRef = useRef(false); // warn once per take, not every segment
   const durationRef = useRef(durationH);
   useEffect(() => {
     durationRef.current = durationH;
@@ -334,7 +329,7 @@ export default function RecordScreen() {
 
   function preferExternalMic() {
     const ext = extRef.current;
-    if (!ext || extFailedRef.current) return;
+    if (!ext) return;
     try {
       recorder.setInput(String(ext.id));
     } catch {
@@ -532,10 +527,7 @@ export default function RecordScreen() {
       setStatus("");
       setElapsed(0);
       elapsedRef.current = 0;
-    deadSegsRef.current = 0;
-    deadWarnedRef.current = false;
     silenceWarnedRef.current = false;
-    extFailedRef.current = false;
       capFiredRef.current = false;
       // Re-assert the recording mode: the global mode may have been changed
       // since mount, and without shouldPlayInBackground the recorder pauses
@@ -566,10 +558,7 @@ export default function RecordScreen() {
     setStatus("");
     setElapsed(0);
     elapsedRef.current = 0;
-    deadSegsRef.current = 0;
-    deadWarnedRef.current = false;
     silenceWarnedRef.current = false;
-    extFailedRef.current = false;
     // Same re-assert as start(): keeps segments recording with the screen off.
     try {
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
@@ -649,21 +638,8 @@ export default function RecordScreen() {
             const lvl = recorder.getStatus().metering;
             const shown = typeof lvl === "number" ? lvl.toFixed(1) : "n/a";
             logEvent(
-              `seg${index} level=${shown} input=${extFailedRef.current ? "builtin(fallback)" : extRef.current?.name ?? "builtin"}`
+              `seg${index} level=${shown} input=${extRef.current?.name ?? "builtin"}`
             );
-            if (
-              typeof lvl === "number" &&
-              lvl <= DEAD_INPUT_DBFS &&
-              extRef.current &&
-              !extFailedRef.current
-            ) {
-              extFailedRef.current = true;
-              logEvent("external mic reads dead → built-in mic from the next segment");
-              notify(
-                "Switched to the phone mic",
-                "The external microphone stopped delivering audio, so the rest of this recording uses the phone's own mic."
-              ).catch(() => {});
-            }
           } catch {}
         }, SEG_PROBE_MS);
       } catch {}
@@ -673,25 +649,6 @@ export default function RecordScreen() {
 
   async function rollSegment(isFinal: boolean) {
     rollingRef.current = true;
-    // Read the level while the recorder is still running. This runs at every
-    // segment boundary, which the native recorder drives, so it still happens
-    // with the screen off — unlike the JS tick.
-    try {
-      const level = recorder.getStatus().metering;
-      if (typeof level === "number" && level <= DEAD_INPUT_DBFS) {
-        deadSegsRef.current += 1;
-      } else if (typeof level === "number") {
-        deadSegsRef.current = 0;
-      }
-    } catch {}
-    if (deadSegsRef.current >= DEAD_INPUT_SEGMENTS && !deadWarnedRef.current) {
-      deadWarnedRef.current = true;
-      logEvent(`dead input: ${deadSegsRef.current} silent segments`);
-      notify(
-        "Recording silence",
-        "The microphone has been handing over nothing for several minutes. Check the mic, or end any call that has taken it."
-      ).catch(() => {});
-    }
     if (segTimer.current) {
       clearTimeout(segTimer.current);
       segTimer.current = null;
@@ -1017,10 +974,7 @@ export default function RecordScreen() {
       setStatus("");
       setElapsed(0);
       elapsedRef.current = 0;
-    deadSegsRef.current = 0;
-    deadWarnedRef.current = false;
     silenceWarnedRef.current = false;
-    extFailedRef.current = false;
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
       segUris.current = [];
       segTextRef.current = [];

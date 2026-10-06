@@ -222,7 +222,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     await writeMeta(next);
     if (isFirebaseConfigured && isSignedIn()) {
       try {
-        await uploadRecording(next);
+        await uploadRecording(next, { skipAudio: !!next.mergedInCloud });
       } catch {
         /* best-effort; Sync will retry */
       }
@@ -287,7 +287,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       // The cloud copy carries the folder in its path, so a move is a
       // re-upload — and the old path has to go, or the API lists the
       // recording twice, once with its stale folder.
-      await uploadRecording(next).catch(() => {});
+      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
       await deleteRemoteRecording(from).catch(() => {});
     }
     setBusy("");
@@ -304,7 +304,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setRec(next);
     await writeMeta(next);
     if (isFirebaseConfigured && isSignedIn()) {
-      await uploadRecording(next).catch(() => {});
+      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
     }
     if (rec.transcriptStatus === "done") {
       Alert.alert(
@@ -327,7 +327,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setRec(next);
     await writeMeta(next);
     if (isFirebaseConfigured && isSignedIn()) {
-      await uploadRecording(next).catch(() => {});
+      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
     }
   }
 
@@ -363,7 +363,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       await writeTranscript(next, text);
     }
     if (isFirebaseConfigured && isSignedIn()) {
-      await uploadRecording(next).catch(() => {});
+      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
     }
   }
 

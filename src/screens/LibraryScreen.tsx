@@ -201,7 +201,7 @@ export default function LibraryScreen() {
                 const moved = await moveToFolder(r, f);
                 if (isFirebaseConfigured && isSignedIn()) {
                   await deleteRemoteRecording(r).catch(() => {});
-                  await uploadRecording(moved).catch(() => {});
+                  await uploadRecording(moved, { skipAudio: !!moved.mergedInCloud }).catch(() => {});
                 }
               } catch {}
             }
