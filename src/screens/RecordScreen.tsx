@@ -220,6 +220,7 @@ export default function RecordScreen() {
   const pauseStartRef = useRef(0);
   const capFiredRef = useRef(false); // native forDuration cap ended the take
   const silenceWarnedRef = useRef(false); // isClientSilenced warning, once per take
+  const micFallbackWarnedRef = useRef(false); // mic trouble warning, once per take
   const durationRef = useRef(durationH);
   useEffect(() => {
     durationRef.current = durationH;
@@ -528,6 +529,7 @@ export default function RecordScreen() {
       setElapsed(0);
       elapsedRef.current = 0;
     silenceWarnedRef.current = false;
+    micFallbackWarnedRef.current = false;
       capFiredRef.current = false;
       // Re-assert the recording mode: the global mode may have been changed
       // since mount, and without shouldPlayInBackground the recorder pauses
@@ -559,6 +561,7 @@ export default function RecordScreen() {
     setElapsed(0);
     elapsedRef.current = 0;
     silenceWarnedRef.current = false;
+    micFallbackWarnedRef.current = false;
     // Same re-assert as start(): keeps segments recording with the screen off.
     try {
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
@@ -612,33 +615,74 @@ export default function RecordScreen() {
     recordSegment();
   }
 
+  /** One attempt at starting the next segment. Throws if it will not start. */
+  async function armSegment(useExternal: boolean) {
+    await recorder.prepareToRecordAsync();
+    if (useExternal) preferExternalMic();
+    // Native backstop: if the JS roll timer is suspended (screen off / Doze)
+    // the segment stops itself instead of recording forever. Set above
+    // SEGMENT_MS so the normal JS roll always wins and this only fires on a
+    // freeze — the same durability the normal-mode forDuration cap gives.
+    recorder.record({
+      forDuration: Math.round(segMsRef.current / 1000) + 10,
+    });
+  }
+
   function recordSegment() {
     const index = segUris.current.length;
     (async () => {
+      let started = false;
+      let armedOn = "none";
       try {
         // Not before the first segment: there is no previous input to release.
         if (index > 0) {
           await new Promise((r) => setTimeout(r, SEG_SETTLE_MS));
         }
-        await recorder.prepareToRecordAsync();
-        preferExternalMic();
-        // Native backstop: if the JS roll timer is suspended (screen off / Doze)
-        // the segment stops itself instead of recording forever. Set above
-        // SEGMENT_MS so the normal JS roll always wins and this only fires on a
-        // freeze — the same durability the normal-mode forDuration cap gives.
-        recorder.record({
-          forDuration: Math.round(segMsRef.current / 1000) + 10,
-        });
-        // Look at what the new segment is actually capturing. If the dongle
-        // has gone dead, the rest of the take goes to the built-in mic — worse
-        // audio, but audio. The old behaviour was to keep asking the dead
-        // device for the next 88 minutes.
+        // Falling back to the phone's own mic when the dongle will not arm.
+        // The trigger is an exception, not a level reading — the level is not
+        // trustworthy here, a thrown error is. A 42-minute take once produced
+        // 3 minutes because this failed silently for 39 of them.
+        for (const useExternal of extRef.current ? [true, false] : [false]) {
+          try {
+            await armSegment(useExternal);
+            started = true;
+            armedOn = useExternal ? extRef.current?.name ?? "external" : "builtin";
+            if (!useExternal && extRef.current) {
+              logEvent(`seg${index} armed on the built-in mic; the dongle would not`);
+              if (!micFallbackWarnedRef.current) {
+                micFallbackWarnedRef.current = true;
+                notify(
+                  "Switched to the phone mic",
+                  "The external microphone stopped working, so the rest of this recording uses the phone's own mic."
+                ).catch(() => {});
+              }
+            }
+            break;
+          } catch (e: any) {
+            logEvent(
+              `seg${index} ${useExternal ? "external" : "builtin"} arm failed: ${String(e?.message ?? e)}`
+            );
+          }
+        }
+        if (!started) {
+          // Nothing is being captured and the roll below will keep trying, but
+          // silence here is how 39 minutes went missing without a word.
+          if (!micFallbackWarnedRef.current) {
+            micFallbackWarnedRef.current = true;
+            notify(
+              "Recording has stopped capturing",
+              "The recorder could not start a new segment. Stop and restart the recording."
+            ).catch(() => {});
+          }
+        }
+        // Records what each segment started on. The level is logged beside it
+        // but is not acted on: see the note by SEG_SETTLE_MS.
         setTimeout(() => {
           try {
             const lvl = recorder.getStatus().metering;
             const shown = typeof lvl === "number" ? lvl.toFixed(1) : "n/a";
             logEvent(
-              `seg${index} level=${shown} input=${extRef.current?.name ?? "builtin"}`
+              `seg${index} level=${shown} input=${armedOn}`
             );
           } catch {}
         }, SEG_PROBE_MS);
@@ -975,6 +1019,7 @@ export default function RecordScreen() {
       setElapsed(0);
       elapsedRef.current = 0;
     silenceWarnedRef.current = false;
+    micFallbackWarnedRef.current = false;
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
       segUris.current = [];
       segTextRef.current = [];
