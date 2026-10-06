@@ -105,6 +105,15 @@ const DEAD_INPUT_DBFS = -80;
 // Three segments is nine minutes. Long enough that a brief glitch cannot
 // trigger it, short enough to be worth telling someone about.
 const DEAD_INPUT_SEGMENTS = 3;
+// Every take on the USB receiver went silent at the first segment boundary —
+// 194.0s, 194.8s and 194.9s on three different days. Segment zero and every
+// segment after it run the same code; the only thing that differs is that the
+// later ones prepare immediately after a stop. Give the input time to be
+// released and reacquired before asking for it again.
+const SEG_SETTLE_MS = 300;
+// How long after a segment starts to look at its level. Long enough for the
+// route to settle, short enough to lose one segment rather than a session.
+const SEG_PROBE_MS = 2000;
 
 const RECORDING_AUDIO_MODE = {
   playsInSilentMode: true,
@@ -214,6 +223,7 @@ export default function RecordScreen() {
   const capFiredRef = useRef(false); // native forDuration cap ended the take
   const deadSegsRef = useRef(0); // consecutive segments that recorded silence
   const silenceWarnedRef = useRef(false); // isClientSilenced warning, once per take
+  const extFailedRef = useRef(false); // external mic went dead; use the built-in
   const deadWarnedRef = useRef(false); // warn once per take, not every segment
   const durationRef = useRef(durationH);
   useEffect(() => {
@@ -324,7 +334,7 @@ export default function RecordScreen() {
 
   function preferExternalMic() {
     const ext = extRef.current;
-    if (!ext) return;
+    if (!ext || extFailedRef.current) return;
     try {
       recorder.setInput(String(ext.id));
     } catch {
@@ -525,6 +535,7 @@ export default function RecordScreen() {
     deadSegsRef.current = 0;
     deadWarnedRef.current = false;
     silenceWarnedRef.current = false;
+    extFailedRef.current = false;
       capFiredRef.current = false;
       // Re-assert the recording mode: the global mode may have been changed
       // since mount, and without shouldPlayInBackground the recorder pauses
@@ -558,6 +569,7 @@ export default function RecordScreen() {
     deadSegsRef.current = 0;
     deadWarnedRef.current = false;
     silenceWarnedRef.current = false;
+    extFailedRef.current = false;
     // Same re-assert as start(): keeps segments recording with the screen off.
     try {
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
@@ -612,8 +624,13 @@ export default function RecordScreen() {
   }
 
   function recordSegment() {
+    const index = segUris.current.length;
     (async () => {
       try {
+        // Not before the first segment: there is no previous input to release.
+        if (index > 0) {
+          await new Promise((r) => setTimeout(r, SEG_SETTLE_MS));
+        }
         await recorder.prepareToRecordAsync();
         preferExternalMic();
         // Native backstop: if the JS roll timer is suspended (screen off / Doze)
@@ -623,6 +640,32 @@ export default function RecordScreen() {
         recorder.record({
           forDuration: Math.round(segMsRef.current / 1000) + 10,
         });
+        // Look at what the new segment is actually capturing. If the dongle
+        // has gone dead, the rest of the take goes to the built-in mic — worse
+        // audio, but audio. The old behaviour was to keep asking the dead
+        // device for the next 88 minutes.
+        setTimeout(() => {
+          try {
+            const lvl = recorder.getStatus().metering;
+            const shown = typeof lvl === "number" ? lvl.toFixed(1) : "n/a";
+            logEvent(
+              `seg${index} level=${shown} input=${extFailedRef.current ? "builtin(fallback)" : extRef.current?.name ?? "builtin"}`
+            );
+            if (
+              typeof lvl === "number" &&
+              lvl <= DEAD_INPUT_DBFS &&
+              extRef.current &&
+              !extFailedRef.current
+            ) {
+              extFailedRef.current = true;
+              logEvent("external mic reads dead → built-in mic from the next segment");
+              notify(
+                "Switched to the phone mic",
+                "The external microphone stopped delivering audio, so the rest of this recording uses the phone's own mic."
+              ).catch(() => {});
+            }
+          } catch {}
+        }, SEG_PROBE_MS);
       } catch {}
       segTimer.current = setTimeout(() => rollSegment(false), segMsRef.current);
     })();
@@ -977,6 +1020,7 @@ export default function RecordScreen() {
     deadSegsRef.current = 0;
     deadWarnedRef.current = false;
     silenceWarnedRef.current = false;
+    extFailedRef.current = false;
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
       segUris.current = [];
       segTextRef.current = [];
