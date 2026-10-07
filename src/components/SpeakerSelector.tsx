@@ -95,7 +95,9 @@ export default function SpeakerSelector({
           );
         })}
         {count === 0 ? (
-          <Text style={styles.hint}>0 speakers — transcription skipped</Text>
+          <Text style={styles.hint}>
+            0 speakers — number unknown, let diarization decide
+          </Text>
         ) : null}
       </View>
 

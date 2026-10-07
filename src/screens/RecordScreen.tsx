@@ -45,6 +45,7 @@ import {
   processStopLive,
   transcribeExisting,
   setRecordingInProgress,
+  flushLog,
 } from "../recordingFlow";
 import { logEvent } from "../log";
 import { notify } from "../notifications";
@@ -739,6 +740,10 @@ export default function RecordScreen() {
       recordSegment();
     }
     rollingRef.current = false;
+    // The device keeps its own copy regardless; this is what makes a running
+    // take readable remotely. Passes settings so it respects the cellular
+    // preference, and flushLog serialises overlapping calls itself.
+    flushLog(settings).catch(() => {});
 
     if (dest && liveOn.current) {
       const job = transcribeClipText(dest, language, settings)

@@ -209,6 +209,9 @@ export async function importOrphanAudio(
       folder: INBOX,
       language: "",
       settings,
+      // Without this the merge lands and the recording sits at "none"
+      // forever: recovery would restore the audio and never transcribe it.
+      transcribeAfterMerge: true,
     });
     // Only drop the cache copies once the merge has actually landed — until
     // then they're the only complete copy of the audio.

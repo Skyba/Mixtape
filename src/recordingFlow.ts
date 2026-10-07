@@ -39,12 +39,40 @@ import { notify } from "./notifications";
 import { logEvent, getLogText } from "./log";
 import * as FileSystem from "expo-file-system/legacy";
 
-/** Pushes the local log buffer to the cloud so recent events are pullable. */
-async function flushLog(): Promise<void> {
+// Only one log upload at a time, with at most one more queued behind it: the
+// local temp file and the remote object are both single fixed paths, so two
+// overlapping uploads can interleave and land an older snapshot last.
+let logFlushInFlight = false;
+let logFlushQueued = false;
+
+/**
+ * Pushes the local log buffer to the cloud so recent events are pullable.
+ * logEvent already persists every line to AsyncStorage, so this is about
+ * remote visibility, not durability — the device keeps its copy either way.
+ * Exported because the recorder flushes at each segment boundary, which is
+ * what makes a take readable from here while it is still running.
+ *
+ * Honours the cellular-upload setting: this now runs every few minutes during
+ * a recording, and the whole rolling log goes up each time.
+ */
+export async function flushLog(settings?: Settings): Promise<void> {
+  if (logFlushInFlight) {
+    logFlushQueued = true;
+    return;
+  }
+  logFlushInFlight = true;
   try {
-    await uploadDebugLog(await getLogText());
+    if (!settings || (await canUploadNow(settings))) {
+      await uploadDebugLog(await getLogText());
+    }
   } catch {
     /* best-effort */
+  } finally {
+    logFlushInFlight = false;
+    if (logFlushQueued) {
+      logFlushQueued = false;
+      void flushLog(settings);
+    }
   }
 }
 
@@ -179,12 +207,11 @@ export async function processStop(args: StopArgs): Promise<Recording> {
   await notify("Recording saved", `${rec.base} (${rec.folder})`);
 
   const cloudMode = isFirebaseConfigured && isSignedIn();
-  const hasSpeakers = args.speakers.length > 0;
 
   // Cloud mode: upload with "pending" and let the backend transcribe with the
   // screen off. pullCloudTranscripts brings the finished transcript back — no
   // on-device AAI call that would stall while the app is backgrounded.
-  if (hasSpeakers && cloudMode) {
+  if (cloudMode) {
     rec = { ...rec, transcriptStatus: "pending" };
     await writeMeta(rec);
     rec = await tryUpload(rec, args.settings);
@@ -201,7 +228,7 @@ export async function processStop(args: StopArgs): Promise<Recording> {
   }
 
   // Offline / not signed in: transcribe on-device (existing path).
-  const eligible = hasSpeakers && !!args.settings.assemblyAiKey;
+  const eligible = !!args.settings.assemblyAiKey;
   if (eligible) {
     rec = { ...rec, transcriptStatus: "pending" };
     await writeMeta(rec);
@@ -419,11 +446,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       await mergeAudioSegments(remote, remoteObjectPath(rec, "m4a"));
       mergedToCloud = true;
       rec = { ...rec, mergePending: undefined, mergedInCloud: true };
-      if (
-        args.transcribeAfterMerge &&
-        args.speakers.length &&
-        rec.transcriptStatus === "none"
-      ) {
+      if (args.transcribeAfterMerge && rec.transcriptStatus === "none") {
         rec = { ...rec, transcriptStatus: "pending" };
       }
       await writeMeta(rec);
@@ -489,7 +512,7 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
         mergePending: undefined,
         mergedInCloud: true,
       };
-      if (next.speakers.length && next.transcriptStatus === "none") {
+      if (next.transcriptStatus === "none") {
         next.transcriptStatus = "pending";
       }
       await writeMeta(next);
@@ -526,9 +549,7 @@ export async function retryPendingTranscriptions(
     const all = await listRecordings();
     let n = 0;
     for (const r of all.filter(
-      (x) =>
-        (x.transcriptStatus === "pending" || x.transcriptStatus === "error") &&
-        x.speakers.length > 0
+      (x) => x.transcriptStatus === "pending" || x.transcriptStatus === "error"
     )) {
       if (activeTranscriptions.has(r.id)) continue; // already transcribing
       if (r.transcriptStatus === "error") {

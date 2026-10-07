@@ -653,7 +653,11 @@ exports.startTranscription = onObjectFinalized(
       return;
     }
     if (meta.transcriptStatus !== "pending") return;
-    if (!Array.isArray(meta.speakers) || meta.speakers.length === 0) return;
+    // An empty speakers list means "transcribe, count unknown" — diarization
+    // runs with no floor and finds its own number. It used to mean "skip",
+    // which is why every recording recovered from the cache imported its audio
+    // and then silently never transcribed.
+    if (!Array.isArray(meta.speakers)) return;
 
     const m4a = `recordings/${uid}/${folder}/${base}.m4a`;
     const [audioExists] = await bkt().file(m4a).exists();
