@@ -48,6 +48,8 @@ import {
   flushLog,
 } from "../recordingFlow";
 import { logEvent } from "../log";
+import { capturePlace } from "../place";
+import type { Place } from "../place";
 import { notify } from "../notifications";
 import { Preset, deletePreset, getPresets, savePreset } from "../presets";
 import {
@@ -74,6 +76,10 @@ import {
   externalInput,
   releaseWakelock,
   watchSilence,
+  cancelSegment,
+  hasNativeSegmentTimer,
+  onSegmentDue,
+  scheduleSegment,
 } from "../../modules/mixtape-wakelock";
 
 const SEGMENT_MS = 20000; // live segment length
@@ -104,12 +110,11 @@ const RECORDING_OPTIONS = {
 // on the first boundary. The level is still logged, to see whether it ever
 // becomes meaningful, but nothing decides anything on it. isClientSilenced,
 // which is a real signal, still covers the case of another app taking the mic.
-// Every take on the USB receiver went silent at the first segment boundary —
-// 194.0s, 194.8s and 194.9s on three different days. Segment zero and every
-// segment after it run the same code; the only thing that differs is that the
-// later ones prepare immediately after a stop. Give the input time to be
-// released and reacquired before asking for it again.
-const SEG_SETTLE_MS = 300;
+// There is deliberately no settle delay before re-preparing. It was a guess at
+// the USB failure, it did not fix it, and it was a JS setTimeout sitting in the
+// roll path — which React Native suspends in the background, defeating the
+// whole point of driving the roll natively. Single-file mode is the answer for
+// the dongle; this path must contain no JS timer at all.
 // How long after a segment starts to look at its level. Long enough for the
 // route to settle, short enough to lose one segment rather than a session.
 const SEG_PROBE_MS = 2000;
@@ -222,6 +227,23 @@ export default function RecordScreen() {
   const capFiredRef = useRef(false); // native forDuration cap ended the take
   const silenceWarnedRef = useRef(false); // isClientSilenced warning, once per take
   const micFallbackWarnedRef = useRef(false); // mic trouble warning, once per take
+  const segArmedAtRef = useRef(0); // when the current segment started recording
+  // Bumped by every start, stop, pause and discard. Async work started before
+  // the bump must not touch the recorder afterwards: without this, a segment
+  // armed during a stop would start recording after the take had ended.
+  const takeGenRef = useRef(0);
+  // Identifies the tick the recorder is currently waiting on. A tick carrying
+  // any other token belongs to a boundary that has already passed, or to a
+  // take that has ended, and must be ignored — cancellation cannot retract an
+  // event that has already been emitted.
+  const segTokenRef = useRef(0);
+  // One roll at a time. Stop and Pause both call rollSegment directly, and two
+  // rolls overlapping would stop the same recorder twice and copy the same
+  // source file twice, duplicating or losing a segment.
+  const rollQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Captured when a take starts, so the fix reflects where it happened rather
+  // than where the phone was when it stopped. Never blocks starting.
+  const placeRef = useRef<Place | undefined>(undefined);
   const durationRef = useRef(durationH);
   useEffect(() => {
     durationRef.current = durationH;
@@ -261,6 +283,21 @@ export default function RecordScreen() {
       setPresets(await getPresets());
     })();
   }, []);
+
+  // The native tick is the only thing that still fires once the activity is
+  // backgrounded. Guarded on elapsed time rather than trusting the tick: a
+  // delayed or repeated event must not cut a segment short.
+  const onSegmentDueRef = useRef<(token: number) => void>(() => {});
+  onSegmentDueRef.current = (token: number) => {
+    if (token !== segTokenRef.current) return; // a boundary that already passed
+    if (!liveOn.current && !chunkedRef.current) return;
+    if (rollingRef.current || pausedRef.current) return;
+    rollSegment(false);
+  };
+  // Subscribed once, dispatched through the ref so it always runs the current
+  // closure — the mount-time one still holds DEFAULT_SETTINGS, because settings
+  // load after the first render.
+  useEffect(() => onSegmentDue((t) => onSegmentDueRef.current(t)), []);
 
   // A VoIP call takes the mic and Android feeds this app silence instead of
   // failing, so a take during a WhatsApp or Meet call records a well-formed
@@ -536,6 +573,18 @@ export default function RecordScreen() {
       elapsedRef.current = 0;
     silenceWarnedRef.current = false;
     micFallbackWarnedRef.current = false;
+    takeGenRef.current += 1;
+    placeRef.current = undefined;
+    (() => {
+      const gen = takeGenRef.current;
+      capturePlace()
+        .then((p) => {
+          // A slow fix resolving after the next take began would stamp the
+          // wrong place on it, or clear a good one with undefined.
+          if (gen === takeGenRef.current) placeRef.current = p;
+        })
+        .catch(() => {});
+    })();
       capFiredRef.current = false;
       // Re-assert the recording mode: the global mode may have been changed
       // since mount, and without shouldPlayInBackground the recorder pauses
@@ -568,6 +617,18 @@ export default function RecordScreen() {
     elapsedRef.current = 0;
     silenceWarnedRef.current = false;
     micFallbackWarnedRef.current = false;
+    takeGenRef.current += 1;
+    placeRef.current = undefined;
+    (() => {
+      const gen = takeGenRef.current;
+      capturePlace()
+        .then((p) => {
+          // A slow fix resolving after the next take began would stamp the
+          // wrong place on it, or clear a good one with undefined.
+          if (gen === takeGenRef.current) placeRef.current = p;
+        })
+        .catch(() => {});
+    })();
     // Same re-assert as start(): keeps segments recording with the screen off.
     try {
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
@@ -622,8 +683,11 @@ export default function RecordScreen() {
   }
 
   /** One attempt at starting the next segment. Throws if it will not start. */
-  async function armSegment(useExternal: boolean) {
+  async function armSegment(useExternal: boolean, abort?: () => boolean) {
     await recorder.prepareToRecordAsync();
+    // prepare is async: a stop or pause during it means this segment must
+    // never start, rather than start and be cleaned up afterwards.
+    if (abort?.()) throw new Error("segment cancelled");
     if (useExternal) preferExternalMic();
     // Native backstop: if the JS roll timer is suspended (screen off / Doze)
     // the segment stops itself instead of recording forever. Set above
@@ -636,21 +700,30 @@ export default function RecordScreen() {
 
   function recordSegment() {
     const index = segUris.current.length;
+    const gen = takeGenRef.current;
+    const stale = () =>
+      gen !== takeGenRef.current ||
+      pausedRef.current ||
+      (!liveOn.current && !chunkedRef.current);
     (async () => {
+      if (stale()) return;
       let started = false;
       let armedOn = "none";
       try {
-        // Not before the first segment: there is no previous input to release.
-        if (index > 0) {
-          await new Promise((r) => setTimeout(r, SEG_SETTLE_MS));
-        }
         // Falling back to the phone's own mic when the dongle will not arm.
         // The trigger is an exception, not a level reading — the level is not
         // trustworthy here, a thrown error is. A 42-minute take once produced
         // 3 minutes because this failed silently for 39 of them.
         for (const useExternal of extRef.current ? [true, false] : [false]) {
           try {
-            await armSegment(useExternal);
+            await armSegment(useExternal, stale);
+            // prepare/record are async: the take may have ended meanwhile.
+            if (stale()) {
+              try {
+                await recorder.stop();
+              } catch {}
+              return;
+            }
             started = true;
             armedOn = useExternal ? extRef.current?.name ?? "external" : "builtin";
             if (!useExternal && extRef.current) {
@@ -693,12 +766,30 @@ export default function RecordScreen() {
           } catch {}
         }, SEG_PROBE_MS);
       } catch {}
-      segTimer.current = setTimeout(() => rollSegment(false), segMsRef.current);
+      if (stale()) return;
+      segArmedAtRef.current = Date.now();
+      const token = ++segTokenRef.current;
+      // Native tick first: it fires with the app backgrounded, which the JS
+      // timer does not. The setTimeout stays only as the path for a build that
+      // predates the native function — never both, or a boundary rolls twice.
+      if (!scheduleSegment(segMsRef.current, token)) {
+        segTimer.current = setTimeout(() => rollSegment(false), segMsRef.current);
+      }
     })();
   }
 
-  async function rollSegment(isFinal: boolean) {
+  function rollSegment(isFinal: boolean): Promise<void> {
+    const next = rollQueueRef.current
+      .catch(() => {})
+      .then(() => doRollSegment(isFinal));
+    rollQueueRef.current = next.catch(() => {});
+    return next;
+  }
+
+  async function doRollSegment(isFinal: boolean) {
     rollingRef.current = true;
+    segTokenRef.current += 1; // the tick this roll answers is now spent
+    cancelSegment();
     if (segTimer.current) {
       clearTimeout(segTimer.current);
       segTimer.current = null;
@@ -886,6 +977,7 @@ export default function RecordScreen() {
    */
   async function pauseSegments() {
     pausedRef.current = true;
+    takeGenRef.current += 1;
     pauseStartRef.current = Date.now();
     setPaused(true);
     stopTick();
@@ -893,6 +985,7 @@ export default function RecordScreen() {
   }
 
   function resumeSegments() {
+    takeGenRef.current += 1;
     pausedMsRef.current += Date.now() - pauseStartRef.current;
     pausedRef.current = false;
     setPaused(false);
@@ -931,6 +1024,10 @@ export default function RecordScreen() {
 
   async function discard() {
     recordingRef.current = false;
+    takeGenRef.current += 1;
+    // Every path that ends or suspends a take must kill the native tick too,
+    // or it fires later and rolls a segment on a recorder that is not running.
+    cancelSegment();
     if (chunkedRef.current) {
       chunkedRef.current = false;
       if (segTimer.current) {
@@ -1007,6 +1104,7 @@ export default function RecordScreen() {
         folder,
         language,
         settings,
+        place: placeRef.current,
       });
       setStatus(
         `Saved: ${rec.base}\nTranscript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
@@ -1030,6 +1128,18 @@ export default function RecordScreen() {
       elapsedRef.current = 0;
     silenceWarnedRef.current = false;
     micFallbackWarnedRef.current = false;
+    takeGenRef.current += 1;
+    placeRef.current = undefined;
+    (() => {
+      const gen = takeGenRef.current;
+      capturePlace()
+        .then((p) => {
+          // A slow fix resolving after the next take began would stamp the
+          // wrong place on it, or clear a good one with undefined.
+          if (gen === takeGenRef.current) placeRef.current = p;
+        })
+        .catch(() => {});
+    })();
       await setAudioModeAsync(RECORDING_AUDIO_MODE);
       segUris.current = [];
       segTextRef.current = [];
@@ -1059,6 +1169,8 @@ export default function RecordScreen() {
   async function stopChunked() {
     if (!chunkedRef.current) return; // idempotent
     chunkedRef.current = false;
+    takeGenRef.current += 1;
+    cancelSegment();
     stopTick();
     const seconds = elapsedRef.current;
     setPaused(false);
@@ -1084,6 +1196,7 @@ export default function RecordScreen() {
         settings,
         private: isPrivate,
         tags,
+        place: placeRef.current,
         transcribeAfterMerge: true,
         provisionalTopic: "untitled",
       });
@@ -1104,6 +1217,8 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
   async function stopLive() {
     const wasDiarizing = diarOnRef.current;
     liveOn.current = false;
+    takeGenRef.current += 1;
+    cancelSegment();
     stopDiarization();
     stopTick();
     const seconds = elapsedRef.current;
@@ -1128,6 +1243,7 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         settings,
         private: isPrivate,
         tags,
+        place: placeRef.current,
         shareId: liveShareId.current ?? undefined,
       });
       if (liveShareId.current) {

@@ -151,6 +151,8 @@ async function tryUpload(
 }
 
 export type StopArgs = {
+  /** Where the take started, when a fix was available. */
+  place?: Recording["place"];
   cacheUri: string;
   durationSeconds: number;
   plannedDurationHours: number;
@@ -193,6 +195,7 @@ export async function processStop(args: StopArgs): Promise<Recording> {
       uploadStatus: "pending",
       private: args.private,
       tags: args.tags,
+      place: args.place,
       owner:
         args.settings.ownerName.trim() && args.settings.ownerBio.trim()
           ? {
@@ -342,6 +345,8 @@ export async function transcribeExisting(
 }
 
 export type LiveStopArgs = {
+  /** Where the take started, when a fix was available. */
+  place?: Recording["place"];
   segmentUris: string[]; // local segment files, in order
   liveText: string; // assembled plain-text transcript (no speakers)
   durationSeconds: number;
@@ -404,6 +409,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       uploadStatus: "pending",
       private: args.private,
       tags: args.tags,
+      place: args.place,
       owner:
         args.settings.ownerName.trim() && args.settings.ownerBio.trim()
           ? {

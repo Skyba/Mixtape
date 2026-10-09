@@ -6,7 +6,9 @@ import android.media.AudioManager
 import android.media.AudioRecordingConfiguration
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.os.PowerManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -15,11 +17,17 @@ class MixtapeWakelockModule : Module() {
   private var wakeLock: PowerManager.WakeLock? = null
   private var recordingCallback: AudioManager.AudioRecordingCallback? = null
   private var lastSilenced = false
+  // Own thread, so the segment tick does not sit behind whatever else is
+  // queued on the main looper.
+  private var segThread: HandlerThread? = null
+  private var segHandler: Handler? = null
+  private var segRunnable: Runnable? = null
+  private var segSeq = 0
 
   override fun definition() = ModuleDefinition {
     Name("MixtapeWakelock")
 
-    Events("onRecordingSilenced")
+    Events("onRecordingSilenced", "onSegmentDue")
 
     // Hold a partial wakelock so the CPU keeps running (screen can be off) and
     // the audio recording thread isn't starved during Doze.
@@ -106,6 +114,45 @@ class MixtapeWakelockModule : Module() {
       null
     }
 
+    // The segment roll used to be a JS setTimeout. React Native suspends those
+    // when the activity is backgrounded, so the native duration cap stopped the
+    // recorder on time and nothing ever restarted it: a screen-off take kept
+    // its first segment and recorded nothing for the rest of the session. This
+    // timer runs on its own thread and fires regardless of what RN is doing.
+    //
+    // One-shot on purpose. The caller re-arms once the next segment is
+    // actually recording, so a tick that arrives late cannot queue a burst of
+    // rolls behind it.
+    Function("scheduleSegment") { delayMs: Int, token: Int ->
+      val h = ensureSegHandler()
+      segRunnable?.let { h.removeCallbacks(it) }
+      segSeq += 1
+      val seq = segSeq
+      val r = Runnable {
+        // A cancelled or superseded tick must not fire.
+        if (seq == segSeq) {
+          this@MixtapeWakelockModule.sendEvent("onSegmentDue", mapOf("token" to token))
+        }
+      }
+      segRunnable = r
+      h.postAtTime(r, SystemClock.uptimeMillis() + delayMs.toLong().coerceAtLeast(0L))
+      null
+    }
+
+    Function("cancelSegment") {
+      segRunnable?.let { segHandler?.removeCallbacks(it) }
+      segRunnable = null
+      segSeq += 1 // invalidate anything already in flight
+      null
+    }
+
+    OnDestroy {
+      segRunnable?.let { segHandler?.removeCallbacks(it) }
+      segThread?.quitSafely()
+      segThread = null
+      segHandler = null
+    }
+
     Function("stopSilenceWatch") {
       val context = appContext.reactContext
       val cb = recordingCallback
@@ -117,6 +164,17 @@ class MixtapeWakelockModule : Module() {
       lastSilenced = false
       null
     }
+  }
+
+  private fun ensureSegHandler(): Handler {
+    var h = segHandler
+    if (h == null) {
+      val t = HandlerThread("mixtape-segments").also { it.start() }
+      h = Handler(t.looper)
+      segThread = t
+      segHandler = h
+    }
+    return h
   }
 
   private fun typeName(type: Int) = when (type) {

@@ -29,6 +29,7 @@ import {
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
 import { iconOf, saveFolderIcon, useFolderIcons } from "../folderIcons";
+import { placeLabel } from "../place";
 import IconPicker from "../components/IconPicker";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
@@ -457,6 +458,9 @@ function Row({
         <View style={styles.metaRow}>
           {date ? <Text style={styles.rowDate}>{date}</Text> : null}
           <Text style={styles.rowMeta}>{fmtDur(rec.durationSeconds)}</Text>
+          {placeLabel(rec.place) ? (
+            <Text style={styles.rowMeta}>{placeLabel(rec.place)}</Text>
+          ) : null}
           <View style={[styles.pill, { borderColor: sync.color }]}>
             <Text style={[styles.pillTxt, { color: sync.color }]}>
               {sync.label}

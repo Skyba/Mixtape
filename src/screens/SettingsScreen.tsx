@@ -14,6 +14,7 @@ import * as Updates from "expo-updates";
 import { Ionicons } from "@expo/vector-icons";
 import Select from "../components/Select";
 import { APP_VERSION } from "../version";
+import { requestPlacePermission } from "../place";
 
 const MODEL_OPTIONS = [
   { label: "Haiku 4.5 — cheapest", value: "claude-haiku-4-5-20251001" },
@@ -318,6 +319,27 @@ export default function SettingsScreen() {
         options={MODEL_OPTIONS}
         onChange={(v) => setS({ ...s, topicModel: v })}
       />
+
+      <TouchableOpacity
+        style={styles.switchRow}
+        onPress={async () => {
+          const ok = await requestPlacePermission();
+          Alert.alert(
+            ok ? "Location on" : "Location off",
+            ok
+              ? "New recordings will be tagged with the city they were made in."
+              : "Recordings will have no place. Nothing else changes."
+          );
+        }}
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={styles.switchLabel}>Tag recordings with a place</Text>
+          <Text style={styles.hint}>
+            One reading when a recording starts — city only, never a track.
+            Tap to grant or check permission.
+          </Text>
+        </View>
+      </TouchableOpacity>
 
       <View style={styles.switchRow}>
         <View style={{ flex: 1 }}>

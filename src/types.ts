@@ -27,6 +27,8 @@ export type Recording = {
   // the first segment the entry was saved from. Anything uploading this
   // recording must leave the audio alone, or it replaces hours with minutes.
   mergedInCloud?: boolean;
+  /** Where the take started. Absent whenever a fix was not available. */
+  place?: { lat: number; lon: number; city?: string; region?: string };
   // Recorder killed before it could finalise the file: audio bytes present, no
   // MP4 index, so it won't play or transcribe until it's repaired.
   damaged?: boolean;

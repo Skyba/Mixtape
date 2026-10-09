@@ -11,6 +11,7 @@ export type AudioInput = {
 
 type MixtapeWakelockEvents = {
   onRecordingSilenced: (event: { silenced: boolean }) => void;
+  onSegmentDue: (event: { token: number }) => void;
 };
 
 declare class MixtapeWakelockModule extends NativeModule<MixtapeWakelockEvents> {
@@ -19,6 +20,8 @@ declare class MixtapeWakelockModule extends NativeModule<MixtapeWakelockEvents> 
   listInputs(): AudioInput[];
   startSilenceWatch(): void;
   stopSilenceWatch(): void;
+  scheduleSegment(delayMs: number, token: number): void;
+  cancelSegment(): void;
 }
 
 const mod = (() => {
@@ -96,4 +99,42 @@ export function watchSilence(
     } catch {}
     sub?.remove();
   };
+}
+
+/** True when the installed build has the native segment timer. */
+export function hasNativeSegmentTimer(): boolean {
+  return typeof (mod as any)?.scheduleSegment === "function";
+}
+
+/**
+ * Asks for one onSegmentDue event in `delayMs`. Runs on a native thread, so
+ * unlike setTimeout it still fires with the app backgrounded. One-shot: re-arm
+ * it when the next segment is actually recording, so a late tick cannot queue
+ * a burst of rolls behind it. Returns false when the build predates it.
+ */
+export function scheduleSegment(delayMs: number, token: number): boolean {
+  try {
+    if (!hasNativeSegmentTimer()) return false;
+    mod!.scheduleSegment(Math.max(0, Math.round(delayMs)), token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function cancelSegment(): void {
+  try {
+    mod?.cancelSegment();
+  } catch {}
+}
+
+/** Subscribes to the native segment tick. Returns an unsubscribe. */
+export function onSegmentDue(cb: (token: number) => void): () => void {
+  if (!mod) return () => {};
+  try {
+    const sub = mod.addListener("onSegmentDue", (e) => cb(e.token));
+    return () => sub.remove();
+  } catch {
+    return () => {};
+  }
 }
