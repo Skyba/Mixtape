@@ -50,6 +50,16 @@ export type Settings = {
   /** ISO date of the enrolled voice sample, or "" if never recorded. */
   voiceEnrolledAt: string;
   uploadOnCellular: boolean; // false = Wi-Fi only
+  /**
+   * true  = one continuous file, capped natively. Survives the screen locking
+   *         and the app being backgrounded, because nothing in JS has to run
+   *         for the recording to continue. A process kill loses the take.
+   * false = 3-minute chunks. A kill costs one chunk, but the roll is a JS
+   *         timer and React Native suspends those when the activity is
+   *         backgrounded: the native cap then stops the recorder and nothing
+   *         restarts it, so a screen-off session keeps only its first chunk.
+   */
+  singleFileRecording: boolean;
   googleWebClientId: string; // OAuth 2.0 Web client ID (Google Cloud Console)
 };
 
@@ -61,6 +71,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ownerBio: "",
   voiceEnrolledAt: "",
   uploadOnCellular: false,
+  singleFileRecording: true,
   googleWebClientId: "",
 };
 

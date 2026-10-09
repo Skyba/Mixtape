@@ -321,6 +321,21 @@ export default function SettingsScreen() {
 
       <View style={styles.switchRow}>
         <View style={{ flex: 1 }}>
+          <Text style={styles.switchLabel}>Record as one file</Text>
+          <Text style={styles.hint}>
+            On = keeps recording with the screen off or the app in the
+            background. Off = 3-minute chunks, which survive a crash but stop
+            recording the moment you leave the app.
+          </Text>
+        </View>
+        <Switch
+          value={s.singleFileRecording}
+          onValueChange={(v) => setS({ ...s, singleFileRecording: v })}
+        />
+      </View>
+
+      <View style={styles.switchRow}>
+        <View style={{ flex: 1 }}>
           <Text style={styles.switchLabel}>Upload on cellular</Text>
           <Text style={styles.hint}>
             Off = upload only on Wi-Fi (recommended)

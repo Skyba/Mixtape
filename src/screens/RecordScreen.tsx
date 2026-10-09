@@ -523,7 +523,12 @@ export default function RecordScreen() {
     // Chunked recording needs the cloud to stitch the pieces back together.
     // Offline, keep the single-file path: one continuous file is still the most
     // robust thing available when nothing can merge it afterwards.
-    if (isFirebaseConfigured && isSignedIn()) return startChunked();
+    // Chunking costs the whole take when the activity is backgrounded: the
+    // roll is a JS timer, RN suspends those, the native cap stops the recorder
+    // and nothing restarts it. One file has no JS in its critical path.
+    if (isFirebaseConfigured && isSignedIn() && !s.singleFileRecording) {
+      return startChunked();
+    }
 
     try {
       setStatus("");

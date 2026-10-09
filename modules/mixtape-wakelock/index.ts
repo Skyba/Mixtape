@@ -50,9 +50,25 @@ export function listAudioInputs(): AudioInput[] {
   }
 }
 
-/** The plugged-in mic, if there is one. Built-in mic is not "external". */
+/** Types that exist to be a microphone. A USB receiver or dongle is here. */
+const MIC_TYPES = ["usb", "usb-headset", "usb-accessory"];
+
+/**
+ * The input to prefer automatically, or null to stay on the phone's own mic.
+ *
+ * Only devices whose purpose is a microphone count. Bluetooth earbuds and
+ * speakers report themselves as external inputs and were being selected over
+ * the built-in mic — a Bluetooth speaker is not a microphone worth recording a
+ * conversation on, and SCO quality is far below the phone's own. Anything else
+ * is a deliberate choice, so it is offered rather than taken automatically.
+ */
 export function externalInput(): AudioInput | null {
-  return listAudioInputs().find((i) => i.external) ?? null;
+  return listAudioInputs().find((i) => MIC_TYPES.includes(i.type)) ?? null;
+}
+
+/** Everything the recorder could be pointed at, for manual selection. */
+export function selectableInputs(): AudioInput[] {
+  return listAudioInputs();
 }
 
 /**
