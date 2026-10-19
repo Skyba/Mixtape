@@ -153,6 +153,8 @@ async function tryUpload(
 export type StopArgs = {
   /** Where the take started, when a fix was available. */
   place?: Recording["place"];
+  note?: string;
+  inputName?: string;
   cacheUri: string;
   durationSeconds: number;
   plannedDurationHours: number;
@@ -196,6 +198,8 @@ export async function processStop(args: StopArgs): Promise<Recording> {
       private: args.private,
       tags: args.tags,
       place: args.place,
+      note: args.note?.trim() || undefined,
+      inputName: args.inputName,
       owner:
         args.settings.ownerName.trim() && args.settings.ownerBio.trim()
           ? {
@@ -347,6 +351,8 @@ export async function transcribeExisting(
 export type LiveStopArgs = {
   /** Where the take started, when a fix was available. */
   place?: Recording["place"];
+  note?: string;
+  inputName?: string;
   segmentUris: string[]; // local segment files, in order
   liveText: string; // assembled plain-text transcript (no speakers)
   durationSeconds: number;
@@ -410,6 +416,8 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       private: args.private,
       tags: args.tags,
       place: args.place,
+      note: args.note?.trim() || undefined,
+      inputName: args.inputName,
       owner:
         args.settings.ownerName.trim() && args.settings.ownerBio.trim()
           ? {

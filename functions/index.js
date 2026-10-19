@@ -143,6 +143,10 @@ router.get("/recordings", async (req, res) => {
         // they existed, which the archive treats exactly as it did then.
         private: typeof m.private === "boolean" ? m.private : undefined,
         tags: Array.isArray(m.tags) ? m.tags : undefined,
+        // Context typed at record time, for the archive's frontmatter.
+        note: m.note || undefined,
+        place: m.place || undefined,
+        inputName: m.inputName || undefined,
       });
     } catch {}
   }

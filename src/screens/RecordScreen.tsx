@@ -160,6 +160,9 @@ export default function RecordScreen() {
   const [folder, setFolder] = useState(INBOX);
   const [isPrivate, setIsPrivate] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
+  // One line of context for the archive. Editable while recording, because
+  // what a conversation turns out to be about is often clear only part way in.
+  const [note, setNote] = useState("");
   const [durationH, setDurationH] = useState(2);
   const [language, setLanguage] = useState("Auto");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
@@ -1105,6 +1108,8 @@ export default function RecordScreen() {
         language,
         settings,
         place: placeRef.current,
+        note,
+        inputName: extRef.current?.name,
       });
       setStatus(
         `Saved: ${rec.base}\nTranscript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
@@ -1197,6 +1202,8 @@ export default function RecordScreen() {
         private: isPrivate,
         tags,
         place: placeRef.current,
+        note,
+        inputName: extRef.current?.name,
         transcribeAfterMerge: true,
         provisionalTopic: "untitled",
       });
@@ -1244,6 +1251,8 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         private: isPrivate,
         tags,
         place: placeRef.current,
+        note,
+        inputName: extRef.current?.name,
         shareId: liveShareId.current ?? undefined,
       });
       if (liveShareId.current) {
@@ -1540,6 +1549,16 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         }}
       />
 
+      <Text style={styles.label}>What is this?</Text>
+      <TextInput
+        style={styles.noteInput}
+        value={note}
+        onChangeText={setNote}
+        placeholder="e.g. tyler explaining his work"
+        placeholderTextColor="#6b7280"
+        multiline
+      />
+
       <Text style={styles.label}>
         {isRecording ? "Time limit (hours)" : "Max duration (hours)"}
       </Text>
@@ -1735,6 +1754,15 @@ const styles = StyleSheet.create({
   },
   presetGhostTxt: { color: "#7c828a", fontSize: 12 },
   presetSave: { flexDirection: "row", gap: 8, marginTop: 8, alignItems: "center" },
+  noteInput: {
+    backgroundColor: "#1a1d23",
+    borderRadius: 8,
+    color: "#fff",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+    minHeight: 44,
+  },
   presetInput: {
     flex: 1,
     backgroundColor: "#1a1d23",

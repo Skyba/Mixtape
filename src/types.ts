@@ -29,6 +29,14 @@ export type Recording = {
   mergedInCloud?: boolean;
   /** Where the take started. Absent whenever a fix was not available. */
   place?: { lat: number; lon: number; city?: string; region?: string };
+  /**
+   * Free text typed by whoever pressed record — "tyler explaining his work".
+   * Carried through the API so the archive can put it in frontmatter: it is
+   * context no transcript contains and no model can infer.
+   */
+  note?: string;
+  /** The input the take was recorded on, as Android named it. */
+  inputName?: string;
   // Recorder killed before it could finalise the file: audio bytes present, no
   // MP4 index, so it won't play or transcribe until it's repaired.
   damaged?: boolean;
