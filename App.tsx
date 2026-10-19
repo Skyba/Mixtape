@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { registerUploadTask } from "./src/background";
 import { AppState } from "react-native";
 import * as Font from "expo-font";
 import { StatusBar } from "expo-status-bar";
@@ -95,6 +96,9 @@ export default function App() {
     }
     logEvent("app launch");
     initNotifications();
+    // Lets Android finish a stopped recording's upload without the app being
+    // opened: a take stopped on cellular used to wait days for a launch.
+    registerUploadTask();
     getSettings().then(async (s) => {
       // Auth restores from storage asynchronously — without this the recovery
       // jobs below all read "signed out" and take their offline path, which

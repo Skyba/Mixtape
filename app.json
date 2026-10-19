@@ -65,7 +65,8 @@
         {
           "locationWhenInUsePermission": "Mixtape tags a recording with the city it was made in, so your archive is sortable by place. It takes one reading when a recording starts and never follows you."
         }
-      ]
+      ],
+      "expo-background-task"
     ],
     "extra": {
       "eas": {

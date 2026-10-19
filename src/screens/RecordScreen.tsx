@@ -118,6 +118,14 @@ const RECORDING_OPTIONS = {
 // How long after a segment starts to look at its level. Long enough for the
 // route to settle, short enough to lose one segment rather than a session.
 const SEG_PROBE_MS = 2000;
+// Single-file mode has no boundary to notice a dead recorder at, so the file
+// itself is the evidence: a take once wrote 7 minutes of a 2-hour session and
+// reported the full duration, and nothing saw it. Checked on the native tick,
+// so it still runs with the screen off.
+const LIVENESS_MS = 60000;
+// Three checks with no growth at all. A live recorder writes ~16KB/s, so three
+// minutes of exactly zero bytes is not buffering — it has stopped.
+const LIVENESS_DEAD_CHECKS = 3;
 
 const RECORDING_AUDIO_MODE = {
   playsInSilentMode: true,
@@ -231,6 +239,9 @@ export default function RecordScreen() {
   const silenceWarnedRef = useRef(false); // isClientSilenced warning, once per take
   const micFallbackWarnedRef = useRef(false); // mic trouble warning, once per take
   const segArmedAtRef = useRef(0); // when the current segment started recording
+  const liveSizeRef = useRef(0); // last observed size of the single-file take
+  const liveStuckRef = useRef(0); // consecutive checks with no growth
+  const liveWarnedRef = useRef(false);
   // Bumped by every start, stop, pause and discard. Async work started before
   // the bump must not touch the recorder afterwards: without this, a segment
   // armed during a stop would start recording after the take had ended.
@@ -292,11 +303,63 @@ export default function RecordScreen() {
   // delayed or repeated event must not cut a segment short.
   const onSegmentDueRef = useRef<(token: number) => void>(() => {});
   onSegmentDueRef.current = (token: number) => {
-    if (token !== segTokenRef.current) return; // a boundary that already passed
-    if (!liveOn.current && !chunkedRef.current) return;
-    if (rollingRef.current || pausedRef.current) return;
-    rollSegment(false);
+    if (token !== segTokenRef.current) return; // a tick that already passed
+    if (liveOn.current || chunkedRef.current) {
+      if (rollingRef.current || pausedRef.current) return;
+      rollSegment(false);
+      return;
+    }
+    // Single-file mode: the same tick is the liveness check.
+    if (!recordingRef.current) return;
+    // While paused the file legitimately stops growing. Keep the chain alive
+    // without counting it, or the check dies for the rest of the take.
+    if (pausedRef.current) {
+      liveStuckRef.current = 0;
+      armLiveness();
+      return;
+    }
+    checkStillRecording();
   };
+
+  function armLiveness() {
+    if (!recordingRef.current) return;
+    const token = ++segTokenRef.current;
+    scheduleSegment(LIVENESS_MS, token);
+  }
+
+  /** Is the file still growing? If not, the recorder has stopped writing. */
+  async function checkStillRecording() {
+    let size = 0;
+    try {
+      const uri = recorder.uri;
+      if (uri) {
+        const info = await FileSystem.getInfoAsync(uri);
+        size = info.exists ? (info as any).size ?? 0 : 0;
+      }
+    } catch {
+      armLiveness();
+      return;
+    }
+    if (size > liveSizeRef.current) {
+      liveSizeRef.current = size;
+      liveStuckRef.current = 0;
+    } else {
+      liveStuckRef.current += 1;
+    }
+    if (liveStuckRef.current >= LIVENESS_DEAD_CHECKS && !liveWarnedRef.current) {
+      liveWarnedRef.current = true;
+      logEvent(`recorder stopped writing, stuck at ${size} bytes`);
+      // Warn, do not stop. Stopping on this signal would truncate a healthy
+      // recording if the size ever reads stale, and the audio already written
+      // is saved by the normal stop either way — so a false positive here
+      // must cost a notification, never a conversation.
+      notify(
+        "Recording may have stopped",
+        "The recording file has not grown for several minutes. Open Mixtape and check."
+      ).catch(() => {});
+    }
+    armLiveness();
+  }
   // Subscribed once, dispatched through the ref so it always runs the current
   // closure — the mount-time one still holds DEFAULT_SETTINGS, because settings
   // load after the first render.
@@ -602,6 +665,10 @@ export default function RecordScreen() {
       recordingRef.current = true;
       await activateKeepAwakeAsync();
       acquireWakelock();
+      liveSizeRef.current = 0;
+      liveStuckRef.current = 0;
+      liveWarnedRef.current = false;
+      armLiveness();
       logEvent(`start normal: recording, cap=${durationH}h`);
       refreshMic();
       setTimeout(probeRoutedMic, 3000);
@@ -1066,6 +1133,7 @@ export default function RecordScreen() {
   }
 
   async function stop() {
+    cancelSegment();
     if (liveOn.current) return stopLive();
     if (chunkedRef.current) return stopChunked();
     if (!recordingRef.current) return; // already stopping/stopped (idempotent)
