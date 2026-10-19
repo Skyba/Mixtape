@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -28,9 +29,8 @@ import {
   uploadRecording,
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
-import { iconOf, saveFolderIcon, useFolderIcons } from "../folderIcons";
+import { iconOf, useFolderIcons } from "../folderIcons";
 import { placeLabel } from "../place";
-import IconPicker from "../components/IconPicker";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
 import type { RootStackParamList } from "../../App";
@@ -48,7 +48,11 @@ export default function LibraryScreen() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [folderFilter, setFolderFilter] = useState<string | null>(null);
   const icons = useFolderIcons();
-  const [iconFor, setIconFor] = useState<string | null>(null);
+  // Tapping a row's icon files that one recording. It used to open the folder
+  // icon editor, which changed the badge on every recording in the folder —
+  // one tap on one line visibly rewrote a dozen others. Folder icons are
+  // edited in Settings, where the thing being edited is a folder.
+  const [moveFor, setMoveFor] = useState<Recording | null>(null);
   const insets = useSafeAreaInsets();
 
   useEffect(() => subscribeAuth(setAuthEmail), []);
@@ -177,6 +181,29 @@ export default function LibraryScreen() {
         },
       ]
     );
+  }
+
+  async function moveOne(r: Recording, f: string) {
+    setMoveFor(null);
+    if (r.folder === f) return;
+    if (!local.some((l) => l.id === r.id)) {
+      setMsg("Cloud-only recordings can't be moved — download it first.");
+      return;
+    }
+    setMsg("Moving…");
+    try {
+      const moved = await moveToFolder(r, f);
+      if (isFirebaseConfigured && isSignedIn()) {
+        await deleteRemoteRecording(r).catch(() => {});
+        await uploadRecording(moved, {
+          skipAudio: !!moved.mergedInCloud,
+        }).catch(() => {});
+      }
+      setMsg(`Moved to ${f}.`);
+    } catch (e: any) {
+      setMsg("Move failed: " + String(e?.message ?? e));
+    }
+    load();
   }
 
   function moveSelected() {
@@ -311,7 +338,7 @@ export default function LibraryScreen() {
           key={r.id}
           rec={r}
           icon={iconOf(r.folder, icons)}
-          onIcon={() => setIconFor(r.folder)}
+          onIcon={() => setMoveFor(r)}
           onPress={() => navigation.navigate("Detail", { rec: r })}
           onDelete={() => remove(r, false)}
           selectMode={selectMode}
@@ -320,17 +347,48 @@ export default function LibraryScreen() {
         />
       ))}
 
-      {iconFor ? (
-        <IconPicker
-          folder={iconFor}
-          current={iconOf(iconFor, icons)}
-          onPick={(e) => {
-            saveFolderIcon(iconFor, e);
-            setIconFor(null);
-          }}
-          onClose={() => setIconFor(null)}
-        />
-      ) : null}
+      <Modal
+        visible={!!moveFor}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMoveFor(null)}
+      >
+        <TouchableOpacity
+          style={styles.moveBackdrop}
+          activeOpacity={1}
+          onPress={() => setMoveFor(null)}
+        >
+          <View style={styles.moveSheet}>
+            <Text style={styles.moveTitle}>Move to folder</Text>
+            <Text style={styles.moveSub} numberOfLines={1}>
+              {moveFor?.base}
+            </Text>
+            <ScrollView style={styles.moveList}>
+              {Array.from(
+                new Set([INBOX, ...local.map((x) => x.folder)])
+              ).map((f) => (
+                <TouchableOpacity
+                  key={f}
+                  style={styles.moveRow}
+                  onPress={() => moveOne(moveFor!, f)}
+                  disabled={f === moveFor?.folder}
+                >
+                  <Text style={styles.moveIcon}>{iconOf(f, icons)}</Text>
+                  <Text
+                    style={[
+                      styles.moveRowTxt,
+                      f === moveFor?.folder && styles.moveRowCurrent,
+                    ]}
+                  >
+                    {f}
+                    {f === moveFor?.folder ? "  (current)" : ""}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {remote.length > 0 && (
         <View>
@@ -586,6 +644,25 @@ const styles = StyleSheet.create({
   },
   playOn: { backgroundColor: "#3b82f6" },
   folderIcon: { fontSize: 22 },
+  moveBackdrop: {
+    flex: 1,
+    backgroundColor: "#000000bb",
+    justifyContent: "center",
+    padding: 24,
+  },
+  moveSheet: {
+    backgroundColor: "#15181d",
+    borderRadius: 12,
+    padding: 16,
+    maxHeight: "70%",
+  },
+  moveTitle: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  moveSub: { color: "#9ca3af", fontSize: 12, marginTop: 2, marginBottom: 10 },
+  moveList: { flexGrow: 0 },
+  moveRow: { flexDirection: "row", alignItems: "center", paddingVertical: 12 },
+  moveIcon: { fontSize: 20, width: 32 },
+  moveRowTxt: { color: "#e5e7eb", fontSize: 15 },
+  moveRowCurrent: { color: "#6b7280" },
   rowFiling: { color: "#7c828a", fontSize: 11.5, marginTop: 2 },
   playTxt: { color: "#fff", fontSize: 16 },
   rowSel: { backgroundColor: "#1e2740" },
