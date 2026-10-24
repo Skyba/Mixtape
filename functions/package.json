@@ -1,7 +1,9 @@
 {
   "name": "functions",
   "description": "Mixtape Cloud Functions",
-  "engines": { "node": "20" },
+  "engines": {
+    "node": "22"
+  },
   "main": "index.js",
   "private": true,
   "dependencies": {

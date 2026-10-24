@@ -7,25 +7,41 @@
   },
   "hosting": {
     "public": "public",
-    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
     "rewrites": [
       {
         "source": "/api/ask",
-        "function": { "functionId": "askSonnet", "region": "us-central1" }
+        "function": {
+          "functionId": "askSonnet",
+          "region": "us-central1"
+        }
       },
       {
         "source": "/api/v1/**",
-        "function": { "functionId": "api", "region": "us-central1" }
+        "function": {
+          "functionId": "api",
+          "region": "us-central1"
+        }
       },
       {
         "source": "/hooks/transcription",
-        "function": { "functionId": "transcriptionWebhook", "region": "us-central1" }
+        "function": {
+          "functionId": "transcriptionWebhook",
+          "region": "us-central1"
+        }
       },
-      { "source": "/r/**", "destination": "/index.html" }
+      {
+        "source": "/r/**",
+        "destination": "/index.html"
+      }
     ]
   },
   "functions": {
     "source": "functions",
-    "runtime": "nodejs20"
+    "runtime": "nodejs22"
   }
 }
