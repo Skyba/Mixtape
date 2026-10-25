@@ -215,9 +215,48 @@ router.get("/meta", requireScope("read:meta"), async (req, res) => {
 // when its stamp is newer than ours — so a batch relabel cannot revert a hand
 // edit made on the phone since, and vice versa. A folder change moves the
 // objects inside the bucket; nothing is re-uploaded from anywhere.
+// A stamp is only comparable if it is a canonical instant. Any parseable
+// time is accepted and normalised to UTC ISO; anything else is a 400, not a
+// string that happens to sort after every real edit forever.
+function canonStamp(t) {
+  if (typeof t !== "string") return null;
+  const ms = Date.parse(t);
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+}
+
+// Shape checks for what the Mac may write. Reconciliation on the phone feeds
+// these straight into paths and .map() calls, so a wrong type here is a crash
+// there, after the sidecar is already saved.
+function validField(f, v) {
+  if (v === null) return f === "note" || f === "speakerId" || f === "meIncluded";
+  switch (f) {
+    case "folder": return typeof v === "string" && /^(?!\.)(?!_)[^/\\]{1,80}$/.test(v) && v !== "..";
+    case "speakers": return Array.isArray(v) && v.every((x) => typeof x === "string");
+    case "tags": return Array.isArray(v) && v.every((x) => typeof x === "string");
+    case "private": return typeof v === "boolean";
+    case "note": return typeof v === "string" && v.length <= 2000;
+    case "speakerId": return typeof v === "string" && /^[A-Z]$/.test(v);
+    case "meIncluded": return v === "yes" || v === "no";
+    case "speakerLabels":
+      return v && typeof v === "object" && !Array.isArray(v) && Object.entries(v).every(
+        ([l, e]) => /^[A-Z]$/.test(l) && e && typeof e.name === "string" &&
+          ["user", "mac", "voiceprint", "claude", "aai"].includes(e.by) && !!canonStamp(e.at)
+      );
+    default: return false;
+  }
+}
+
+// The Mac's write path. Newest edit wins per field: the caller sends the
+// fields it changed plus fieldsUpdatedAt for each, and a field is applied only
+// when its stamp is newer than ours — so a batch relabel cannot revert a hand
+// edit made on the phone since, and vice versa. A folder change moves the
+// objects inside the bucket; nothing is re-uploaded from anywhere.
 router.patch("/meta", requireScope("write:meta"), async (req, res) => {
   const q = need(req, res);
   if (!q) return;
+  if (!/^(?!\.)(?!_)[^/\\]{1,80}$/.test(q.folder) || /[/\\]/.test(q.base)) {
+    return res.status(400).json({ error: "bad folder or base" });
+  }
   const body = req.body || {};
   const stamps = body.fieldsUpdatedAt || {};
   const oldBase = `recordings/${req.uid}/${q.folder}/${q.base}`;
@@ -231,17 +270,17 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
   const applied = [];
   for (const f of SYNCED_FIELDS) {
     if (!(f in body)) continue;
-    const t = stamps[f];
-    if (typeof t !== "string") {
-      return res.status(400).json({ error: `fieldsUpdatedAt.${f} required` });
-    }
-    if (mine[f] && mine[f] >= t) continue; // ours is newer: keep it
+    const t = canonStamp(stamps[f]);
+    if (!t) return res.status(400).json({ error: `fieldsUpdatedAt.${f} must be a parseable time` });
+    if (!validField(f, body[f])) return res.status(400).json({ error: `bad value for ${f}` });
+    const m = canonStamp(mine[f]);
+    if (m && m >= t) continue; // ours is newer or equal: keep it
     meta[f] = body[f];
     mine[f] = t;
     applied.push(f);
   }
   meta.fieldsUpdatedAt = mine;
-  if (meta.speakerLabels) {
+  if (meta.speakerLabels && typeof meta.speakerLabels === "object") {
     meta.speakerMap = Object.fromEntries(
       Object.entries(meta.speakerLabels).map(([l, v]) => [l, v && v.name])
     );
@@ -249,10 +288,25 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
   try {
     const newFolder = String(meta.folder || q.folder);
     if (applied.includes("folder") && newFolder !== q.folder) {
-      if (!/^[^/\\]{1,80}$/.test(newFolder)) {
-        return res.status(400).json({ error: "bad folder" });
+      // A move while a transcription is pending or running would strand the
+      // job: its lock and its webhook both point at the old path, and a
+      // second finalize on the new path can submit a second paid job.
+      if (meta.transcriptStatus === "pending" || meta.transcriptStatus === "processing") {
+        return res.status(409).json({ error: "transcription in progress; move later" });
       }
       const newBase = `recordings/${req.uid}/${newFolder}/${q.base}`;
+      // Two recordings may share a base across folders. Never land on one.
+      const [destExists] = await bkt().file(newBase + ".json").exists();
+      if (destExists) {
+        let other = {};
+        try { other = await readJson(newBase + ".json"); } catch {}
+        if (other.id !== meta.id) {
+          return res.status(409).json({ error: "another recording already has that name in that folder" });
+        }
+      }
+      // Copy everything, write the new sidecar, confirm it exists — and only
+      // then remove the old objects. At no point is there a moment with no
+      // sidecar for this recording.
       for (const ext of [".m4a", ".txt", ".aai.json"]) {
         const src = bkt().file(oldBase + ext);
         const [exists] = await src.exists();
@@ -261,6 +315,8 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
       await bkt().file(newBase + ".json").save(JSON.stringify(meta, null, 2), {
         contentType: "application/json",
       });
+      const [written] = await bkt().file(newBase + ".json").exists();
+      if (!written) return res.status(500).json({ error: "move did not land; nothing deleted" });
       for (const ext of [".m4a", ".txt", ".aai.json", ".json"]) {
         await bkt().file(oldBase + ext).delete().catch(() => {});
       }

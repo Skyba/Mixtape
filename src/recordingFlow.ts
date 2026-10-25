@@ -704,15 +704,20 @@ export async function reconcileFromCloud(): Promise<number> {
       const mine = byId.get(remote.id);
       if (!mine) continue;
       const merged = mergeNewest(mine, remote);
-      if (JSON.stringify(merged) === JSON.stringify(mine)) continue;
-      let next = merged;
+      // CONTAINMENT: a folder change from the cloud is recorded in metadata
+      // but the local files are not moved. moveToFolder deletes the source
+      // sidecar before writing the destination one, so a crash mid-move makes
+      // the recording vanish from the library; and the earlier version here
+      // spread the move result over the merge, discarding merged values while
+      // keeping their newer stamps, which no later sync could repair. Files
+      // follow the folder again once there is a crash-safe move.
+      const next: Recording = { ...merged, folder: mine.folder };
       if (merged.folder !== mine.folder) {
-        next = await moveToFolder({ ...mine, fieldsUpdatedAt: merged.fieldsUpdatedAt }, merged.folder);
-        next = { ...merged, ...next, folder: merged.folder };
+        logEvent(`reconcile: cloud folder ${merged.folder} for ${mine.base} noted, local move deferred`);
       }
+      if (JSON.stringify(next) === JSON.stringify(mine)) continue;
       await writeMeta(next);
       changed++;
-      logEvent(`reconciled from cloud: ${next.base}`);
     } catch {
       /* one bad sidecar must not stop the rest */
     }

@@ -25,6 +25,7 @@ import {
   subscribeAuth,
   listRemote,
   fetchRemoteMeta,
+  remoteObjectPath,
   deleteRemoteRecording,
   uploadRecording,
 } from "../firebase";
@@ -32,7 +33,7 @@ import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
 import { writeMeta } from "../recordings";
 import { iconOf, useFolderIcons } from "../folderIcons";
 import { placeLabel } from "../place";
-import { isGreen, missingForGreen, touch } from "../attribution";
+import { isGreen, mergeNewest, missingForGreen, touch } from "../attribution";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
 import type { RootStackParamList } from "../../App";
@@ -189,7 +190,28 @@ export default function LibraryScreen() {
   // Mac batch that ran earlier cannot overwrite it, and pushes the sidecar so
   // the Mac sees it on its next pull.
   async function decideMe(r: Recording, value: "yes" | "no") {
-    const next = touch({ ...r, meIncluded: value }, "meIncluded");
+    let next = touch({ ...r, meIncluded: value }, "meIncluded");
+    if (value === "no") next = { ...next, speakerId: undefined };
+    if (isFirebaseConfigured && isSignedIn()) {
+      // Uploading the local sidecar verbatim would push every field past the
+      // newest-wins rule, and could put a stale "pending" back over a cloud
+      // "done" — which re-queues a paid transcription. Take the cloud copy's
+      // newer fields first, and never regress server-owned job state.
+      try {
+        const remote = await fetchRemoteMeta(remoteObjectPath(next, "json"));
+        next = mergeNewest(next, remote);
+        if (remote.transcriptStatus === "done" || remote.transcriptStatus === "processing") {
+          next = {
+            ...next,
+            transcriptStatus: remote.transcriptStatus,
+            speakerMap: next.speakerMap ?? remote.speakerMap,
+            aaiTranscriptId: remote.aaiTranscriptId ?? next.aaiTranscriptId,
+          };
+        }
+      } catch {
+        /* no cloud copy yet: the local one is the only truth */
+      }
+    }
     await writeMeta(next);
     if (isFirebaseConfigured && isSignedIn()) {
       await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});

@@ -147,11 +147,15 @@ export async function moveToFolder(
 ): Promise<Recording> {
   const next: Recording = { ...r, folder };
   await ensureDir(folderDir(folder));
+  // Destination sidecar first: listRecordings discovers recordings through
+  // their .json, so the window where neither exists is the window where a
+  // crash loses the recording. Write the new one, move the files, and only
+  // then remove the old one.
+  await writeMeta(next);
   await moveFile(audioPath(r), audioPath(next));
   await moveFile(transcriptPath(r), transcriptPath(next));
   await moveFile(aaiJsonPath(r), aaiJsonPath(next));
   await FileSystem.deleteAsync(metaPath(r), { idempotent: true });
-  await writeMeta(next);
   return next;
 }
 
