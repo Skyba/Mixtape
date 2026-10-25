@@ -192,7 +192,7 @@ test("retranscribe: idempotent by opId; superseded callback becomes audit, never
   aai.state.transcript = { ...completed(gen), id: "t2" };
   assert.equal((await c.webhook({ uid: UID, id: ID, lockId: d.active, payload: { transcript_id: "t2", status: "completed" } })).note, "published");
   d = await docOf(); assert.equal(d.current.rev, 2);
-  assert.equal((await c.readArtifact(UID, ID, "txt", 1)).rev, 1, "older revision still readable");
+  assert.equal(await c.readArtifact(UID, ID, "txt", 1), null, "an audit revision is never served");
 });
 
 test("provenance: a transcript made from another audio generation is ignored", async () => {
@@ -283,6 +283,108 @@ test("attempt retention is bounded but keeps the active and published ones", asy
   assert.ok(Object.keys(d.attempts).length <= 21, String(Object.keys(d.attempts).length));
   assert.ok(d.attempts[d.active]);
   assert.equal(d.attempts[first], undefined, "oldest superseded attempts are compacted away");
+});
+
+test("retention never drops an attempt that holds artifacts", async () => {
+  await reset();
+  const aai = fakeAai(); const c = build(aai, { t: Date.now() });
+  await c.createRecording(UID, { id: ID });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  aai.state.transcript = completed(gen);
+  assert.equal((await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } })).note, "published");
+  for (let i = 2; i < 30; i++) { aai.state.postResult = { id: "t" + i }; await c.retranscribe(UID, ID, "re" + i); }
+  const d = await docOf();
+  assert.ok(d.attempts[st.lockId], "published r1 kept"); assert.equal(d.attempts[st.lockId].state, "published");
+  assert.equal((await c.readArtifact(UID, ID, "txt", 1)).rev, 1);
+});
+
+test("webhook fails closed on a bad AssemblyAI response", async () => {
+  await reset();
+  const aai = fakeAai(); const c = build(aai, { t: Date.now() });
+  await c.createRecording(UID, { id: ID });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  const p = { transcript_id: "t1", status: "completed" };
+  aai.state.transcript = { error: "not found" };
+  assert.match((await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: p })).note, /not completed/);
+  aai.state.transcript = { ...completed(gen), id: "other" };
+  assert.match((await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: p })).note, /not completed/);
+  aai.state.transcript = { ...completed(gen), audio_url: undefined };
+  assert.match((await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: p })).note, /object mismatch/);
+  aai.state.transcript = { ...completed(gen), audio_url: `https://signed.test/rec2/${UID}/other/audio.m4a?generation=${gen}` };
+  assert.match((await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: p })).note, /object mismatch/);
+  assert.equal((await docOf()).status, "processing");
+  assert.equal((await bucket.file(`rec2/${UID}/${ID}/transcript-r1.txt`).exists())[0], false);
+});
+
+test("retry reuses the first delivery's post-processing; foreign artifact is a hard stop", async () => {
+  await reset();
+  const aai = fakeAai(); const c = build(aai, { t: Date.now() });
+  await c.createRecording(UID, { id: ID });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  // Someone else's bytes under our artifact name.
+  await bucket.file(`rec2/${UID}/${ID}/post-r1.json`).save("{}", { resumable: false, metadata: { metadata: { lockId: "x", aaiTranscriptId: "t1" } } });
+  aai.state.transcript = completed(gen);
+  await assert.rejects(c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } }), /different provenance/);
+  assert.equal((await docOf()).status, "processing");
+});
+
+test("first transcript keeps hand-set labels; re-transcription resets them", async () => {
+  await reset();
+  const aai = fakeAai(); const c = build(aai, { t: Date.parse("2026-10-25T12:00:00Z") });
+  await c.createRecording(UID, { id: ID, speakers: ["Basile", "Erica"], owner: { name: "Basile" } });
+  await c.patch(UID, ID, { speakerLabels: { A: { name: "Basile", by: "user", at: "2026-10-25T11:00:00Z" } }, speakerId: "A", expectedRevision: 0,
+    fieldsUpdatedAt: { "speakerLabels.A": "2026-10-25T11:00:00Z", speakerId: "2026-10-25T11:00:00Z" } }, "Basile");
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  aai.state.transcript = completed(gen, { speech_understanding: { response: { speaker_identification: { mapping: { A: "Erica", B: "Basile" } } } } });
+  await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } });
+  let d = await docOf();
+  assert.equal(d.speakerLabels.A.by, "user"); assert.equal(d.speakerLabels.A.name, "Basile"); assert.equal(d.speakerId, "A");
+  aai.state.postResult = { id: "t2" };
+  await c.retranscribe(UID, ID, "re");
+  aai.state.transcript = { ...completed(gen), id: "t2" };
+  await c.webhook({ uid: UID, id: ID, lockId: (await docOf()).active, payload: { transcript_id: "t2", status: "completed" } });
+  d = await docOf();
+  assert.equal(d.speakerLabels.A, undefined, "letters mean new voices after a re-run"); assert.equal(d.speakerId, null);
+});
+
+test("share sync: marker survives a crash and the sweep finishes it", async () => {
+  await reset();
+  const aai = fakeAai(); const c = build(aai, { t: Date.now() });
+  await db.doc("shares/sh1").set({ ownerUid: UID });
+  await c.createRecording(UID, { id: ID, shareId: "sh1" });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  aai.state.transcript = completed(gen);
+  // Simulate the crash: publish, then wipe the share doc's update and re-arm the marker.
+  await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } });
+  assert.ok((await db.doc("shares/sh1").get()).data().utterances);
+  await db.doc("shares/sh1").set({ ownerUid: UID });
+  await c.docRef(UID, ID).update({ shareDirty: { shareId: "sh1", rev: 1 } });
+  await c.sweepAll();
+  assert.ok((await db.doc("shares/sh1").get()).data().utterances, "sweep re-synced the share");
+  assert.equal((await docOf()).shareDirty, null);
+});
+
+test("a callback that arrived in the wrong phase is replayed by the sweep", async () => {
+  await reset();
+  const aai = fakeAai(); const c = build(aai, { t: Date.now() });
+  await c.createRecording(UID, { id: ID });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  await c.recordDeferredWebhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } });
+  aai.state.transcript = completed(gen);
+  await c.sweepAll();
+  assert.equal((await docOf()).status, "done");
 });
 
 test("crc32c helper matches GCS", async () => {

@@ -183,7 +183,7 @@ router.get("/recordings", async (req, res) => {
   const since = req.query.since ? Date.parse(String(req.query.since)) : 0;
   if ((await phase()) === "canonical") {
     const docs = await canon().list(req.uid, { since });
-    const out = docs.map((d) => ({ ...listRow(d, d.folder, d.base), transcript_rev: d.current ? d.current.rev : null }));
+    const out = docs.map((d) => ({ ...listRow(canon().project(d), d.folder, d.base), transcript_rev: d.current ? d.current.rev : null }));
     out.sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
     return res.json({ recordings: out });
   }
@@ -369,8 +369,6 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
       for (const ext of [".m4a", ".txt", ".aai.json", ".json"]) {
         await bkt().file(oldBase + ext).delete().catch(() => {});
       }
-    } else {
-      await saveJson(oldBase + ".json", meta);
     }
     res.json({ applied, ...meta, folder: newFolder, base: q.base });
   } catch (e) {
@@ -531,11 +529,20 @@ exports.mergeAudio = onCall(
       throw new HttpsError("invalid-argument", "too many segments.");
     }
     const prefix = `recordings/${uid}/`;
-    for (const p of [...segments, dest]) {
+    for (const p of segments) {
       if (typeof p !== "string" || !p.startsWith(prefix) || !p.endsWith(".m4a")) {
         throw new HttpsError("permission-denied", "paths must be your own .m4a files.");
       }
     }
+    // Admin writes bypass the Storage rules, so the freeze is enforced here:
+    // legacy destinations only while legacy, canonical audio (create-only,
+    // like the phone's own upload) only once canonical, nothing in between.
+    const ph = await phase();
+    const legacyDest = typeof dest === "string" && dest.startsWith(prefix) && dest.endsWith(".m4a") && !dest.includes("/_");
+    const canonDest = typeof dest === "string" && new RegExp(`^rec2/${uid}/${canon().ID_RE.source.slice(1, -1)}/audio\\.m4a$`).test(dest);
+    if (ph === "frozen") throw new HttpsError("unavailable", "migration in progress");
+    if (ph === "legacy" && !legacyDest) throw new HttpsError("permission-denied", "dest must be your own recording .m4a");
+    if (ph === "canonical" && !canonDest) throw new HttpsError("permission-denied", "dest must be rec2/<uid>/<id>/audio.m4a");
 
     const bucket = admin.storage().bucket();
 
@@ -587,7 +594,13 @@ exports.mergeAudio = onCall(
       await bucket.upload(out, {
         destination: dest,
         metadata: { contentType: "audio/mp4" },
+        ...(canonDest ? { preconditionOpts: { ifGenerationMatch: 0 } } : {}),
       });
+      if (canonDest) {
+        const m = dest.match(/^rec2\/[^/]+\/([^/]+)\/audio\.m4a$/);
+        const r = await canon().audioFinalized(uid, m[1]);
+        if (r && (r.set || r.stub)) await canon().maybeStart(uid, m[1]);
+      }
       return { path: dest };
     } catch (e) {
       throw new HttpsError("internal", String((e && e.message) || e));
@@ -723,6 +736,9 @@ async function mutateSidecar(path, fn) {
     }
     const out = await fn(meta, generation);
     if (out === null) return { meta, generation, saved: false };
+    // Admin writes bypass the frozen Storage rules; a handler that read
+    // "legacy" at entry and was paused across the freeze must not land.
+    if ((await phase()) !== "legacy") throw new PatchError(503, "migration in progress");
     try {
       await file.save(JSON.stringify(out, null, 2), {
         contentType: "application/json",
@@ -801,6 +817,7 @@ exports.startTranscription = onObjectFinalized(
     const lockId = sha256(`${uid}:${meta.id}:${revision}`);
     const lockRef = admin.firestore().collection("transcriptions").doc(lockId);
     const acquired = await admin.firestore().runTransaction(async (tx) => {
+      if ((await canon().readPhase(tx)) !== "legacy") return false;
       const d = await tx.get(lockRef);
       if (d.exists) return false;
       tx.set(lockRef, {
@@ -899,11 +916,18 @@ exports.transcriptionWebhook = onRequest(
         // Canonical job. The uid travels in the URL too, so the lookup is a
         // direct document read; the lock id is still what authorizes it.
         const ph = await phase();
-        if (ph !== "canonical") return res.status(200).json({ ok: true, note: "recorded; phase " + ph });
+        if (ph !== "canonical") {
+          await canon().recordDeferredWebhook({ uid: String(req.query.uid || ""), id: req.query.id, lockId: String(req.query.job || ""), payload: req.body });
+          return res.status(200).json({ ok: true, note: "recorded for replay; phase " + ph });
+        }
         const r = await canon().webhook({ uid: String(req.query.uid || ""), id: req.query.id, lockId: String(req.query.job || ""), payload: req.body });
         return res.status(200).json({ ok: true, ...r });
       }
-      if ((await phase()) === "canonical") return res.status(200).json({ ok: true, note: "legacy job after cutover; ignored" });
+      if ((await phase()) === "canonical") {
+        await admin.firestore().collection("legacyWebhooks").doc(`${transcriptId}:${status || "?"}`)
+          .set({ receivedAt: new Date().toISOString(), job: req.query.job || null, payload: req.body }, { merge: true });
+        return res.status(200).json({ ok: true, note: "legacy job after cutover; recorded, not applied" });
+      }
 
       // Our job id comes back in the URL, so a job whose submit response was
       // lost (no transcriptId stored) is still found. transcriptId is the
@@ -1063,5 +1087,35 @@ exports.transcriptionWebhook = onRequest(
 // response into needs-review, and polls jobs whose webhook never came.
 exports.transcriptionSweep = onSchedule(
   { region: "us-central1", schedule: "every 15 minutes", secrets: TRANSCRIBE_SECRETS, timeoutSeconds: 300 },
-  async () => { console.log(JSON.stringify(await canon().sweepAll())); }
+  async () => {
+    const ph = await phase();
+    console.log(JSON.stringify(ph === "legacy" ? await legacySweep() : await canon().sweepAll()));
+  }
 );
+
+// Legacy repair: the sidecar is marked processing BEFORE the lock exists, so
+// a crash in between leaves a recording no finalize will ever pick up again.
+// A processing sidecar older than 10 minutes with no lock for its revision
+// goes back to pending (nothing was paid for). Also reports every
+// non-terminal lock, which is what the migration's drain step reads.
+async function legacySweep() {
+  const [files] = await bkt().getFiles({ prefix: "recordings/" });
+  const reset = [], open = [];
+  for (const f of files) {
+    if (!f.name.endsWith(".json") || f.name.endsWith(".aai.json") || f.name.includes("/_")) continue;
+    let m;
+    try { m = await readJson(f.name); } catch { continue; }
+    if (m.transcriptStatus !== "processing" || !m.id) continue;
+    const uid = f.name.split("/")[1];
+    const rev = Number(m.transcriptRevision || 0);
+    const lock = await admin.firestore().collection("transcriptions").doc(sha256(`${uid}:${m.id}:${rev}`)).get();
+    if (lock.exists) { if (!["done", "error", "superseded"].includes(lock.data().status)) open.push({ id: m.id, status: lock.data().status }); continue; }
+    if (Date.now() - Date.parse(f.metadata.updated || 0) < 10 * 60 * 1000) continue;
+    try {
+      await mutateSidecar(f.name, async (cur) =>
+        cur && cur.transcriptStatus === "processing" && Number(cur.transcriptRevision || 0) === rev ? { ...cur, transcriptStatus: "pending" } : null);
+      reset.push(m.id);
+    } catch (e) { open.push({ id: m.id, error: String((e && e.message) || e) }); }
+  }
+  return { reset, open };
+}

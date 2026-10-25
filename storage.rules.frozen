@@ -15,6 +15,7 @@ service firebase.storage {
     // The phone keeps writing logs and live chunks during the freeze.
     match /recordings/{uid}/_logs/{allPaths=**} { allow write: if owner(uid); }
     match /recordings/{uid}/_live/{allPaths=**} { allow write: if owner(uid); }
+    match /recordings/{uid}/_voiceprint/{allPaths=**} { allow write: if owner(uid); }
 
     // Canonical blobs. Audio is written once by the owner and never changed;
     // everything else under an id is server-only.

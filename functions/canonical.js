@@ -85,7 +85,7 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
         ops[opId] = { at: next.updatedAt, ...(out.result || {}) };
         next.ops = trimMap(ops, OPS_KEPT, "at");
       }
-      next.attempts = trimMap(next.attempts || {}, ATTEMPTS_KEPT, "rev", (k) => k === next.active || (next.current && next.current.lockId === k));
+      next.attempts = trimMap(next.attempts || {}, ATTEMPTS_KEPT, "rev", (k, v) => k === next.active || (next.current && next.current.lockId === k) || !!(v.txt || v.aai));
       tx.set(ref, next);
       return { doc: next, result: out.result || null, replayed: false };
     });
@@ -158,19 +158,20 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
 
   // ---- maybeStart: the single owner of revision allocation ----
   async function maybeStart(uid, id) {
-    let claimed = null;
-    await mutate(uid, id, (cur) => {
+    // The claim is whatever the COMMITTED transaction returned: a body that
+    // ran, lost the conflict and re-ran against someone else's claim returns
+    // null, and nothing is submitted here.
+    const r = await mutate(uid, id, (cur) => {
       if (cur.deletedAt || !cur.audio || cur.status !== "pending" || cur.active) return null;
       const rev = Number(cur.rev || 0) + 1;
       const lockId = sha256(`${uid}:${id}:${rev}`);
       const t = iso();
-      claimed = { rev, lockId, sourceAudioGeneration: cur.audio.generation };
       const attempts = { ...cur.attempts, [lockId]: { rev, state: "claimed", aaiTranscriptId: null, sourceAudioGeneration: cur.audio.generation, createdAt: t, updatedAt: t } };
-      return { doc: { ...cur, rev, active: lockId, attempts, status: "processing" } };
+      return { doc: { ...cur, rev, active: lockId, attempts, status: "processing" }, result: { claimed: { rev, lockId, sourceAudioGeneration: cur.audio.generation } } };
     });
+    const claimed = r.result && r.result.claimed;
     if (!claimed) return { started: false };
-    const snap = await docRef(uid, id).get();
-    const doc = snap.data();
+    const doc = r.doc;
     let created;
     try {
       created = await submitToAai(uid, id, doc, claimed);
@@ -188,7 +189,10 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
         if (a.aaiTranscriptId) return null;
         return { doc: { ...cur, attempts: { ...cur.attempts, [claimed.lockId]: { ...a, aaiTranscriptId: created.id } } } };
       }
-      return { doc: { ...cur, attempts: { ...cur.attempts, [claimed.lockId]: { ...a, state: "submitted", aaiTranscriptId: created.id, updatedAt: iso() } } } };
+      // A late response to a claim the sweep already flagged: back to a
+      // normal in-flight job.
+      const status = cur.active === claimed.lockId && cur.status === "stuck" ? "processing" : cur.status;
+      return { doc: { ...cur, status, attempts: { ...cur.attempts, [claimed.lockId]: { ...a, state: "submitted", aaiTranscriptId: created.id, updatedAt: iso() } } } };
     });
     return { started: true, submitted: true, lockId: claimed.lockId, aaiTranscriptId: created.id };
   }
@@ -219,8 +223,20 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
     if (!ID_RE.test(id) || !/^[0-9a-f]{64}$/.test(lockId || "")) return { note: "bad params" };
     const transcriptId = payload && payload.transcript_id;
     if (!transcriptId) return { note: "no transcript_id" };
-    await docRef(uid, id).collection("webhooks").doc(`${transcriptId}:${payload.status || "?"}`)
-      .set({ receivedAt: iso(), lockId, payload }, { merge: true }).catch(() => {});
+    const whRef = docRef(uid, id).collection("webhooks").doc(`${transcriptId}:${payload.status || "?"}`);
+    await whRef.set({ uid, id, lockId, payload, receivedAt: iso(), processed: false }, { merge: true });
+    const out = await webhookBody({ uid, id, lockId, payload, transcriptId });
+    await whRef.set({ processed: true, note: out.note, processedAt: iso() }, { merge: true }).catch(() => {});
+    return out;
+  }
+  // Stores a callback that arrived while the pipeline could not act on it
+  // (wrong phase); the sweep replays it once the phase allows.
+  async function recordDeferredWebhook({ uid, id, lockId, payload }) {
+    if (!ID_RE.test(id || "") || !payload || !payload.transcript_id) return;
+    await docRef(uid, id).collection("webhooks").doc(`${payload.transcript_id}:${payload.status || "?"}`)
+      .set({ uid, id, lockId, payload, receivedAt: iso(), processed: false, deferred: true }, { merge: true });
+  }
+  async function webhookBody({ uid, id, lockId, payload, transcriptId }) {
 
     const snap = await docRef(uid, id).get();
     if (!snap.exists) return { note: "unknown recording" };
@@ -242,20 +258,33 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       return { note: "failed" };
     }
 
-    const data = await (await doFetch(`${lib.AAI}/transcript/${transcriptId}`, { headers: { authorization: env.ASSEMBLYAI_KEY } })).json();
-    // Provenance check: the transcript must have been made from the exact
-    // audio generation this attempt was claimed for.
+    const res = await doFetch(`${lib.AAI}/transcript/${transcriptId}`, { headers: { authorization: env.ASSEMBLYAI_KEY } });
+    const data = res && res.ok !== false ? await res.json() : null;
+    // Fail closed: the transcript must be the one named, completed, and made
+    // from exactly this recording's audio object and generation.
+    if (!data || data.id !== transcriptId || data.status !== "completed") return { note: "transcript not completed at AAI; ignored" };
     const gen = genFromAudioUrl(data.audio_url);
-    if (gen && gen !== String(a.sourceAudioGeneration)) return { note: "audio generation mismatch; ignored" };
-    const objectOk = !data.audio_url || data.audio_url.includes(encodeURIComponent(`rec2/${uid}/${id}/${audioName}`)) || data.audio_url.includes(`rec2/${uid}/${id}/${audioName}`);
+    const objectPath = `rec2/${uid}/${id}/${audioName}`;
+    const objectOk = typeof data.audio_url === "string" && (data.audio_url.includes(objectPath) || data.audio_url.includes(encodeURIComponent(objectPath)));
     if (!objectOk) return { note: "audio object mismatch; ignored" };
+    if (!gen || gen !== String(a.sourceAudioGeneration)) return { note: "audio generation mismatch; ignored" };
 
-    const utterances = data.utterances || [];
-    const post = await lib.postProcess(data, doc, env, doFetch);
-    const text = post.text;
     const rev = a.rev;
-    const txt = await writeArtifact(uid, id, txtName(rev), text, "text/plain", { lockId, aaiTranscriptId: transcriptId, rev, sourceAudioGeneration: a.sourceAudioGeneration });
-    const aai = await writeArtifact(uid, id, aaiName(rev), JSON.stringify(utterances), "application/json", { lockId, aaiTranscriptId: transcriptId, rev, sourceAudioGeneration: a.sourceAudioGeneration });
+    const prov = { lockId, aaiTranscriptId: transcriptId, rev, sourceAudioGeneration: a.sourceAudioGeneration };
+    // Post-processing (Claude speaker inference, topic) is not deterministic,
+    // so a retried delivery reuses the FIRST run's result: it is persisted as
+    // a create-only artifact before any transcript bytes are written.
+    const postName = `post-r${rev}.json`;
+    let post = await readOwnArtifact(uid, id, postName, prov);
+    if (!post) {
+      const fresh = await lib.postProcess(data, doc, env, doFetch);
+      await writeArtifact(uid, id, postName, JSON.stringify(fresh), "application/json", prov);
+      post = await readOwnArtifact(uid, id, postName, prov);
+      if (!post) throw new Error("post artifact exists with different provenance");
+    }
+    const utterances = post.utterances || [];
+    const txt = await writeArtifact(uid, id, txtName(rev), post.text, "text/plain", prov);
+    const aai = await writeArtifact(uid, id, aaiName(rev), JSON.stringify(utterances), "application/json", prov);
 
     const transcribedAt = a.transcribedAt || iso();
     const r = await mutate(uid, id, (cur) => {
@@ -267,27 +296,68 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
         if (!canMove(at.state, "audit")) return null;
         return { doc: { ...cur, attempts: { ...cur.attempts, [lockId]: { ...at, state: "audit", aaiTranscriptId: transcriptId, txt, aai, updatedAt: t } } }, result: { audit: true } };
       }
+      // Labels: a first transcript seeds only letters the owner has not set
+      // by hand; a re-transcription resets them all (letters are new voices),
+      // stamped with the job's time so a phone merge sees the reset as newer.
+      const firstRun = !cur.current;
       const labelStamps = {};
       const speakerLabels = {};
+      if (firstRun) {
+        for (const [L, v] of Object.entries(cur.speakerLabels || {})) if (v && v.by === "user") speakerLabels[L] = v;
+      }
       for (const [letter, name] of Object.entries(post.speakerMap || {})) {
+        if (speakerLabels[letter]) continue;
         speakerLabels[letter] = { name, by: post.identified ? "aai" : "claude", at: transcribedAt };
         labelStamps[`speakerLabels.${letter}`] = transcribedAt;
       }
-      const current = { rev, lockId, aaiTranscriptId: transcriptId, sourceAudioGeneration: at.sourceAudioGeneration, txt, aai, publishedAt: t, producer: "aai", speechModelUsed: post.speechModelUsed, transcribedAt };
+      const keepOwner = firstRun && cur.speakerId && speakerLabels[cur.speakerId] && speakerLabels[cur.speakerId].by === "user";
+      const current = { rev, lockId, aaiTranscriptId: transcriptId, sourceAudioGeneration: at.sourceAudioGeneration, txt, aai, post: { name: postName }, publishedAt: t, producer: "aai", speechModelUsed: post.speechModelUsed, transcribedAt };
       const attempts = { ...cur.attempts, [lockId]: { ...at, state: "published", aaiTranscriptId: transcriptId, txt, aai, updatedAt: t, transcribedAt } };
+      const speakerMap = Object.fromEntries(Object.entries(speakerLabels).map(([L, v]) => [L, v.name]));
       const doc2 = {
         ...cur, attempts, active: null, current, status: "done",
-        speakerMap: post.speakerMap, speakerLabels, speakerId: null,
-        fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), ...labelStamps, speakerId: transcribedAt },
+        speakerMap: Object.keys(speakerMap).length ? speakerMap : null, speakerLabels, speakerId: keepOwner ? cur.speakerId : null,
+        fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), ...labelStamps, ...(keepOwner ? {} : { speakerId: transcribedAt }) },
         topic: post.topic || cur.topic, aaiTranscriptId: transcriptId, speechModelUsed: post.speechModelUsed,
         audioDurationSec: post.audioDurationSec, transcribedAt, estCostUsd: post.estCostUsd,
         durationSeconds: cur.durationSeconds || Math.round(post.audioDurationSec || 0),
         ...(post.language ? { language: post.language } : {}),
+        // Derived share doc is updated after this commit; the marker makes
+        // the sweep finish it if we die in between.
+        shareDirty: cur.shareId ? { shareId: cur.shareId, rev } : null,
       };
       return { doc: doc2, result: { published: true } };
     });
-    if (r.result && r.result.published && doc.shareId) await lib.updateShare(db, doc.shareId, uid, { utterances, speakerMap: post.speakerMap, topic: post.topic, durationSeconds: r.doc.durationSeconds, speakers: doc.speakers, language: r.doc.language });
+    if (r.result && r.result.published) await syncShare(uid, id);
     return r.result && r.result.published ? { note: "published", rev } : r.result && r.result.audit ? { note: "audit", rev } : { note: "no-op" };
+  }
+
+  // Pushes the published transcript into the public share doc, then clears
+  // the marker; idempotent, so the sweep can retry it.
+  async function syncShare(uid, id) {
+    const snap = await docRef(uid, id).get();
+    const d = snap.data();
+    if (!d || !d.shareDirty || !d.current) return false;
+    const post = await readOwnArtifact(uid, id, d.current.post.name, { lockId: d.current.lockId, aaiTranscriptId: d.current.aaiTranscriptId });
+    if (!post) return false;
+    const ok = await lib.updateShare(db, d.shareDirty.shareId, uid, {
+      utterances: post.utterances || [], speakerMap: d.speakerMap, topic: d.topic,
+      durationSeconds: d.durationSeconds || 0, speakers: d.speakers, language: d.language || "",
+    });
+    if (!ok) return false;
+    await mutate(uid, id, (cur) => (cur.shareDirty && cur.shareDirty.rev === d.shareDirty.rev ? { doc: { ...cur, shareDirty: null } } : null));
+    return true;
+  }
+
+  // Reads an artifact only if it carries this attempt's provenance.
+  async function readOwnArtifact(uid, id, name, prov) {
+    const file = blob(uid, id, name);
+    let md;
+    try { [md] = await file.getMetadata(); } catch (e) { if (e.code === 404) return null; throw e; }
+    const m = md.metadata || {};
+    if (m.lockId !== prov.lockId || m.aaiTranscriptId !== prov.aaiTranscriptId) return null;
+    const [buf] = await file.download({ ifGenerationMatch: Number(md.generation) });
+    return JSON.parse(buf.toString());
   }
 
   // Create-only artifact write. On 412, adopt the existing object iff it was
@@ -296,14 +366,20 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
     const file = blob(uid, id, name);
     const crc = crc32cBase64(Buffer.from(content));
     const metadata = { contentType, metadata: { ...stringify(meta), crc32c: crc } };
+    const adopt = async () => {
+      const [md] = await file.getMetadata();
+      const m = md.metadata || {};
+      if (m.lockId !== meta.lockId || m.aaiTranscriptId !== String(meta.aaiTranscriptId) || md.crc32c !== crc) throw new Error(`artifact ${name} exists with different provenance`);
+      return { name, generation: String(md.generation), size: Number(md.size), crc32c: md.crc32c };
+    };
+    // Look before writing (the emulator ignores preconditions; production
+    // GCS enforces the one below as well, which closes the race).
+    if ((await file.exists())[0]) return adopt();
     try {
       await file.save(content, { metadata, preconditionOpts: { ifGenerationMatch: 0 }, resumable: false });
     } catch (e) {
       if (!(e && e.code === 412)) throw e;
-      const [md] = await file.getMetadata();
-      const m = md.metadata || {};
-      if (m.lockId !== meta.lockId || md.crc32c !== crc) throw new Error(`artifact ${name} exists with different provenance`);
-      return { name, generation: String(md.generation), size: Number(md.size), crc32c: md.crc32c };
+      return adopt();
     }
     const [md] = await file.getMetadata();
     return { name, generation: String(md.generation), size: Number(md.size), crc32c: md.crc32c };
@@ -319,13 +395,15 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
     const a = d.active && d.attempts[d.active];
     if (!a) return null;
     if (a.state === "claimed" && age(a.updatedAt) > CLAIMED_STALE_MS) {
-      await mutate(uid, id, (cur) => {
-        const at = cur.attempts[cur.active || ""];
-        if (!at || !canMove(at.state, "needs-review")) return null;
-        return { doc: { ...cur, status: "stuck", attempts: { ...cur.attempts, [cur.active]: { ...at, state: "needs-review", updatedAt: iso() } } } };
+      const lockId = d.active;
+      const r = await mutate(uid, id, (cur) => {
+        const at = cur.attempts[lockId];
+        if (!at || cur.active !== lockId || at.state !== "claimed" || age(at.updatedAt) <= CLAIMED_STALE_MS) return null;
+        return { doc: { ...cur, status: "stuck", attempts: { ...cur.attempts, [lockId]: { ...at, state: "needs-review", updatedAt: iso() } } }, result: { needsReview: lockId } };
       });
-      return { needsReview: d.active };
+      return r.result;
     }
+    if (d.shareDirty) await syncShare(uid, id);
     if (a.state === "submitted" && a.aaiTranscriptId && age(a.updatedAt) > SUBMITTED_STALE_MS) {
       const data = await (await doFetch(`${lib.AAI}/transcript/${a.aaiTranscriptId}`, { headers: { authorization: env.ASSEMBLYAI_KEY } })).json();
       if (data.status === "completed" || data.status === "error") {
@@ -337,7 +415,11 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
   async function sweepAll() {
     if ((await readPhase()) !== "canonical") return { skipped: true };
     const out = [];
-    const q = await db.collectionGroup("items").where("status", "in", ["pending", "processing"]).get();
+    const q = await db.collectionGroup("items").where("status", "in", ["pending", "processing", "stuck"]).get();
+    const dirty = await db.collectionGroup("items").where("shareDirty", "!=", null).get();
+    for (const s of dirty.docs) { const d = s.data(); try { await syncShare(d.uid, d.id); } catch (e) { out.push([d.id, "share: " + String((e && e.message) || e)]); } }
+    const pending = await db.collectionGroup("webhooks").where("processed", "==", false).get();
+    for (const w of pending.docs) { const p = w.data(); try { out.push([p.id, await webhook({ uid: p.uid, id: p.id, lockId: p.lockId, payload: p.payload })]); } catch (e) { out.push([p.id, "replay: " + String((e && e.message) || e)]); } }
     for (const s of q.docs) {
       const d = s.data();
       try { out.push([d.id, await sweepOne(d.uid, d.id)]); } catch (e) { out.push([d.id, String((e && e.message) || e)]); }
@@ -400,7 +482,9 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
     if (!doc.current && rev == null) return null;
     const r = rev == null ? doc.current.rev : Number(rev);
     if (doc.current && doc.current.rev === r) return doc.current[kind];
-    const a = Object.values(doc.attempts || {}).find((x) => x.rev === r && x[kind]);
+    // Only revisions that were once current are readable; audit artifacts
+    // (a superseded job that finished late) are kept for forensics only.
+    const a = Object.values(doc.attempts || {}).find((x) => x.rev === r && x[kind] && x.state === "published");
     return a ? a[kind] : null;
   }
   async function readArtifact(uid, id, kind, rev) {
@@ -443,7 +527,7 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
   }
 
   return {
-    ID_RE, CanonError, readPhase, setPhase, createRecording, audioFinalized, maybeStart, webhook, sweepOne, sweepAll,
+    ID_RE, CanonError, readPhase, setPhase, createRecording, audioFinalized, maybeStart, webhook, recordDeferredWebhook, syncShare, sweepOne, sweepAll,
     retranscribe, deleteRecording, patch, get, list, readArtifact, audioUrl, audioDescriptor, project, docRef, blob,
     _internal: { canMove, mutate },
   };
@@ -462,7 +546,7 @@ function trimMap(map, keep, timeKey, pin) {
     return typeof x === "number" && typeof y === "number" ? y - x : String(y || "").localeCompare(String(x || ""));
   });
   const out = {};
-  for (const [k, v] of entries) if (Object.keys(out).length < keep || (pin && pin(k))) out[k] = v;
+  for (const [k, v] of entries) if (Object.keys(out).length < keep || (pin && pin(k, v))) out[k] = v;
   return out;
 }
 
