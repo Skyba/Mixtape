@@ -35,7 +35,7 @@ import { canUploadNow } from "../network";
 import { pushMeta, recordEdit, sendEdits } from "../outbox";
 import { iconOf, useFolderIcons } from "../folderIcons";
 import { placeLabel } from "../place";
-import { isGreen, missingForGreen, touch } from "../attribution";
+import { isGreen, missingForGreen, touch, adopt, changedKeys } from "../attribution";
 import { enqueue, replayOutbox } from "../outbox";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
@@ -213,7 +213,8 @@ export default function LibraryScreen() {
     const patch: Record<string, unknown> = { meIncluded: value };
     if (value === "no" && r.speakerId) patch.speakerId = null;
     await enqueue(preview, patch, preview.fieldsUpdatedAt ?? {});
-    const next = await commitMeta(r, change);
+    const keys = changedKeys(r, preview);
+    const next = await commitMeta(r, (cur) => adopt(cur, preview, keys));
     load();
     sendEdits(next).then(() => load()).catch(() => {});
   }
@@ -250,9 +251,11 @@ export default function LibraryScreen() {
   // A folder change: under canonical a stamped field through the outbox,
   // under legacy the old copy-and-re-upload.
   async function moveFolderSynced(r: Recording, f: string): Promise<Recording> {
-    await recordEdit(touch({ ...r, folder: f }, "folder"), { folder: f });
-    const movedFiles = await moveToFolder(r, f); // v2: metadata only
-    const moved = await commitMeta(movedFiles, (cur) => touch({ ...cur, folder: f }, "folder"));
+    const preview = touch({ ...r, folder: f }, "folder");
+    await recordEdit(preview, { folder: f });
+    // Legacy moves the files; v2 is metadata only. Then the exact stamp.
+    const movedFiles = await moveToFolder(r, f);
+    const moved = await commitMeta(movedFiles, (cur) => adopt(cur, preview, ["folder"]));
     if (isFirebaseConfigured && isSignedIn()) {
       if (await isCanonical()) await sendEdits(moved);
       else {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { setLabel, touch } from "../attribution";
+import { setLabel, touch, adopt, changedKeys } from "../attribution";
 import { enqueue, replayOutbox } from "../outbox";
 import {
   ActivityIndicator,
@@ -97,10 +97,12 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     if (!isLayoutV2()) return;
     FileSystem.getInfoAsync(audioPath(rec)).then((i) => setIsRemote(!i.exists)).catch(() => {});
   }, [rec.id]);
-  // Letter edits are bound to the revision whose utterances are on screen;
-  // while a newer transcript is still downloading they are refused.
-  const shownRev = isLayoutV2() ? (rec.transcriptLocalRev ?? 0) : (rec.transcriptRevision ?? 0);
-  const revisionBehind = isLayoutV2() && !!rec.transcriptRevision && rec.transcriptLocalRev !== rec.transcriptRevision;
+  // The transcript pair on screen and the revision it came from, loaded
+  // together: letter edits are bound to THIS revision, not to whatever the
+  // sidecar says by the time the tap lands.
+  const [loadedRev, setLoadedRev] = useState<number>(0);
+  const revisionBehind = isLayoutV2() && !!rec.transcriptRevision && loadedRev !== rec.transcriptRevision;
+  const shownRev = isLayoutV2() ? loadedRev : (rec.transcriptRevision ?? 0);
   const [transcript, setTranscript] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
@@ -120,30 +122,39 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   // A transcript finishing or an edit landing from the Mac while this screen
   // is open: re-read the sidecar and its files.
+  // Reads the pair and its revision, then publishes all three in one go.
+  async function loadPair(r: Recording) {
+    const [t, u] = await Promise.all([readTranscript(r), readAaiJson(r)]);
+    setTranscript(t);
+    setUtterances(u);
+    setLoadedRev(isLayoutV2() ? (r.transcriptLocalRev ?? 0) : (r.transcriptRevision ?? 0));
+  }
   useEffect(() => onCloudChange(async () => {
     const cur = await readMeta(rec.id).catch(() => null);
     if (!cur) return;
+    if (!isRemote) await loadPair(cur);
     setRec(cur);
-    setTranscript(await readTranscript(cur));
-    setUtterances(await readAaiJson(cur));
-  }), [rec.id]);
+  }), [rec.id, isRemote]);
 
   useEffect(() => {
     (async () => {
       setSpeakerHist(await getSpeakerHistory());
-      if (!isRemote) {
-        setTranscript(await readTranscript(rec));
-        setUtterances(await readAaiJson(rec));
-      }
+      if (!isRemote) await loadPair(rec);
     })();
-  }, [isRemote, rec]);
+  }, [isRemote, rec.id, rec.transcriptLocalRev]);
+
+  // Under v2 a transcript write names the revision it belongs to, and is
+  // refused inside the lock if that revision is no longer the installed one.
+  function sameRev(cur: Recording) {
+    if (isLayoutV2() && (cur.transcriptLocalRev ?? 0) !== loadedRev) throw new Error("transcript revision changed");
+    return cur;
+  }
 
   async function downloadFromCloud() {
     setBusy("Downloading…");
     if (await isCanonical()) {
       await FileSystem.makeDirectoryAsync(idDir(rec), { intermediates: true });
       await downloadRemoteFile(remoteCanonicalPath(rec.id, "audio.m4a"), audioPath(rec));
-      await writeMeta(rec);
       setIsRemote(false);
       setBusy("");
       return;
@@ -205,9 +216,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setShareBusy(true);
     try {
       const { shareId, url } = await publishShare(rec, utterances ?? []);
-      const change = (cur: Recording) => touch({ ...cur, shareId }, "shareId");
-      await recordEdit(change(rec), { shareId });
-      const next = await commitMeta(rec, change);
+      const preview = touch({ ...rec, shareId }, "shareId");
+      await recordEdit(preview, { shareId });
+      const next = await commitMeta(rec, (cur) => adopt(cur, preview, ["shareId"]));
       setRec(next);
       await sendEdits(next);
       await Clipboard.setStringAsync(url);
@@ -223,9 +234,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setShareBusy(true);
     try {
       await unpublishShare(rec.shareId);
-      const change = (cur: Recording) => touch({ ...cur, shareId: undefined }, "shareId");
-      await recordEdit(change(rec), { shareId: null });
-      const next = await commitMeta(rec, change);
+      const preview = touch({ ...rec, shareId: undefined }, "shareId");
+      await recordEdit(preview, { shareId: null });
+      const next = await commitMeta(rec, (cur) => adopt(cur, preview, ["shareId"]));
       setRec(next);
       await sendEdits(next);
     } catch (e: any) {
@@ -265,12 +276,19 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     if (preview.speakerId !== rec.speakerId) patch.speakerId = preview.speakerId ?? null;
     if (preview.meIncluded !== rec.meIncluded) patch.meIncluded = preview.meIncluded;
     await enqueue(preview, patch, stamps, shownRev);
-    const next = await commitMeta(rec, (cur) => setLabel(cur, letter, name, "user", settings.ownerName));
+    const keys = changedKeys(rec, preview);
+    let next: Recording;
+    try {
+      next = await commitMeta(rec, (cur) => adopt(sameRev(cur), preview, keys));
+    } catch {
+      Alert.alert("New transcript arrived", "Label speakers again on the new one.");
+      return;
+    }
     const nextMap = next.speakerMap ?? { ...base, [letter]: name };
     const nextText = renderTranscript(utterances, rec.speakers, nextMap);
     setRec(next);
     setTranscript(nextText);
-    await writeTranscript(next, nextText);
+    await writeTranscript({ ...next, transcriptLocalRev: loadedRev }, nextText);
     if (isFirebaseConfigured && isSignedIn()) {
       // Legacy: the re-rendered transcript text goes up as a file. Canonical:
       // the server renders from the labels; nothing but the patch is sent.
@@ -316,9 +334,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     if (await isCanonical()) {
       // A field, stamped, through the outbox. Tags belong to the folder's
       // vocabulary, so a move clears or replaces them.
-      const change = (cur: Recording) => touch({ ...cur, folder, ...(p ? { private: p.private, tags: p.tags } : {}) }, "folder", ...(p ? ["private", "tags"] : []));
-      await recordEdit(change(rec), { folder, ...(p ? { private: p.private, tags: p.tags } : {}) });
-      const moved = await commitMeta(rec, change);
+      const preview = touch({ ...rec, folder, ...(p ? { private: p.private, tags: p.tags } : {}) }, "folder", ...(p ? ["private", "tags"] : []));
+      await recordEdit(preview, { folder, ...(p ? { private: p.private, tags: p.tags } : {}) });
+      const moved = await commitMeta(rec, (cur) => adopt(cur, preview, changedKeys(rec, preview)));
       await rememberFolder(folder);
       setRec(moved);
       await sendEdits(moved);
@@ -362,9 +380,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
    */
   async function changeLanguage(language: string) {
     if (language === rec.language) return;
-    const change = (cur: Recording) => touch({ ...cur, language }, "language");
-    await recordEdit(change(rec), { language });
-    const next = await commitMeta(rec, change);
+    const preview = touch({ ...rec, language }, "language");
+    await recordEdit(preview, { language });
+    const next = await commitMeta(rec, (cur) => adopt(cur, preview, ["language"]));
     setRec(next);
     await sendEdits(next);
     if (rec.transcriptStatus === "done") {
@@ -384,9 +402,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   /** Filing for the archive. The folder is a real move; the rest is metadata. */
   async function savePlacement(p: Placement) {
     if (p.folder !== rec.folder) return changeFolder(p.folder, p);
-    const change = (cur: Recording) => touch({ ...cur, private: p.private, tags: p.tags }, "private", "tags");
-    await recordEdit(change(rec), { private: p.private, tags: p.tags });
-    const next = await commitMeta(rec, change);
+    const preview = touch({ ...rec, private: p.private, tags: p.tags }, "private", "tags");
+    await recordEdit(preview, { private: p.private, tags: p.tags });
+    const next = await commitMeta(rec, (cur) => adopt(cur, preview, ["private", "tags"]));
     setRec(next);
     await sendEdits(next);
   }
@@ -423,19 +441,21 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       }
     }
     await recordEdit(next, patch, shownRev);
-    const owner = (await getSettings()).ownerName;
-    next = await commitMeta(rec, (cur) => {
-      let out: Recording = touch({ ...cur, speakers, speakerMap: nextMap }, "speakers");
-      for (const [l, n] of Object.entries(nextMap ?? {})) if (rec.speakerMap?.[l] !== n) out = setLabel(out, l, n as string, "user", owner);
-      return out;
-    });
+    const preview = next;
+    const keys = changedKeys(rec, preview);
+    try {
+      next = await commitMeta(rec, (cur) => ({ ...adopt(sameRev(cur), preview, keys), speakerMap: nextMap }));
+    } catch {
+      Alert.alert("New transcript arrived", "Rename speakers again on the new one.");
+      return;
+    }
     setRec(next);
     await rememberSpeakers(speakers.filter((s) => !/^Speaker \d+$/.test(s)));
 
     if (utterances && utterances.length) {
       const text = renderTranscript(utterances, speakers, nextMap);
       setTranscript(text);
-      await writeTranscript(next, text);
+      await writeTranscript({ ...next, transcriptLocalRev: loadedRev }, text);
     }
     await sendEdits(next);
   }

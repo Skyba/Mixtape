@@ -32,7 +32,10 @@ let cachedPhase: { at: number; phase: Phase } | null = null;
 const CANON_KEY = "phase.canonical.seen";
 let seenCanonical: boolean | null = null;
 async function sawCanonical(): Promise<boolean> {
-  if (seenCanonical === null) seenCanonical = (await AsyncStorage.getItem(CANON_KEY)) === "1";
+  if (seenCanonical === null) {
+    try { seenCanonical = (await AsyncStorage.getItem(CANON_KEY)) === "1"; if (seenCanonical) latchPersisted = true; }
+    catch { return false; } // unknown this time; asked again on the next read
+  }
   return seenCanonical;
 }
 /**
@@ -41,18 +44,27 @@ async function sawCanonical(): Promise<boolean> {
  * signed-out read: the cut-over is one-way, and taking the legacy path even
  * once would write the old layout.
  */
+let latchPersisted = false;
 export async function readPhase(): Promise<Phase> {
-  if (!isFirebaseConfigured || !isSignedIn()) return (await sawCanonical()) ? "canonical" : "legacy";
+  // The latch wins over everything: cached reads, fresh reads, failures.
+  if (await sawCanonical()) {
+    if (!latchPersisted) { try { await AsyncStorage.setItem(CANON_KEY, "1"); latchPersisted = true; } catch {} }
+    return "canonical";
+  }
+  if (!isFirebaseConfigured || !isSignedIn()) return "legacy";
   if (cachedPhase && Date.now() - cachedPhase.at < 60_000) return cachedPhase.phase;
   try {
     const s = await getDoc(doc(db(), "config", "migration"));
     const p = (s.exists() ? (s.data() as any).phase : "legacy") as Phase;
     const phase: Phase = ["legacy", "frozen", "sealed", "rolling-back", "canonical"].includes(p) ? p : "sealed";
     cachedPhase = { at: Date.now(), phase };
-    if (phase === "canonical" && !seenCanonical) { seenCanonical = true; await AsyncStorage.setItem(CANON_KEY, "1"); }
+    if (phase === "canonical") {
+      seenCanonical = true;
+      try { await AsyncStorage.setItem(CANON_KEY, "1"); latchPersisted = true; } catch {}
+    }
     return phase;
   } catch {
-    return cachedPhase?.phase ?? ((await sawCanonical()) ? "canonical" : "legacy");
+    return cachedPhase?.phase ?? "legacy";
   }
 }
 export const isCanonical = async () => (await readPhase()) === "canonical";

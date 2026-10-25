@@ -566,7 +566,7 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
       );
       if ((await isCanonical()) && !r.remoteCreated) {
         await createRemote(r, `create:${r.id}`);
-        await writeMeta({ ...r, remoteCreated: true });
+        await commitMeta(r, (cur) => ({ ...cur, remoteCreated: true }));
       }
       try {
         await mergeAudioSegments(remote, await mergeDest(r));
@@ -583,17 +583,14 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
       }
       // The cloud audio is complete now, so mark it transcribable before
       // attempting the local copy — the download is for playback only.
-      const next: Recording = {
-        ...r,
+      const merged = await commitMeta(r, (cur) => ({
+        ...cur,
         mergePending: undefined,
         mergedInCloud: true,
-      };
-      if (next.transcriptStatus === "none") {
-        next.transcriptStatus = "pending";
-      }
-      await writeMeta(next);
-      await tryUpload(next, settings, { skipAudio: true });
-      await writeMeta(next);
+        transcriptStatus: cur.transcriptStatus === "none" ? "pending" : cur.transcriptStatus,
+      }));
+      const up = await tryUpload(merged, settings, { skipAudio: true });
+      await commitMeta(merged, (cur) => ({ ...cur, uploadStatus: up.uploadStatus, remoteCreated: up.remoteCreated ?? cur.remoteCreated }));
       fixed++;
       const local = `${FileSystem.cacheDirectory}merged_${mp.id}.m4a`;
       if (await downloadRemoteFile(await mergeDest(r), local)) {

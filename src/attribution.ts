@@ -71,6 +71,41 @@ export function setLabel(
   return touch(next, `speakerLabels.${letter}`);
 }
 
+/**
+ * Applies to `cur` exactly what a preview edit changed — the listed stamp
+ * keys, their values and their stamps — so the sidecar carries the same
+ * stamps the outbox sent, not a second, later set. Letters are copied one
+ * at a time; speakerMap is re-derived.
+ */
+export function adopt(cur: Recording, preview: Recording, keys: string[]): Recording {
+  const out: Recording = { ...cur };
+  const stamps: Record<string, string> = { ...(cur.fieldsUpdatedAt ?? {}) };
+  const labels: Record<string, SpeakerLabel> = { ...(cur.speakerLabels ?? {}) };
+  let touchedLabels = false;
+  for (const k of keys) {
+    const t = preview.fieldsUpdatedAt?.[k];
+    if (t) stamps[k] = t;
+    if (k.startsWith("speakerLabels.")) {
+      const L = k.slice(14);
+      const v = preview.speakerLabels?.[L];
+      if (v) labels[L] = v; else delete labels[L];
+      touchedLabels = true;
+    } else {
+      (out as any)[k] = (preview as any)[k];
+    }
+  }
+  if (touchedLabels) {
+    out.speakerLabels = Object.keys(labels).length ? labels : undefined;
+    out.speakerMap = labelsToMap(out.speakerLabels);
+  }
+  return { ...out, fieldsUpdatedAt: stamps };
+}
+/** The stamp keys a preview changed relative to `from`. */
+export function changedKeys(from: Recording, preview: Recording): string[] {
+  const a = from.fieldsUpdatedAt ?? {}, b = preview.fieldsUpdatedAt ?? {};
+  return Object.keys(b).filter((k) => b[k] !== a[k]);
+}
+
 /** Who set the owner's letter, derived — never a second source of truth. */
 export function speakerIdBy(r: Recording): LabelSource | "none" {
   if (!r.speakerId) return "none";

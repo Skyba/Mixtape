@@ -247,10 +247,7 @@ export async function moveToFolder(
   folder: string
 ): Promise<Recording> {
   const next: Recording = { ...r, folder };
-  if (isLayoutV2()) {
-    await writeMeta(next);
-    return next;
-  }
+  if (isLayoutV2()) return (await updateMeta(r.id, (cur) => ({ ...cur, folder }))).rec;
   await ensureDir(folderDir(folder));
   // Destination sidecar first: listRecordings discovers recordings through
   // their .json, so the window where neither exists is the window where a
