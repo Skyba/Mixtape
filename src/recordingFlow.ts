@@ -490,7 +490,11 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
             }
           : undefined,
       shareId: args.shareId,
-      mergePending: cloudMerge
+      // The marker is about the audio, not about the connection: every
+      // multi-segment take carries it until a merge lands, so a signed-out
+      // save still keeps its segments and retryPendingMerges finishes it
+      // after sign-in. Only the merge attempt itself needs the cloud.
+      mergePending: isFirebaseConfigured && args.segmentUris.length > 1
         ? { id, count: args.segmentUris.length, segments: args.segmentUris }
         : undefined,
     },
