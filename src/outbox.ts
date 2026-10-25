@@ -183,6 +183,10 @@ async function doReplay(): Promise<number> {
         // request left: an edit made meanwhile keeps its newer stamp.
         const apply = (cur: Recording): Recording => {
           const next = mergeNewest(cur, merged, { serverWinsTies: true });
+          // Lifecycle fields belong to the listener under canonical: an
+          // acknowledgement describing an older revision must not roll back
+          // a transcript the listener has since installed.
+          if (canonical) return next;
           return { ...next, transcriptStatus: merged.transcriptStatus ?? next.transcriptStatus,
             transcriptRevision: merged.transcriptRevision ?? next.transcriptRevision };
         };

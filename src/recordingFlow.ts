@@ -177,6 +177,16 @@ async function tryUpload(
   }
 }
 
+/** The fields an upload attempt owns, applied to the sidecar as it is now. */
+function owned(up: Recording): Partial<Recording> {
+  return {
+    uploadStatus: up.uploadStatus,
+    ...(up.remoteCreated ? { remoteCreated: true } : {}),
+    ...(up.mergedInCloud ? { mergedInCloud: true } : {}),
+    ...(up.audioConflict ? { audioConflict: true } : {}),
+  };
+}
+
 /** Where a merge of live segments lands: the recording's own audio object. */
 async function mergeDest(r: Recording): Promise<string> {
   return (await isCanonical()) ? remoteCanonicalPath(r.id, "audio.m4a") : remoteObjectPath(r, "m4a");
@@ -259,8 +269,8 @@ export async function processStop(args: StopArgs): Promise<Recording> {
   if (cloudMode) {
     rec = { ...rec, transcriptStatus: "pending" };
     await writeMeta(rec);
-    rec = await tryUpload(rec, args.settings);
-    await writeMeta(rec);
+    const up = await tryUpload(rec, args.settings);
+    rec = await commitMeta(rec, (cur) => ({ ...cur, ...owned(up) }));
     await notify(
       rec.uploadStatus === "uploaded"
         ? "Uploaded — transcribing on the server…"
@@ -324,8 +334,8 @@ export async function processStop(args: StopArgs): Promise<Recording> {
     }
   }
 
-  rec = await tryUpload(rec, args.settings);
-  await writeMeta(rec);
+  const up2 = await tryUpload(rec, args.settings);
+  rec = await commitMeta(rec, (cur) => ({ ...cur, ...owned(up2) }));
   logEvent(`processStop done upload=${rec.uploadStatus} transcript=${rec.transcriptStatus}`);
   await flushLog();
   return rec;
@@ -517,11 +527,10 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       // recording at transcriptStatus "none".
       await mergeAudioSegments(remote, await mergeDest(rec));
       mergedToCloud = true;
-      rec = { ...rec, mergePending: undefined, mergedInCloud: true };
-      if (args.transcribeAfterMerge && rec.transcriptStatus === "none") {
-        rec = { ...rec, transcriptStatus: "pending" };
-      }
-      await writeMeta(rec);
+      rec = await commitMeta(rec, (cur) => ({
+        ...cur, mergePending: undefined, mergedInCloud: true,
+        transcriptStatus: args.transcribeAfterMerge && cur.transcriptStatus === "none" ? "pending" : cur.transcriptStatus,
+      }));
       const local = `${FileSystem.cacheDirectory}merged_${id}.m4a`;
       if (await downloadRemoteFile(await mergeDest(rec), local)) {
         await FileSystem.copyAsync({ from: local, to: audioPath(rec) });
@@ -543,8 +552,8 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
     }
   }
 
-  rec = await tryUpload(rec, args.settings, { skipAudio: mergedToCloud });
-  await writeMeta(rec);
+  const upLive = await tryUpload(rec, args.settings, { skipAudio: mergedToCloud });
+  rec = await commitMeta(rec, (cur) => ({ ...cur, ...owned(upLive) }));
   await notify(
     rec.mergePending ? "Saved — finishing audio…" : "Live recording saved",
     rec.base

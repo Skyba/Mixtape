@@ -31,12 +31,19 @@ export type Phase = "legacy" | "frozen" | "sealed" | "rolling-back" | "canonical
 let cachedPhase: { at: number; phase: Phase } | null = null;
 const CANON_KEY = "phase.canonical.seen";
 let seenCanonical: boolean | null = null;
+let seenInit: Promise<void> | null = null;
 async function sawCanonical(): Promise<boolean> {
-  if (seenCanonical === null) {
-    try { seenCanonical = (await AsyncStorage.getItem(CANON_KEY)) === "1"; if (seenCanonical) latchPersisted = true; }
-    catch { return false; } // unknown this time; asked again on the next read
-  }
-  return seenCanonical;
+  if (seenCanonical === true) return true;
+  // One initialisation, and a latch set meanwhile is never overwritten.
+  if (!seenInit) seenInit = (async () => {
+    try {
+      const v = (await AsyncStorage.getItem(CANON_KEY)) === "1";
+      if ((seenCanonical as boolean | null) !== true) seenCanonical = v;
+      if (v) latchPersisted = true;
+    } catch { seenInit = null; } // unknown this time; asked again on the next read
+  })();
+  await seenInit;
+  return (seenCanonical as boolean | null) === true;
 }
 /**
  * The migration phase, as the server sees it. Cached for a minute. Once this
@@ -57,6 +64,8 @@ export async function readPhase(): Promise<Phase> {
     const s = await getDoc(doc(db(), "config", "migration"));
     const p = (s.exists() ? (s.data() as any).phase : "legacy") as Phase;
     const phase: Phase = ["legacy", "frozen", "sealed", "rolling-back", "canonical"].includes(p) ? p : "sealed";
+    // A concurrent read may have latched while this one was in flight.
+    if (seenCanonical === true) return "canonical";
     cachedPhase = { at: Date.now(), phase };
     if (phase === "canonical") {
       seenCanonical = true;
@@ -64,6 +73,7 @@ export async function readPhase(): Promise<Phase> {
     }
     return phase;
   } catch {
+    if (seenCanonical === true) return "canonical";
     return cachedPhase?.phase ?? "legacy";
   }
 }
