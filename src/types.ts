@@ -1,7 +1,12 @@
 export type TranscriptStatus = "none" | "pending" | "processing" | "done" | "error";
 export type UploadStatus = "pending" | "uploaded" | "skipped";
 
-export type LabelSource = "user" | "mac" | "voiceprint" | "claude" | "aai";
+/**
+ * Matches comm-relay's speaker_id_by vocabulary ($DOTFILES/docs/transcription.md):
+ * "user" is any human — phone or Mac — "ai-review" is a dedicated review pass
+ * (the Mac batch, voiceprint), "channel" is hardware separation.
+ */
+export type LabelSource = "user" | "ai-review" | "channel" | "voiceprint" | "claude" | "aai";
 export type SpeakerLabel = { name: string; by: LabelSource; at: string };
 /** The fields that sync both ways between the phone and the Mac. */
 export type SyncedField =
@@ -27,9 +32,9 @@ export type Recording = {
   speakerMap?: Record<string, string>; // AAI letter (A/B/…) -> display name
   /**
    * Letter -> who it is and who said so. `by` is what makes a label
-   * trustworthy: "user" is Basile confirming on the phone, "mac" is a batch
-   * review on the Mac, "voiceprint" and "claude" are the two automatic
-   * signals, "aai" is AssemblyAI's own identification. A recording is usually
+   * trustworthy: "user" is a human confirming — on the phone or the Mac —
+   * "ai-review" is the Mac's batch pass, "voiceprint"/"claude"/"aai" are
+   * single automatic signals. A recording is usually
    * partial — A confirmed, C guessed — and this is the only place that
    * distinction lives.
    */

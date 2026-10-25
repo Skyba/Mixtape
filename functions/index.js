@@ -156,10 +156,9 @@ router.get("/recordings", async (req, res) => {
         // Attribution, with provenance. green = folder set and the owner's
         // presence decided; naming everyone else is optional.
         speaker_labels: m.speakerLabels || undefined,
-        speaker_id: m.speakerId || undefined,
-        speaker_id_by:
-          (m.speakerId && m.speakerLabels && m.speakerLabels[m.speakerId] &&
-            m.speakerLabels[m.speakerId].by) || "none",
+        owner_letter: m.speakerId || undefined,
+        ...ownerAttribution(m),
+        speech_model_used: m.speechModelUsed || undefined,
         me_included: m.meIncluded || undefined,
         fields_updated_at: m.fieldsUpdatedAt || undefined,
         green: !!(m.folder && m.folder !== "Inbox" && m.meIncluded),
@@ -177,6 +176,43 @@ function need(req, res) {
     return null;
   }
   return { folder: String(folder), base: String(base) };
+}
+
+
+// The archive's provenance contract ($DOTFILES/docs/transcription.md). The
+// sidecar stores the owner's LETTER in speakerId and who set each letter in
+// speakerLabels; the archive wants the owner's NAME, a confidence LEVEL, and
+// a source from its own vocabulary. Derived here, in one place, for both
+// /meta and /recordings — never stored as a second truth.
+function ownerAttribution(m) {
+  const none = { owner_label: "", speaker_id: "none", speaker_id_by: "none",
+                 speaker_id_evidence: "", speaker_id_at: "" };
+  if (m.meIncluded === "no") {
+    return { ...none, speaker_id_evidence: "owner marked not present at record time",
+             speaker_id_at: String(m.fieldsUpdatedAt?.meIncluded || "").slice(0, 10) };
+  }
+  const letter = m.speakerId;
+  const lbl = letter && m.speakerLabels && m.speakerLabels[letter];
+  if (!lbl) return none;
+  const LEVEL = { user: "verified", channel: "certain", "ai-review": "likely",
+                  voiceprint: "inferred", claude: "inferred", aai: "inferred" };
+  const BY = { user: "user", channel: "channel", "ai-review": "ai-review",
+               voiceprint: "ai-review", claude: "claude", aai: "aai" };
+  const EVIDENCE = {
+    user: "owner confirmed the letter by hand",
+    channel: "owner on a dedicated hardware channel",
+    "ai-review": "Mac review pass, two signals",
+    voiceprint: "voiceprint nearest-match only, single signal",
+    claude: "Claude inferred from transcript content",
+    aai: "AssemblyAI identification; name spoken in transcript",
+  };
+  return {
+    owner_label: lbl.name || "",
+    speaker_id: LEVEL[lbl.by] || "inferred",
+    speaker_id_by: BY[lbl.by] || "none",
+    speaker_id_evidence: EVIDENCE[lbl.by] || "",
+    speaker_id_at: String(lbl.at || "").slice(0, 10),
+  };
 }
 
 router.get("/transcript", requireScope("read:transcripts"), async (req, res) => {
@@ -204,7 +240,8 @@ router.get("/meta", requireScope("read:meta"), async (req, res) => {
   const q = need(req, res);
   if (!q) return;
   try {
-    res.json(await readJson(pathFor(req.uid, q.folder, q.base, "json")));
+    const m = await readJson(pathFor(req.uid, q.folder, q.base, "json"));
+    res.json({ ...m, ...ownerAttribution(m), speech_model_used: m.speechModelUsed || undefined });
   } catch {
     res.status(404).json({ error: "not found" });
   }
@@ -240,7 +277,7 @@ function validField(f, v) {
     case "speakerLabels":
       return v && typeof v === "object" && !Array.isArray(v) && Object.entries(v).every(
         ([l, e]) => /^[A-Z]$/.test(l) && e && typeof e.name === "string" &&
-          ["user", "mac", "voiceprint", "claude", "aai"].includes(e.by) && !!canonStamp(e.at)
+          ["user", "ai-review", "channel", "voiceprint", "claude", "aai"].includes(e.by) && !!canonStamp(e.at)
       );
     default: return false;
   }
@@ -961,6 +998,8 @@ exports.transcriptionWebhook = onRequest(
         speakerId: null,
         topic: topic,
         aaiTranscriptId: transcriptId,
+        // What AssemblyAI says it ran, read from the job — never assumed.
+        speechModelUsed: data.speech_model || data.speech_model_used || null,
         audioDurationSec,
         transcribedAt: new Date().toISOString(),
         estCostUsd: (audioDurationSec / 3600) * AAI_RATE_PER_HOUR,

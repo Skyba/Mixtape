@@ -13,7 +13,9 @@ import {
   setAudioModeAsync,
   useAudioRecorder,
 } from "expo-audio";
-import { isFirebaseConfigured, isSignedIn, uploadToPath } from "../firebase";
+import { isFirebaseConfigured, isSignedIn, uploadToPath,
+  userPath,
+} from "../firebase";
 import { getSettings, saveSettings } from "../storage";
 import { logEvent } from "../log";
 
@@ -22,6 +24,9 @@ const HARD_CAP_SECONDS = 120;
 
 /** Where the enrolled sample lives. Outside recordings/<folder>/, so it never
  *  shows up in the library and never triggers a transcription. */
+// Relative to the user's own prefix. The old bucket-root path never matched
+// storage.rules (recordings/{uid}/**), so enrollment 403'd on every attempt
+// and no voiceprint was ever uploaded.
 export const VOICEPRINT_PATH = "_voiceprint/enroll.m4a";
 
 const SCRIPT = [
@@ -94,7 +99,7 @@ export default function VoiceEnrollScreen() {
     }
     setBusy("Uploading…");
     try {
-      await uploadToPath(uri, VOICEPRINT_PATH);
+      await uploadToPath(uri, userPath(VOICEPRINT_PATH));
       const when = new Date().toISOString();
       const s = await getSettings();
       await saveSettings({ ...s, voiceEnrolledAt: when });
