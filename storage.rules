@@ -1,9 +1,40 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
-    // Each user can only read/write their own namespace: recordings/{their uid}/...
+    function owner(uid) { return request.auth != null && request.auth.uid == uid; }
+    function phase() {
+      return firestore.get(/databases/(default)/documents/config/migration).data.phase;
+    }
+
+    // Legacy layout: recordings/{uid}/{folder}/{base}.{ext}. Read-only once
+    // the migration freezes (storage.rules.frozen); gone after it.
     match /recordings/{uid}/{allPaths=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read: if owner(uid);
+      allow write: if owner(uid);
+    }
+
+    // Canonical blobs. Audio is written once by the owner and never changed;
+    // everything else under an id is server-only.
+    match /rec2/{uid}/{id}/audio.m4a {
+      allow read: if owner(uid);
+      allow create: if owner(uid)
+                    && resource == null
+                    && id.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$')
+                    && request.resource.size > 0
+                    && phase() == 'canonical';
+      allow update, delete: if false;
+    }
+    match /rec2/{uid}/{id}/{file} {
+      allow read: if owner(uid);
+      allow write: if false;
+    }
+    match /rec2-archive/{uid}/{allPaths=**} {
+      allow read: if owner(uid);
+      allow write: if false;
+    }
+    match /rec2-quarantine/{uid}/{allPaths=**} {
+      allow read: if owner(uid);
+      allow write: if false;
     }
   }
 }

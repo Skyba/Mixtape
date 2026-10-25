@@ -22,5 +22,20 @@ service cloud.firestore {
     match /transcriptions/{id} {
       allow read, write: if false;
     }
+
+    // Migration phase: readable by any signed-in client (the phone shows
+    // "migration in progress"), set only by the migrator with admin rights.
+    match /config/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Canonical recording documents: the owner listens, every write goes
+    // through a callable. Webhook payloads are server-only.
+    match /recordings/{uid}/items/{id} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+      match /webhooks/{w} { allow read, write: if false; }
+    }
   }
 }

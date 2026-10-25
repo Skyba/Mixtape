@@ -1,5 +1,6 @@
 const { onRequest, onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const admin = require("firebase-admin");
 const ffmpegPath = require("ffmpeg-static");
 const { execFile } = require("child_process");
@@ -20,9 +21,9 @@ const ALL_SCOPES = [
 // Granted only when asked for by name. A key minted with no scopes stays
 // read-only, so a leaked read key can never rewrite anything.
 const WRITE_SCOPES = ["write:meta"];
-const SYNCED_FIELDS = [
-  "folder", "speakers", "speakerLabels", "speakerId", "meIncluded", "tags", "private", "note",
-];
+const lib = require("./lib");
+const { ownerAttribution, canonStamp, validField, PatchError, applyPatch, AAI, AAI_RATE_PER_HOUR, LANG_CODES, LANG_NAMES, renderTranscript, acceptSpeakerMapping, inferSpeakerMap, inferTopic, speakerIdentification } = lib;
+const { makeCanonical } = require("./canonical");
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 
 // ----- API key management (server-side hashing; raw key shown once) -----
@@ -120,11 +121,72 @@ async function readText(p) {
 const pathFor = (uid, folder, base, ext) =>
   `recordings/${uid}/${folder}/${base}.${ext}`;
 
+// Canonical model (Firestore record of truth, blobs under rec2/). Which
+// pipeline serves a request is decided by config/migration.phase, read per
+// request: "legacy" until the bucket migration, "frozen" during it,
+// "canonical" after. See mixtape-private/docs/migration/plan.md.
+let _canon = null;
+const canon = () => _canon || (_canon = makeCanonical({ db: admin.firestore(), bucket: bkt(), env: process.env }));
+const phase = () => canon().readPhase();
+
+// Under legacy, an id is found by scanning the sidecars; two paths with the
+// same id (the 9 known duplicates) are a 409, never a guess.
+async function legacyFindById(uid, id) {
+  const [files] = await bkt().getFiles({ prefix: `recordings/${uid}/` });
+  const hits = [];
+  for (const f of files) {
+    if (!f.name.endsWith(".json") || f.name.endsWith(".aai.json") || f.name.includes("/_")) continue;
+    try {
+      const m = await readJson(f.name);
+      if (m.id === id) {
+        const parts = f.name.split("/");
+        hits.push({ folder: parts[2], base: parts.slice(3).join("/").replace(/\.json$/, ""), meta: m });
+      }
+    } catch {}
+  }
+  if (hits.length > 1) throw new PatchError(409, "id present at two paths", { paths: hits.map((h) => `${h.folder}/${h.base}`) });
+  return hits[0] || null;
+}
+// Resolves a request to {folder, base} under legacy. Accepts ?id= or
+// ?folder=&base=. Writes the error itself and returns null.
+async function resolveLegacy(req, res) {
+  if (req.query.id) {
+    try {
+      const h = await legacyFindById(req.uid, String(req.query.id));
+      if (!h) { res.status(404).json({ error: "not found" }); return null; }
+      return { folder: h.folder, base: h.base, meta: h.meta };
+    } catch (e) {
+      if (e instanceof PatchError) { res.status(e.status).json({ error: e.message, ...e.extra }); return null; }
+      throw e;
+    }
+  }
+  return need(req, res);
+}
+// Under canonical only ids are addresses; folder/base is gone for good.
+function needId(req, res) {
+  const id = req.query.id;
+  if (!id || typeof id !== "string") { res.status(req.query.folder ? 410 : 400).json({ error: req.query.folder ? "folder/base addressing is gone; use id" : "id required" }); return null; }
+  return id;
+}
+// Serializes a canonical error into an HTTP response.
+function sendCanonError(res, e) {
+  const status = { "invalid-argument": 400, "not-found": 404, "failed-precondition": 409, unavailable: 503, "permission-denied": 403 }[e.code] || 500;
+  if (status === 503) res.set("Retry-After", "60");
+  res.status(status).json({ error: e.message, ...(e.extra || {}) });
+}
+const isCanonError = (e) => e && e.code && typeof e.code === "string" && e.extra !== undefined;
+
 const router = express.Router();
 router.use(authKey);
 
 router.get("/recordings", async (req, res) => {
   const since = req.query.since ? Date.parse(String(req.query.since)) : 0;
+  if ((await phase()) === "canonical") {
+    const docs = await canon().list(req.uid, { since });
+    const out = docs.map((d) => ({ ...listRow(d, d.folder, d.base), transcript_rev: d.current ? d.current.rev : null }));
+    out.sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
+    return res.json({ recordings: out });
+  }
   const [files] = await bkt().getFiles({ prefix: `recordings/${req.uid}/` });
   const out = [];
   for (const f of files) {
@@ -134,9 +196,18 @@ router.get("/recordings", async (req, res) => {
       const m = await readJson(f.name);
       if (since && Date.parse(m.recordedAt || 0) < since) continue;
       const parts = f.name.split("/"); // recordings/uid/folder/base.json
-      out.push({
-        folder: parts[2],
-        base: parts.slice(3).join("/").replace(/\.json$/, ""),
+      out.push(listRow(m, parts[2], parts.slice(3).join("/").replace(/\.json$/, "")));
+    } catch {}
+  }
+  out.sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
+  res.json({ recordings: out });
+});
+
+// One listing row, same shape from either pipeline.
+function listRow(m, folder, base) {
+  return {
+        folder,
+        base,
         id: m.id,
         recordedAt: m.recordedAt,
         durationSeconds: m.durationSeconds,
@@ -162,12 +233,8 @@ router.get("/recordings", async (req, res) => {
         me_included: m.meIncluded || undefined,
         fields_updated_at: m.fieldsUpdatedAt || undefined,
         green: !!(m.folder && m.folder !== "Inbox" && m.meIncluded),
-      });
-    } catch {}
-  }
-  out.sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
-  res.json({ recordings: out });
-});
+  };
+}
 
 function need(req, res) {
   const { folder, base } = req.query;
@@ -178,45 +245,15 @@ function need(req, res) {
   return { folder: String(folder), base: String(base) };
 }
 
-
-// The archive's provenance contract ($DOTFILES/docs/transcription.md). The
-// sidecar stores the owner's LETTER in speakerId and who set each letter in
-// speakerLabels; the archive wants the owner's NAME, a confidence LEVEL, and
-// a source from its own vocabulary. Derived here, in one place, for both
-// /meta and /recordings — never stored as a second truth.
-function ownerAttribution(m) {
-  const none = { owner_label: "", speaker_id: "none", speaker_id_by: "none",
-                 speaker_id_evidence: "", speaker_id_at: "" };
-  if (m.meIncluded === "no") {
-    return { ...none, speaker_id_evidence: "owner marked not present at record time",
-             speaker_id_at: String(m.fieldsUpdatedAt?.meIncluded || "").slice(0, 10) };
-  }
-  const letter = m.speakerId;
-  const lbl = letter && m.speakerLabels && m.speakerLabels[letter];
-  if (!lbl) return none;
-  const LEVEL = { user: "verified", channel: "certain", "ai-review": "likely",
-                  voiceprint: "inferred", claude: "inferred", aai: "inferred" };
-  const BY = { user: "user", channel: "channel", "ai-review": "ai-review",
-               voiceprint: "ai-review", claude: "claude", aai: "aai" };
-  const EVIDENCE = {
-    user: "owner confirmed the letter by hand",
-    channel: "owner on a dedicated hardware channel",
-    "ai-review": "Mac review pass, two signals",
-    voiceprint: "voiceprint nearest-match only, single signal",
-    claude: "Claude inferred from transcript content",
-    aai: "AssemblyAI identification; name spoken in transcript",
-  };
-  return {
-    owner_label: lbl.name || "",
-    speaker_id: LEVEL[lbl.by] || "inferred",
-    speaker_id_by: BY[lbl.by] || "none",
-    speaker_id_evidence: EVIDENCE[lbl.by] || "",
-    speaker_id_at: String(lbl.at || "").slice(0, 10),
-  };
-}
-
 router.get("/transcript", requireScope("read:transcripts"), async (req, res) => {
-  const q = need(req, res);
+  if ((await phase()) === "canonical") {
+    const id = needId(req, res); if (!id) return;
+    const r = await canon().readArtifact(req.uid, id, "txt", req.query.rev);
+    if (!r) return res.status(404).json({ error: "not found" });
+    res.set("X-Transcript-Rev", String(r.rev));
+    return res.type(req.query.format === "md" ? "text/markdown" : "text/plain").send(r.content.toString());
+  }
+  const q = await resolveLegacy(req, res);
   if (!q) return;
   try {
     const t = await readText(pathFor(req.uid, q.folder, q.base, "txt"));
@@ -227,7 +264,14 @@ router.get("/transcript", requireScope("read:transcripts"), async (req, res) => 
 });
 
 router.get("/utterances", requireScope("read:json"), async (req, res) => {
-  const q = need(req, res);
+  if ((await phase()) === "canonical") {
+    const id = needId(req, res); if (!id) return;
+    const r = await canon().readArtifact(req.uid, id, "aai", req.query.rev);
+    if (!r) return res.status(404).json({ error: "not found" });
+    res.set("X-Transcript-Rev", String(r.rev));
+    return res.type("application/json").send(r.content.toString());
+  }
+  const q = await resolveLegacy(req, res);
   if (!q) return;
   try {
     res.json(await readJson(pathFor(req.uid, q.folder, q.base, "aai.json")));
@@ -237,7 +281,12 @@ router.get("/utterances", requireScope("read:json"), async (req, res) => {
 });
 
 router.get("/meta", requireScope("read:meta"), async (req, res) => {
-  const q = need(req, res);
+  if ((await phase()) === "canonical") {
+    const id = needId(req, res); if (!id) return;
+    const d = await canon().get(req.uid, id);
+    return d ? res.json(canon().project(d)) : res.status(404).json({ error: "not found" });
+  }
+  const q = await resolveLegacy(req, res);
   if (!q) return;
   try {
     const m = await readJson(pathFor(req.uid, q.folder, q.base, "json"));
@@ -246,81 +295,44 @@ router.get("/meta", requireScope("read:meta"), async (req, res) => {
     res.status(404).json({ error: "not found" });
   }
 });
-
-// The Mac's write path. Newest edit wins per field: the caller sends the
-// fields it changed plus fieldsUpdatedAt for each, and a field is applied only
-// when its stamp is newer than ours — so a batch relabel cannot revert a hand
-// edit made on the phone since, and vice versa. A folder change moves the
-// objects inside the bucket; nothing is re-uploaded from anywhere.
-// A stamp is only comparable if it is a canonical instant. Any parseable
-// time is accepted and normalised to UTC ISO; anything else is a 400, not a
-// string that happens to sort after every real edit forever.
-function canonStamp(t) {
-  if (typeof t !== "string") return null;
-  const ms = Date.parse(t);
-  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
-}
-
-// Shape checks for what the Mac may write. Reconciliation on the phone feeds
-// these straight into paths and .map() calls, so a wrong type here is a crash
-// there, after the sidecar is already saved.
-function validField(f, v) {
-  if (v === null) return f === "note" || f === "speakerId" || f === "meIncluded";
-  switch (f) {
-    case "folder": return typeof v === "string" && /^(?!\.)(?!_)[^/\\]{1,80}$/.test(v) && v !== "..";
-    case "speakers": return Array.isArray(v) && v.every((x) => typeof x === "string");
-    case "tags": return Array.isArray(v) && v.every((x) => typeof x === "string");
-    case "private": return typeof v === "boolean";
-    case "note": return typeof v === "string" && v.length <= 2000;
-    case "speakerId": return typeof v === "string" && /^[A-Z]$/.test(v);
-    case "meIncluded": return v === "yes" || v === "no";
-    case "speakerLabels":
-      return v && typeof v === "object" && !Array.isArray(v) && Object.entries(v).every(
-        ([l, e]) => /^[A-Z]$/.test(l) && e && typeof e.name === "string" &&
-          ["user", "ai-review", "channel", "voiceprint", "claude", "aai"].includes(e.by) && !!canonStamp(e.at)
-      );
-    default: return false;
-  }
-}
-
-// The Mac's write path. Newest edit wins per field: the caller sends the
-// fields it changed plus fieldsUpdatedAt for each, and a field is applied only
-// when its stamp is newer than ours — so a batch relabel cannot revert a hand
-// edit made on the phone since, and vice versa. A folder change moves the
 // objects inside the bucket; nothing is re-uploaded from anywhere.
 router.patch("/meta", requireScope("write:meta"), async (req, res) => {
-  const q = need(req, res);
+  const ph = await phase();
+  if (ph === "canonical") {
+    const id = needId(req, res); if (!id) return;
+    try {
+      const r = await canon().patch(req.uid, id, req.body || {});
+      return res.json({ applied: r.applied, ...r.doc });
+    } catch (e) {
+      if (e instanceof PatchError) return res.status(e.status).json({ error: e.message, ...e.extra });
+      if (isCanonError(e)) return sendCanonError(res, e);
+      return res.status(500).json({ error: String((e && e.message) || e) });
+    }
+  }
+  if (ph !== "legacy") { res.set("Retry-After", "60"); return res.status(503).json({ error: "migration in progress" }); }
+  const q = await resolveLegacy(req, res);
   if (!q) return;
   if (!/^(?!\.)(?!_)[^/\\]{1,80}$/.test(q.folder) || /[/\\]/.test(q.base)) {
     return res.status(400).json({ error: "bad folder or base" });
   }
   const body = req.body || {};
-  const stamps = body.fieldsUpdatedAt || {};
   const oldBase = `recordings/${req.uid}/${q.folder}/${q.base}`;
-  let meta;
+  let meta, applied = [];
   try {
-    meta = await readJson(oldBase + ".json");
-  } catch {
-    return res.status(404).json({ error: "not found" });
-  }
-  const mine = meta.fieldsUpdatedAt || {};
-  const applied = [];
-  for (const f of SYNCED_FIELDS) {
-    if (!(f in body)) continue;
-    const t = canonStamp(stamps[f]);
-    if (!t) return res.status(400).json({ error: `fieldsUpdatedAt.${f} must be a parseable time` });
-    if (!validField(f, body[f])) return res.status(400).json({ error: `bad value for ${f}` });
-    const m = canonStamp(mine[f]);
-    if (m && m >= t) continue; // ours is newer or equal: keep it
-    meta[f] = body[f];
-    mine[f] = t;
-    applied.push(f);
-  }
-  meta.fieldsUpdatedAt = mine;
-  if (meta.speakerLabels && typeof meta.speakerLabels === "object") {
-    meta.speakerMap = Object.fromEntries(
-      Object.entries(meta.speakerLabels).map(([l, v]) => [l, v && v.name])
-    );
+    const r = await mutateSidecar(oldBase + ".json", async (cur) => {
+      if (!cur || !cur.id) throw new PatchError(404, "not found");
+      const out = applyPatch(cur, body);
+      applied = out.applied;
+      // A folder change is not written in place: it is handled below as a
+      // move, and only once nothing else is pending on the recording.
+      if (applied.includes("folder")) { meta = out.meta; return null; }
+      meta = out.meta;
+      return out.meta;
+    });
+    if (!r.saved && !applied.includes("folder")) return res.json({ applied, ...r.meta });
+  } catch (e) {
+    if (e instanceof PatchError) return res.status(e.status).json({ error: e.message, ...e.extra });
+    return res.status(500).json({ error: String((e && e.message) || e) });
   }
   try {
     const newFolder = String(meta.folder || q.folder);
@@ -360,10 +372,88 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
     } else {
       await saveJson(oldBase + ".json", meta);
     }
-    res.json({ applied, folder: newFolder, base: q.base });
+    res.json({ applied, ...meta, folder: newFolder, base: q.base });
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
   }
+});
+
+// The phone's write path: same merge, same guards, authenticated as the owner.
+// No API key is involved, so a leaked read key still cannot write. Returns the
+// merged sidecar so the phone writes the authoritative state locally rather
+// than its own guess at it.
+exports.patchMeta = onCall({ region: "us-central1" }, async (req) => {
+  const uid = req.auth && req.auth.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
+  const { folder, base, patch, id } = req.data || {};
+  const ph = await phase();
+  if (ph === "canonical") {
+    if (typeof id !== "string" || !patch || typeof patch !== "object") throw new HttpsError("invalid-argument", "id and patch required");
+    try {
+      const r = await canon().patch(uid, id, patch);
+      return { applied: r.applied, meta: r.doc };
+    } catch (e) { throw toHttpsError(e); }
+  }
+  if (ph !== "legacy") throw new HttpsError("unavailable", "migration in progress");
+  if (typeof folder !== "string" || typeof base !== "string" || !patch || typeof patch !== "object") {
+    throw new HttpsError("invalid-argument", "folder, base and patch required");
+  }
+  if (!/^(?!\.)(?!_)[^/\\]{1,80}$/.test(folder) || /[/\\]/.test(base)) {
+    throw new HttpsError("invalid-argument", "bad folder or base");
+  }
+  if ("folder" in patch) throw new HttpsError("failed-precondition", "folder changes are not synced yet");
+  const path = `recordings/${uid}/${folder}/${base}.json`;
+  try {
+    let applied = [];
+    const r = await mutateSidecar(path, async (cur) => {
+      if (!cur || !cur.id) throw new PatchError(404, "not found");
+      const out = applyPatch(cur, patch);
+      applied = out.applied;
+      return out.meta;
+    });
+    return { applied, meta: r.meta };
+  } catch (e) {
+    if (e instanceof PatchError) {
+      const code = { 400: "invalid-argument", 404: "not-found", 409: "failed-precondition" }[e.status] || "internal";
+      throw new HttpsError(code, e.message, e.extra);
+    }
+    throw new HttpsError("internal", String((e && e.message) || e));
+  }
+});
+
+function toHttpsError(e) {
+  if (e instanceof PatchError) {
+    const code = { 400: "invalid-argument", 404: "not-found", 409: "failed-precondition" }[e.status] || "internal";
+    return new HttpsError(code, e.message, e.extra);
+  }
+  if (isCanonError(e)) return new HttpsError(e.code, e.message, e.extra);
+  return new HttpsError("internal", String((e && e.message) || e));
+}
+const authed = (req) => { const uid = req.auth && req.auth.uid; if (!uid) throw new HttpsError("unauthenticated", "Sign in required."); return uid; };
+
+// Canonical-only callables (fail with unavailable until cutover).
+exports.createRecording = onCall({ region: "us-central1" }, async (req) => {
+  const uid = authed(req);
+  try { return await canon().createRecording(uid, req.data || {}); } catch (e) { throw toHttpsError(e); }
+});
+exports.retranscribe = onCall({ region: "us-central1", secrets: ["ASSEMBLYAI_KEY", "ANTHROPIC_KEY", "TRANSCRIBE_WEBHOOK_SECRET"] }, async (req) => {
+  const uid = authed(req);
+  const { id, opId } = req.data || {};
+  try { return await canon().retranscribe(uid, String(id), String(opId || "")); } catch (e) { throw toHttpsError(e); }
+});
+exports.deleteRecording = onCall({ region: "us-central1" }, async (req) => {
+  const uid = authed(req);
+  const { id, opId } = req.data || {};
+  try { return await canon().deleteRecording(uid, String(id), String(opId || "")); } catch (e) { throw toHttpsError(e); }
+});
+// Trusted {generation,size,crc32c} of the recording's audio object: the JS
+// SDK cannot read crc32c, and the phone must not adopt an object it did not
+// write without checking the bytes.
+exports.audioDescriptor = onCall({ region: "us-central1" }, async (req) => {
+  const uid = authed(req);
+  const { id } = req.data || {};
+  if (typeof id !== "string") throw new HttpsError("invalid-argument", "id required");
+  return { audio: await canon().audioDescriptor(uid, id) };
 });
 
 router.get("/logs", requireScope("read:meta"), async (req, res) => {
@@ -376,7 +466,12 @@ router.get("/logs", requireScope("read:meta"), async (req, res) => {
 });
 
 router.get("/audio", requireScope("read:audio"), async (req, res) => {
-  const q = need(req, res);
+  if ((await phase()) === "canonical") {
+    const id = needId(req, res); if (!id) return;
+    const u = await canon().audioUrl(req.uid, id);
+    return u ? res.redirect(302, u) : res.status(404).json({ error: "not found" });
+  }
+  const q = await resolveLegacy(req, res);
   if (!q) return;
   const p = pathFor(req.uid, q.folder, q.base, "m4a");
   const file = bkt().file(p);
@@ -603,212 +698,43 @@ exports.askSonnet = onRequest(
 // webhook. AAI calls transcriptionWebhook back when done; that writes the
 // .txt/.aai.json + updates the meta to "done". The phone just uploads and later
 // pulls the finished transcript — no need to keep the app open.
-const AAI = "https://api.assemblyai.com/v2";
-const AAI_RATE_PER_HOUR = 0.12; // matches the app's estimate
-const LANG_CODES = { English: "en", French: "fr", Spanish: "es", Arabic: "ar" };
-const LANG_NAMES = Object.fromEntries(
-  Object.entries(LANG_CODES).map(([name, code]) => [code, name])
-);
-const TOPIC_MODEL = "claude-haiku-4-5-20251001";
-// A wrong speaker map mislabels every line of the transcript, so that call gets
-// a stronger model than the throwaway topic title. Mirrors src/transcription.ts.
-const SPEAKER_MAP_MODEL = "claude-sonnet-5";
-
-function mmss(ms) {
-  const s = Math.floor((ms || 0) / 1000);
-  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-}
-// Same resolution + rendering the app uses, so cloud .txt is byte-identical.
-function nameForSpeaker(letter, speakers, speakerMap) {
-  if (speakerMap && speakerMap[letter]) return speakerMap[letter];
-  // Letter order is arbitrary, so the slot entered first is not the voice
-  // labelled A. Handing slots out by position named the wrong people with
-  // total confidence. An unmapped letter stays anonymous.
-  return "Speaker " + letter;
-}
-function renderTranscript(utterances, speakers, speakerMap) {
-  return utterances
-    .map((u) => `[${mmss(u.start)}] ${nameForSpeaker(u.speaker, speakers, speakerMap)}: ${u.text}`)
-    .join("\n\n");
-}
-async function anthropic(key, maxTokens, prompt, model = TOPIC_MODEL) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-  const data = await res.json();
-  // Thinking-capable models put a "thinking" block first, so content[0] is not
-  // necessarily the answer — collect the text blocks instead.
-  return ((data && data.content) || [])
-    .filter((b) => b && b.type === "text")
-    .map((b) => b.text)
-    .join("\n");
-}
-// Lines that name a participant are the only real evidence of who is who, and
-// they're spread through the whole recording — sampling just the opening
-// minutes is how a two-hour conversation gets mapped off initial small talk.
-function speakerSample(utterances, named) {
-  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const namePat = new RegExp(`\\b(${named.map(esc).join("|")})\\b`, "i");
-  const picked = new Set();
-  utterances.forEach((u, i) => {
-    if (picked.size < 90 && namePat.test(u.text)) picked.add(i);
-  });
-  const stride = Math.max(1, Math.floor(utterances.length / 60));
-  utterances.forEach((_, i) => {
-    if (i % stride === 0) picked.add(i);
-  });
-  return [...picked]
-    .sort((a, b) => a - b)
-    .map((i) => `${utterances[i].speaker}: ${utterances[i].text.slice(0, 400)}`)
-    .join("\n")
-    .slice(0, 24000);
-}
-
-function speakerStats(utterances) {
-  const mins = {}, turns = {};
-  for (const u of utterances) {
-    mins[u.speaker] = (mins[u.speaker] || 0) + ((u.end || u.start) - u.start) / 60000;
-    turns[u.speaker] = (turns[u.speaker] || 0) + 1;
-  }
-  return Object.keys(mins).sort()
-    .map((l) => `${l}: ${mins[l].toFixed(0)} min over ${turns[l]} turns`)
-    .join("; ");
-}
-
-// AssemblyAI's speaker identification maps letters to names by reading the
-// conversation (no voice enrollment). Mirrors src/transcription.ts.
-function speakerIdentification(meta) {
-  const named = (meta.speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
-  if (!named.length) return undefined;
-  const owner = ((meta.owner && meta.owner.name) || "").trim().toLowerCase();
-  const bio = ((meta.owner && meta.owner.bio) || "").trim();
-  return {
-    request: {
-      speaker_identification: {
-        speaker_type: "name",
-        speakers: named.map((name) =>
-          owner && name.trim().toLowerCase() === owner && bio
-            ? { name, description: bio }
-            : { name }
-        ),
-      },
-    },
-  };
-}
-
-// Only trust an identification when the transcript actually says someone's
-// name. Measured against the archive: with a name spoken it is exact, without
-// one it returns the wrong person and still reports "success".
-// Does this person's first name actually occur in the transcript? AssemblyAI's
-// content-based identification is exact when someone is addressed by name and
-// confidently wrong when nobody is, so each assignment needs its own evidence.
-function nameSpoken(name, text) {
-  const first = (name || "").trim().split(/\s+/)[0];
-  if (first.length <= 2) return false;
-  return new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
-}
-
-function acceptSpeakerMapping(mapping, text, speakers) {
-  if (!mapping) return null;
-  const named = (speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
-  const mayShare = Object.keys(mapping).length > (speakers || []).length;
-  const used = new Set();
-  const clean = {};
-  for (const [letter, name] of Object.entries(mapping)) {
-    if (!named.includes(name)) continue;
-    // Previously one spoken name admitted the whole mapping, so a correct
-    // "Erica" dragged in a guessed "Tyler". Evidence is per person now.
-    if (!nameSpoken(name, text)) continue;
-    if (!mayShare && used.has(name)) continue;
-    used.add(name);
-    clean[letter] = name;
-  }
-  return Object.keys(clean).length ? clean : null;
-}
-
-async function inferSpeakerMap(utterances, speakers, anthropicKey) {
-  if (!anthropicKey || !utterances.length) return null;
-  const named = (speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
-  if (named.length < 1) return null;
-  const letters = [...new Set(utterances.map((u) => u.speaker))].sort();
-  if (letters.length < 2) return null;
-  const unnamed = (speakers || []).length - named.length;
-  const prompt =
-    `A conversation transcript is labelled with anonymous speaker letters ` +
-    `(${letters.join(", ")}), speaking ${speakerStats(utterances)}.\n` +
-    `There are ${(speakers || []).length} participants: ${named.join(", ")}` +
-    (unnamed
-      ? `, plus ${unnamed} whose name is not known (they stay "Speaker N").\n\n`
-      : `.\n\n`) +
-    `Map letters to names, reasoning only from the content:\n` +
-    `- A speaker talked ABOUT in the third person ("X wants...", "ask X") is NOT ` +
-    `the speaker of that line — this is the strongest signal available.\n` +
-    `- "I am X" / "this is X" names the speaker of that line.\n` +
-    `- When someone is addressed by name, the person who answers next is ` +
-    `usually them.\n` +
-    `- Only include a letter whose name the content actually supports. Leave ` +
-    `out the letters belonging to unnamed participants — a neutral ` +
-    `"Speaker N" beats a guess.\n` +
-    (letters.length > speakers.length
-      ? `- There are more letters than people, so diarization split someone ` +
-        `in two: here, and only here, two letters may share a name.\n`
-      : `- Never give the same name to two letters.\n`) +
-    `\nOutput ONLY a JSON object, e.g. {"A":"Name"} — it may be empty, and ` +
-    `it does not need an entry for every letter.\n\n` +
-    `Transcript:\n${speakerSample(utterances, named)}`;
-  try {
-    // 2000 tokens: room to think before the tiny JSON answer — too small a
-    // budget gets spent entirely on thinking and returns no text at all.
-    const raw = await anthropic(anthropicKey, 2000, prompt, SPEAKER_MAP_MODEL);
-    const json = raw.match(/\{[\s\S]*\}/);
-    if (!json) return null;
-    const parsed = JSON.parse(json[0]);
-    const clean = {};
-    // Only let two letters share a name when there are more labels than
-    // people; otherwise one known name gets stamped on everyone.
-    const mayShare = letters.length > (speakers || []).length;
-    const used = new Set();
-    for (const [letter, name] of Object.entries(parsed)) {
-      if (!named.includes(name)) continue;
-      if (!mayShare && used.has(name)) continue;
-      used.add(name);
-      clean[letter] = name;
-    }
-    return Object.keys(clean).length ? clean : null;
-  } catch {
-    return null;
-  }
-}
-async function inferTopic(transcript, anthropicKey) {
-  if (!anthropicKey || !transcript.trim()) return null;
-  try {
-    const raw = await anthropic(
-      anthropicKey,
-      24,
-      "Give a 2-5 word topic title for this meeting transcript, written " +
-        "in the same language the conversation is in — a French " +
-        "conversation gets a French title.\n" +
-        "Output only the title, no quotes or punctuation.\n\n" +
-        transcript.slice(0, 6000)
-    );
-    const t = raw.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim().split(" ").slice(0, 6).join(" ");
-    return t || null;
-  } catch {
-    return null;
-  }
-}
 async function saveJson(p, obj) {
   await bkt().file(p).save(JSON.stringify(obj, null, 2), { contentType: "application/json" });
+}
+
+// Every sidecar write goes through here: the Mac's PATCH, the phone's callable,
+// the transcription starter and the webhook. Read the object with its
+// generation, let the caller mutate that exact content, save only if the
+// generation is unchanged, and on a precondition failure re-read and retry
+// once. Two writers can no longer each read, each decide, and the second
+// quietly erase the first — which is how a finished transcription or a
+// confirmed label could vanish.
+async function mutateSidecar(path, fn) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const file = bkt().file(path);
+    let meta = {}, generation = 0;
+    try {
+      const [md] = await file.getMetadata();
+      generation = Number(md.generation);
+      const [buf] = await file.download({ ifGenerationMatch: generation });
+      meta = JSON.parse(buf.toString());
+    } catch (e) {
+      if (!(e && e.code === 404)) throw e;
+    }
+    const out = await fn(meta, generation);
+    if (out === null) return { meta, generation, saved: false };
+    try {
+      await file.save(JSON.stringify(out, null, 2), {
+        contentType: "application/json",
+        preconditionOpts: { ifGenerationMatch: generation },
+      });
+      return { meta: out, generation, saved: true };
+    } catch (e) {
+      if (!(e && e.code === 412)) throw e;
+      // Someone wrote in between. Re-read and apply ours over the new state.
+    }
+  }
+  throw new Error("sidecar changed twice during one write; try again");
 }
 
 const TRANSCRIBE_SECRETS = ["ASSEMBLYAI_KEY", "ANTHROPIC_KEY", "TRANSCRIBE_WEBHOOK_SECRET"];
@@ -821,6 +747,17 @@ exports.startTranscription = onObjectFinalized(
   { region: "us-east1", secrets: TRANSCRIBE_SECRETS, memory: "512MiB", timeoutSeconds: 120 },
   async (event) => {
     const name = event.data.name || "";
+    const ph = await phase();
+    const c = name.match(/^rec2\/([^/]+)\/([^/]+)\/audio\.m4a$/);
+    if (c) {
+      if (ph !== "canonical") return; // inert until cutover (migration copies land here first)
+      const [, uid, id] = c;
+      const r = await canon().audioFinalized(uid, id, event.data.generation);
+      if (r && (r.set || r.stub)) await canon().maybeStart(uid, id);
+      return;
+    }
+    if (name.startsWith("rec2/") || name.startsWith("rec2-archive/") || name.startsWith("rec2-quarantine/")) return;
+    if (ph !== "legacy") return; // frozen: no new legacy jobs; canonical: legacy is dead
     if (!name.endsWith(".json") || name.endsWith(".aai.json")) return;
     if (name.includes("/_live/") || name.includes("/_logs/")) return;
     const m = name.match(/^recordings\/([^/]+)\/([^/]+)\/(.+)\.json$/);
@@ -844,14 +781,35 @@ exports.startTranscription = onObjectFinalized(
     const [audioExists] = await bkt().file(m4a).exists();
     if (!audioExists) return; // audio not up yet (m4a normally uploads first)
 
-    // Firestore lock keyed by the object path → exactly one job per recording.
-    const lockRef = admin.firestore().collection("transcriptions").doc(sha256(name));
+    // One job per (recording, transcript revision), keyed by the recording's
+    // stable id rather than its path, so a later move cannot create a second
+    // identity for the same job. The revision is bumped on the sidecar first,
+    // under the generation check, so a concurrent writer cannot race it.
+    let revision;
+    try {
+      const r = await mutateSidecar(name, async (cur) => {
+        if (!cur || cur.transcriptStatus !== "pending") return null;
+        revision = Number(cur.transcriptRevision || 0) + 1;
+        return { ...cur, transcriptRevision: revision, transcriptStatus: "processing",
+                 fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}) } };
+      });
+      if (!r.saved) return; // someone else took it, or it is no longer pending
+    } catch (e) {
+      console.error("startTranscription claim", base, String((e && e.message) || e));
+      return;
+    }
+    const lockId = sha256(`${uid}:${meta.id}:${revision}`);
+    const lockRef = admin.firestore().collection("transcriptions").doc(lockId);
     const acquired = await admin.firestore().runTransaction(async (tx) => {
       const d = await tx.get(lockRef);
       if (d.exists) return false;
       tx.set(lockRef, {
-        uid, folder, base,
-        status: "starting",
+        uid, folder, base, recordingId: meta.id, revision,
+        // Written BEFORE the paid request. If the response is lost we must
+        // not resubmit: the webhook will still arrive, carrying this lockId
+        // in its URL, and complete the job. Never deleted — a terminal record
+        // is what stops a retry from paying twice.
+        status: "submitted-unconfirmed",
         createdAt: new Date().toISOString(),
       });
       return true;
@@ -886,7 +844,10 @@ exports.startTranscription = onObjectFinalized(
         body.language_detection = true;
         body.language_detection_options = { code_switching: true };
       }
-      body.webhook_url = `https://${process.env.GCLOUD_PROJECT}.web.app/hooks/transcription`;
+      // Our own job id travels in the URL (AssemblyAI passes query params
+      // through), so the callback can find its lock even when we never got
+      // the transcript id back.
+      body.webhook_url = `https://${process.env.GCLOUD_PROJECT}.web.app/hooks/transcription?job=${lockId}`;
       body.webhook_auth_header_name = "x-mixtape-secret";
       body.webhook_auth_header_value = process.env.TRANSCRIBE_WEBHOOK_SECRET;
 
@@ -903,15 +864,20 @@ exports.startTranscription = onObjectFinalized(
         { transcriptId: created.id, speakers: meta.speakers, language: meta.language || "", status: "processing" },
         { merge: true }
       );
-      meta.transcriptStatus = "processing";
-      await saveJson(name, meta);
+      // transcriptStatus was already set to "processing" when the revision
+      // was claimed; nothing to write here, and no stale snapshot to save.
     } catch (e) {
-      await lockRef.delete().catch(() => {});
+      // The request may or may not have reached AssemblyAI. Keep the lock as
+      // the record of that ambiguity; a human or the webhook resolves it.
+      const msg = String((e && e.message) || e);
+      await lockRef.set({ status: "submit-failed", error: msg.slice(0, 300) }, { merge: true }).catch(() => {});
       try {
-        meta.transcriptStatus = "error";
-        await saveJson(name, meta);
+        await mutateSidecar(name, async (cur) =>
+          cur && Number(cur.transcriptRevision || 0) === revision && cur.transcriptStatus === "processing"
+            ? { ...cur, transcriptStatus: "error" }
+            : null);
       } catch {}
-      console.error("startTranscription", base, String((e && e.message) || e));
+      console.error("startTranscription", base, msg);
     }
   }
 );
@@ -929,32 +895,64 @@ exports.transcriptionWebhook = onRequest(
       const transcriptId = req.body && req.body.transcript_id;
       const status = req.body && req.body.status;
       if (!transcriptId) return res.status(400).end();
+      if (typeof req.query.id === "string") {
+        // Canonical job. The uid travels in the URL too, so the lookup is a
+        // direct document read; the lock id is still what authorizes it.
+        const ph = await phase();
+        if (ph !== "canonical") return res.status(200).json({ ok: true, note: "recorded; phase " + ph });
+        const r = await canon().webhook({ uid: String(req.query.uid || ""), id: req.query.id, lockId: String(req.query.job || ""), payload: req.body });
+        return res.status(200).json({ ok: true, ...r });
+      }
+      if ((await phase()) === "canonical") return res.status(200).json({ ok: true, note: "legacy job after cutover; ignored" });
 
-      const snap = await admin
-        .firestore()
-        .collection("transcriptions")
-        .where("transcriptId", "==", transcriptId)
-        .limit(1)
-        .get();
-      if (snap.empty) return res.status(200).json({ ok: true, note: "no matching job" });
-      const lockRef = snap.docs[0].ref;
-      const job = snap.docs[0].data();
+      // Our job id comes back in the URL, so a job whose submit response was
+      // lost (no transcriptId stored) is still found. transcriptId is the
+      // fallback for jobs created before the URL carried it.
+      let lockRef = null, job = null;
+      const jobId = typeof req.query.job === "string" && /^[0-9a-f]{64}$/.test(req.query.job) ? req.query.job : null;
+      if (jobId) {
+        const d = await admin.firestore().collection("transcriptions").doc(jobId).get();
+        if (d.exists) { lockRef = d.ref; job = d.data(); }
+      }
+      if (!job) {
+        const snap = await admin.firestore().collection("transcriptions")
+          .where("transcriptId", "==", transcriptId).limit(1).get();
+        if (!snap.empty) { lockRef = snap.docs[0].ref; job = snap.docs[0].data(); }
+      }
+      if (!job) return res.status(200).json({ ok: true, note: "no matching job" });
+      // A 2xx here is deliberate: a 4xx stops AssemblyAI retrying and a 5xx
+      // asks for retries of something we have decided not to process.
+      if (job.status === "done" || job.status === "error") {
+        return res.status(200).json({ ok: true, note: "already final" });
+      }
+      await lockRef.set({ transcriptId, status: job.status === "submitted-unconfirmed" ? "processing" : job.status }, { merge: true });
       const metaPath = `recordings/${job.uid}/${job.folder}/${job.base}.json`;
       const prefix = `recordings/${job.uid}/${job.folder}/${job.base}`;
 
+      // Current sidecar, to check this callback is for the live revision. A
+      // callback from an older run must not replace a newer transcript.
+      let current = {};
+      try { current = await readJson(metaPath); } catch {}
+      if (job.revision && Number(current.transcriptRevision || 0) !== Number(job.revision)) {
+        await lockRef.set({ status: "superseded" }, { merge: true });
+        return res.status(200).json({ ok: true, note: "superseded by a newer transcription" });
+      }
+      // Stable per job: a retried callback must stamp the same instant, or it
+      // beats labels the owner set after the first delivery.
+      const transcribedAt = job.transcribedAt || new Date().toISOString();
+      if (!job.transcribedAt) await lockRef.set({ transcribedAt }, { merge: true });
+
       const patchMeta = async (patch) => {
-        let meta = {};
-        try {
-          meta = JSON.parse((await bkt().file(metaPath).download())[0].toString());
-        } catch {}
-        Object.assign(meta, patch);
-        await saveJson(metaPath, meta);
-        return meta;
+        const r = await mutateSidecar(metaPath, async (cur) => {
+          if (job.revision && Number((cur || {}).transcriptRevision || 0) !== Number(job.revision)) return null;
+          return { ...(cur || {}), ...patch };
+        });
+        return r.meta;
       };
 
       if (status !== "completed") {
         await patchMeta({ transcriptStatus: "error" });
-        await lockRef.delete().catch(() => {});
+        await lockRef.set({ status: "error" }, { merge: true });
         return res.status(200).json({ ok: true });
       }
 
@@ -979,10 +977,11 @@ exports.transcriptionWebhook = onRequest(
         ? null
         : await inferSpeakerMap(utterances, speakers, process.env.ANTHROPIC_KEY);
       const speakerMap = identified || claudeMap || null;
-      const labelledAt = new Date().toISOString();
       const speakerLabels = {};
+      const labelStamps = {};
       for (const [letter, name] of Object.entries(speakerMap || {})) {
-        speakerLabels[letter] = { name, by: identified ? "aai" : "claude", at: labelledAt };
+        speakerLabels[letter] = { name, by: identified ? "aai" : "claude", at: transcribedAt };
+        labelStamps[`speakerLabels.${letter}`] = transcribedAt;
       }
       const text = renderTranscript(utterances, speakers, speakerMap);
       const topic = await inferTopic(text, process.env.ANTHROPIC_KEY);
@@ -994,14 +993,17 @@ exports.transcriptionWebhook = onRequest(
         transcriptStatus: "done",
         speakerMap: speakerMap,
         // Re-transcription resets labels: letters can change between runs.
+        // Stamped with the job's own time so the phone's merge sees the reset
+        // as newer than labels made against the previous run.
         speakerLabels,
         speakerId: null,
+        fieldsUpdatedAt: { ...(current.fieldsUpdatedAt || {}), ...labelStamps, speakerId: transcribedAt },
         topic: topic,
         aaiTranscriptId: transcriptId,
         // What AssemblyAI says it ran, read from the job — never assumed.
         speechModelUsed: data.speech_model || data.speech_model_used || null,
         audioDurationSec,
-        transcribedAt: new Date().toISOString(),
+        transcribedAt,
         estCostUsd: (audioDurationSec / 3600) * AAI_RATE_PER_HOUR,
         // Record what the audio actually was, so it stops saying "Auto".
         ...(job.language && LANG_CODES[job.language]
@@ -1046,11 +1048,20 @@ exports.transcriptionWebhook = onRequest(
           );
         }
       }
-      await lockRef.delete().catch(() => {});
+      await lockRef.set({ status: "done" }, { merge: true }).catch(() => {});
       res.status(200).json({ ok: true });
     } catch (e) {
       console.error("transcriptionWebhook", String((e && e.message) || e));
       res.status(500).json({ error: String((e && e.message) || e) });
     }
   }
+);
+
+
+// Repairs what a crash between steps leaves behind: starts pending
+// recordings whose audio is up, turns a claim that never got its POST
+// response into needs-review, and polls jobs whose webhook never came.
+exports.transcriptionSweep = onSchedule(
+  { region: "us-central1", schedule: "every 15 minutes", secrets: TRANSCRIBE_SECRETS, timeoutSeconds: 300 },
+  async () => { console.log(JSON.stringify(await canon().sweepAll())); }
 );
