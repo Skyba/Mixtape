@@ -19,6 +19,7 @@ import {
   collection, doc, getDoc, getDocFromServer, onSnapshot, query, where, type Unsubscribe,
 } from "firebase/firestore";
 import * as FileSystem from "expo-file-system/legacy";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { callFunction, currentUid, db, ensureSignedIn, isFirebaseConfigured, isSignedIn, putFileCreateOnly, remoteCanonicalPath, downloadRemoteFile } from "./firebase";
 import { audioPath, listRecordings, writeMeta, normalizeRecording, revisionDir, updateMeta, deleteRecording } from "./recordings";
 import { mergeNewest } from "./attribution";
@@ -28,23 +29,35 @@ import type { Recording } from "./types";
 export type Phase = "legacy" | "frozen" | "sealed" | "rolling-back" | "canonical";
 
 let cachedPhase: { at: number; phase: Phase } | null = null;
-/** The migration phase, as the server sees it. Cached for a minute. */
+const CANON_KEY = "phase.canonical.seen";
+let seenCanonical: boolean | null = null;
+async function sawCanonical(): Promise<boolean> {
+  if (seenCanonical === null) seenCanonical = (await AsyncStorage.getItem(CANON_KEY)) === "1";
+  return seenCanonical;
+}
+/**
+ * The migration phase, as the server sees it. Cached for a minute. Once this
+ * phone has seen "canonical" it never falls back to legacy on a failed or
+ * signed-out read: the cut-over is one-way, and taking the legacy path even
+ * once would write the old layout.
+ */
 export async function readPhase(): Promise<Phase> {
-  if (!isFirebaseConfigured || !isSignedIn()) return "legacy";
+  if (!isFirebaseConfigured || !isSignedIn()) return (await sawCanonical()) ? "canonical" : "legacy";
   if (cachedPhase && Date.now() - cachedPhase.at < 60_000) return cachedPhase.phase;
   try {
     const s = await getDoc(doc(db(), "config", "migration"));
     const p = (s.exists() ? (s.data() as any).phase : "legacy") as Phase;
     const phase: Phase = ["legacy", "frozen", "sealed", "rolling-back", "canonical"].includes(p) ? p : "sealed";
     cachedPhase = { at: Date.now(), phase };
+    if (phase === "canonical" && !seenCanonical) { seenCanonical = true; await AsyncStorage.setItem(CANON_KEY, "1"); }
     return phase;
   } catch {
-    return cachedPhase?.phase ?? "legacy";
+    return cachedPhase?.phase ?? ((await sawCanonical()) ? "canonical" : "legacy");
   }
 }
 export const isCanonical = async () => (await readPhase()) === "canonical";
 /** Last known answer without a network round trip (false until read once). */
-export const isCanonicalSync = () => cachedPhase?.phase === "canonical";
+export const isCanonicalSync = () => cachedPhase?.phase === "canonical" || seenCanonical === true;
 
 /** Screens subscribe to learn that sidecars changed under them. */
 const listeners = new Set<() => void>();

@@ -9,6 +9,7 @@ import {
   writeMeta,
   writeTranscript,
   writeAaiJson,
+  commitMeta,
 } from "./recordings";
 import { rememberSpeakers, rememberFolder } from "./storage";
 import {
@@ -338,9 +339,7 @@ export async function transcribeExisting(
     // The server re-runs it against the audio it holds; the listener brings
     // the result down. Nothing is transcribed on the phone.
     await retranscribeRemote(rec.id);
-    const r: Recording = { ...rec, transcriptStatus: "pending" };
-    await writeMeta(r);
-    return r;
+    return commitMeta(rec, (cur) => ({ ...cur, transcriptStatus: "pending" }));
   }
   activeTranscriptions.add(rec.id);
   const oldBase = rec.base;

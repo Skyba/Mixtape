@@ -160,7 +160,10 @@ async function doMigration(): Promise<boolean> {
       const meta = `${V2_ROOT}${idDirName(g.id!)}/meta.json`;
       try {
         const raw = JSON.parse(await FileSystem.readAsStringAsync(meta));
-        const next = { ...raw, folder: g.folder, base: g.base, transcriptLocalRev: undefined, remoteCreated: true };
+        // remoteCreated is NOT asserted here: the listener sets it when the
+        // document is seen, and flushUploads creates it for a recording that
+        // never went up.
+        const next = { ...raw, folder: g.folder, base: g.base, transcriptLocalRev: undefined };
         await FileSystem.writeAsStringAsync(meta + ".tmp", JSON.stringify(next, null, 2));
         await FileSystem.moveAsync({ from: meta + ".tmp", to: meta });
       } catch {}

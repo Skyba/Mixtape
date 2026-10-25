@@ -326,8 +326,11 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       const doc2 = {
         ...cur, attempts, active: null, current, status: "done",
         speakerMap: Object.keys(speakerMap).length ? speakerMap : null, speakerLabels, speakerId: keepOwner ? cur.speakerId : null,
-        fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), ...labelStamps, ...(keepOwner ? {} : { speakerId: transcribedAt }) },
-        topic: post.topic || cur.topic, aaiTranscriptId: transcriptId, speechModelUsed: post.speechModelUsed,
+        fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), ...labelStamps, ...(keepOwner ? {} : { speakerId: transcribedAt }),
+          // The inferred title is a server edit of a client field: stamped,
+          // or no phone merge would ever accept it over its blank.
+          ...(post.topic && post.topic !== cur.topic && !(cur.fieldsUpdatedAt || {}).topic ? { topic: transcribedAt } : {}) },
+        topic: (cur.fieldsUpdatedAt || {}).topic ? cur.topic : post.topic || cur.topic, aaiTranscriptId: transcriptId, speechModelUsed: post.speechModelUsed,
         audioDurationSec: post.audioDurationSec, transcribedAt, estCostUsd: post.estCostUsd,
         durationSeconds: cur.durationSeconds || Math.round(post.audioDurationSec || 0),
         ...(post.language ? { language: post.language } : {}),

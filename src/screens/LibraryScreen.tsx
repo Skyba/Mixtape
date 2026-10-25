@@ -29,7 +29,7 @@ import {
   uploadRecording,
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
-import { writeMeta } from "../recordings";
+import { writeMeta, commitMeta } from "../recordings";
 import { isCanonical, isCanonicalSync, deleteRemote, flushUploads, onCloudChange } from "../cloud";
 import { canUploadNow } from "../network";
 import { pushMeta, recordEdit, sendEdits } from "../outbox";
@@ -204,13 +204,16 @@ export default function LibraryScreen() {
     // Persist the edit before anything else: a crash between this tap and
     // the server's answer must not lose it. Then show it, then send it. The
     // server returns the merged sidecar and replayOutbox writes that back.
-    let next = touch({ ...r, meIncluded: value }, "meIncluded");
-    if (value === "no" && next.speakerId) next = touch({ ...next, speakerId: undefined }, "speakerId");
-    const stamps = next.fieldsUpdatedAt ?? {};
+    const change = (cur: Recording) => {
+      let out = touch({ ...cur, meIncluded: value }, "meIncluded");
+      if (value === "no" && out.speakerId) out = touch({ ...out, speakerId: undefined }, "speakerId");
+      return out;
+    };
+    const preview = change(r);
     const patch: Record<string, unknown> = { meIncluded: value };
     if (value === "no" && r.speakerId) patch.speakerId = null;
-    await enqueue(next, patch, stamps);
-    await writeMeta(next);
+    await enqueue(preview, patch, preview.fieldsUpdatedAt ?? {});
+    const next = await commitMeta(r, change);
     load();
     sendEdits(next).then(() => load()).catch(() => {});
   }
@@ -247,10 +250,9 @@ export default function LibraryScreen() {
   // A folder change: under canonical a stamped field through the outbox,
   // under legacy the old copy-and-re-upload.
   async function moveFolderSynced(r: Recording, f: string): Promise<Recording> {
-    const moved = touch({ ...r, folder: f }, "folder");
-    await recordEdit(moved, { folder: f });
-    await moveToFolder(r, f);
-    await writeMeta(moved);
+    await recordEdit(touch({ ...r, folder: f }, "folder"), { folder: f });
+    const movedFiles = await moveToFolder(r, f); // v2: metadata only
+    const moved = await commitMeta(movedFiles, (cur) => touch({ ...cur, folder: f }, "folder"));
     if (isFirebaseConfigured && isSignedIn()) {
       if (await isCanonical()) await sendEdits(moved);
       else {

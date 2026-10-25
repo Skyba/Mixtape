@@ -49,7 +49,7 @@ import {
 } from "../firebase";
 import { transcribeExisting } from "../recordingFlow";
 import { isCanonical, deleteRemote, onCloudChange } from "../cloud";
-import { readMeta } from "../recordings";
+import { readMeta, commitMeta } from "../recordings";
 import { remoteCanonicalPath } from "../firebase";
 import { pushMeta, recordEdit, sendEdits } from "../outbox";
 import { isLayoutV2, idDir } from "../recordings";
@@ -91,6 +91,16 @@ function toSpeakers(names: (string | null)[]): string[] {
 export default function RecordingDetailScreen({ route, navigation }: Props) {
   const [rec, setRec] = useState<Recording>(route.params.rec);
   const [isRemote, setIsRemote] = useState(!!route.params.remote);
+  // v2: an entry the listener restored has a sidecar but no audio yet; the
+  // disk, not the route, says whether the download button is needed.
+  useEffect(() => {
+    if (!isLayoutV2()) return;
+    FileSystem.getInfoAsync(audioPath(rec)).then((i) => setIsRemote(!i.exists)).catch(() => {});
+  }, [rec.id]);
+  // Letter edits are bound to the revision whose utterances are on screen;
+  // while a newer transcript is still downloading they are refused.
+  const shownRev = isLayoutV2() ? (rec.transcriptLocalRev ?? 0) : (rec.transcriptRevision ?? 0);
+  const revisionBehind = isLayoutV2() && !!rec.transcriptRevision && rec.transcriptLocalRev !== rec.transcriptRevision;
   const [transcript, setTranscript] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
@@ -173,9 +183,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     try {
       const out = await summarize(transcript, summaryPrompt, settings);
       setSummary(out);
-      const next = { ...rec, summary: out };
+      const next = await commitMeta(rec, (cur) => ({ ...cur, summary: out }));
       setRec(next);
-      await writeMeta(next);
     } catch (e: any) {
       Alert.alert("Summary failed", String(e?.message ?? e));
     }
@@ -196,9 +205,11 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setShareBusy(true);
     try {
       const { shareId, url } = await publishShare(rec, utterances ?? []);
-      const next = { ...rec, shareId };
+      const change = (cur: Recording) => touch({ ...cur, shareId }, "shareId");
+      await recordEdit(change(rec), { shareId });
+      const next = await commitMeta(rec, change);
       setRec(next);
-      await writeMeta(next);
+      await sendEdits(next);
       await Clipboard.setStringAsync(url);
       Alert.alert("Published — link copied", url);
     } catch (e: any) {
@@ -212,9 +223,11 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setShareBusy(true);
     try {
       await unpublishShare(rec.shareId);
-      const next = { ...rec, shareId: undefined };
+      const change = (cur: Recording) => touch({ ...cur, shareId: undefined }, "shareId");
+      await recordEdit(change(rec), { shareId: null });
+      const next = await commitMeta(rec, change);
       setRec(next);
-      await writeMeta(next);
+      await sendEdits(next);
     } catch (e: any) {
       Alert.alert("Unpublish failed", String(e?.message ?? e));
     }
@@ -229,6 +242,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   async function remapSpeaker(letter: string, name: string) {
     if (!utterances) return;
+    if (revisionBehind) { Alert.alert("New transcript downloading", "Label speakers once it has arrived."); return; }
     // A name belongs to one letter unless there are more letters than people,
     // so assigning it here takes it away from whichever letter had it.
     const mayShare =
@@ -243,20 +257,20 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     // and only ever changes the one letter; the duplicate-name rule above is
     // re-checked by the server against the merged state and refused, not
     // silently dropped, if it would give one name to two letters.
-    const next = setLabel(rec, letter, name, "user", settings.ownerName);
+    const preview = setLabel(rec, letter, name, "user", settings.ownerName);
+    // Queue first, then write locally, then send: the per-letter patch names
+    // the transcript revision it was made against so a re-run since refuses it.
+    const stamps = preview.fieldsUpdatedAt ?? {};
+    const patch: Record<string, unknown> = { [`speakerLabels.${letter}`]: preview.speakerLabels?.[letter] ?? null };
+    if (preview.speakerId !== rec.speakerId) patch.speakerId = preview.speakerId ?? null;
+    if (preview.meIncluded !== rec.meIncluded) patch.meIncluded = preview.meIncluded;
+    await enqueue(preview, patch, stamps, shownRev);
+    const next = await commitMeta(rec, (cur) => setLabel(cur, letter, name, "user", settings.ownerName));
     const nextMap = next.speakerMap ?? { ...base, [letter]: name };
     const nextText = renderTranscript(utterances, rec.speakers, nextMap);
     setRec(next);
     setTranscript(nextText);
     await writeTranscript(next, nextText);
-    // Queue first, then write locally, then send: the per-letter patch names
-    // the transcript revision it was made against so a re-run since refuses it.
-    const stamps = next.fieldsUpdatedAt ?? {};
-    const patch: Record<string, unknown> = { [`speakerLabels.${letter}`]: next.speakerLabels?.[letter] ?? null };
-    if (next.speakerId !== rec.speakerId) patch.speakerId = next.speakerId ?? null;
-    if (next.meIncluded !== rec.meIncluded) patch.meIncluded = next.meIncluded;
-    await enqueue(next, patch, stamps, rec.transcriptRevision ?? 0);
-    await writeMeta(next);
     if (isFirebaseConfigured && isSignedIn()) {
       // Legacy: the re-rendered transcript text goes up as a file. Canonical:
       // the server renders from the labels; nothing but the patch is sent.
@@ -302,9 +316,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     if (await isCanonical()) {
       // A field, stamped, through the outbox. Tags belong to the folder's
       // vocabulary, so a move clears or replaces them.
-      const moved = touch({ ...rec, folder, ...(p ? { private: p.private, tags: p.tags } : {}) }, "folder", ...(p ? ["private", "tags"] : []));
-      await recordEdit(moved, { folder, ...(p ? { private: p.private, tags: p.tags } : {}) });
-      await writeMeta(moved);
+      const change = (cur: Recording) => touch({ ...cur, folder, ...(p ? { private: p.private, tags: p.tags } : {}) }, "folder", ...(p ? ["private", "tags"] : []));
+      await recordEdit(change(rec), { folder, ...(p ? { private: p.private, tags: p.tags } : {}) });
+      const moved = await commitMeta(rec, change);
       await rememberFolder(folder);
       setRec(moved);
       await sendEdits(moved);
@@ -348,10 +362,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
    */
   async function changeLanguage(language: string) {
     if (language === rec.language) return;
-    const next = touch({ ...rec, language }, "language");
-    await recordEdit(next, { language });
+    const change = (cur: Recording) => touch({ ...cur, language }, "language");
+    await recordEdit(change(rec), { language });
+    const next = await commitMeta(rec, change);
     setRec(next);
-    await writeMeta(next);
     await sendEdits(next);
     if (rec.transcriptStatus === "done") {
       Alert.alert(
@@ -370,10 +384,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   /** Filing for the archive. The folder is a real move; the rest is metadata. */
   async function savePlacement(p: Placement) {
     if (p.folder !== rec.folder) return changeFolder(p.folder, p);
-    const next = touch({ ...rec, private: p.private, tags: p.tags }, "private", "tags");
-    await recordEdit(next, { private: p.private, tags: p.tags });
+    const change = (cur: Recording) => touch({ ...cur, private: p.private, tags: p.tags }, "private", "tags");
+    await recordEdit(change(rec), { private: p.private, tags: p.tags });
+    const next = await commitMeta(rec, change);
     setRec(next);
-    await writeMeta(next);
     await sendEdits(next);
   }
 
@@ -408,9 +422,14 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         patch[`speakerLabels.${l}`] = next.speakerLabels?.[l] ?? null;
       }
     }
-    await recordEdit(next, patch, rec.transcriptRevision ?? 0);
+    await recordEdit(next, patch, shownRev);
+    const owner = (await getSettings()).ownerName;
+    next = await commitMeta(rec, (cur) => {
+      let out: Recording = touch({ ...cur, speakers, speakerMap: nextMap }, "speakers");
+      for (const [l, n] of Object.entries(nextMap ?? {})) if (rec.speakerMap?.[l] !== n) out = setLabel(out, l, n as string, "user", owner);
+      return out;
+    });
     setRec(next);
-    await writeMeta(next);
     await rememberSpeakers(speakers.filter((s) => !/^Speaker \d+$/.test(s)));
 
     if (utterances && utterances.length) {

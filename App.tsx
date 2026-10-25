@@ -4,6 +4,7 @@ import { replayOutbox } from "./src/outbox";
 import { isCanonical, startListener, pullTranscripts, flushUploads } from "./src/cloud";
 import { View, Text } from "react-native";
 import { runLocalMigration } from "./src/localMigration";
+import { detectLayout } from "./src/recordings";
 import { canUploadNow } from "./src/network";
 import { AppState } from "react-native";
 import * as Font from "expo-font";
@@ -150,7 +151,10 @@ export default function App() {
         getSettings().then(async (s) => {
           await authReady();
           if (await isCanonical()) {
-            if (!(await runLocalMigration().catch(() => false))) return;
+            // Discovered after a legacy start: close the UI again while the
+            // local move runs, so nothing writes the old layout meanwhile.
+            if (!(await detectLayout())) setStorageReady(false);
+            if (!(await runLocalMigration().catch(() => false))) { setStorageMsg("Some recordings could not be moved. Export the log from Settings."); return; }
             setStorageReady(true);
             startListener();
             await flushUploads(await canUploadNow(s)).catch(() => {});

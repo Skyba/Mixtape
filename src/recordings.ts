@@ -101,6 +101,18 @@ export async function readMeta(id: string): Promise<Recording | null> {
   }
 }
 
+/**
+ * The one way a screen changes an existing recording: under v2 a locked
+ * read-modify-write that touches only what `fn` changes; under legacy a
+ * plain sidecar write of fn(rec). Returns what is now on disk.
+ */
+export async function commitMeta(rec: Recording, fn: (cur: Recording) => Recording): Promise<Recording> {
+  if (isLayoutV2()) return (await updateMeta(rec.id, fn)).rec;
+  const next = fn(rec);
+  await writeMeta(next);
+  return next;
+}
+
 const locks = new Map<string, Promise<unknown>>();
 /**
  * Read-modify-write of one sidecar under a per-id lock: `fn` sees the
