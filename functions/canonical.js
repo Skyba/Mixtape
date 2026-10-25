@@ -58,8 +58,12 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
 
   async function readPhase(tx) {
     const s = tx ? await tx.get(phaseRef()) : await phaseRef().get();
-    const p = s.exists ? s.data().phase : "legacy";
-    return PHASES.includes(p) ? p : "legacy";
+    // No document yet means the migration never started. A document with a
+    // value this build does not know is NOT legacy: it admits nothing, so a
+    // typo or a newer tool can never silently reopen the old pipeline.
+    if (!s.exists) return "legacy";
+    const p = s.data().phase;
+    return PHASES.includes(p) ? p : "sealed";
   }
   async function setPhase(phase, by) {
     if (!PHASES.includes(phase)) throw new CanonError("invalid-argument", "bad phase");
