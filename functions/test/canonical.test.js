@@ -107,6 +107,8 @@ test("phase gate: nothing mutates outside canonical", async () => {
   await assert.rejects(c.createRecording(UID, { id: ID }), (e) => e.code === "unavailable");
   await db.collection("config").doc("migration").set({ phase: "frozen" });
   await assert.rejects(c.createRecording(UID, { id: ID }), (e) => e.code === "unavailable");
+  await db.collection("config").doc("migration").set({ phase: "sealed" });
+  await assert.rejects(c.createRecording(UID, { id: ID }), (e) => e.code === "unavailable");
   assert.deepEqual(await c.sweepAll(), { skipped: true });
 });
 
@@ -409,4 +411,21 @@ test("crc32c helper matches GCS", async () => {
   await f.save("hello world", { resumable: false });
   const [md] = await f.getMetadata();
   assert.equal(crc32cBase64(Buffer.from("hello world")), md.crc32c);
+});
+
+test("legacy admission: open under legacy, webhooks only under frozen, closed under sealed", async () => {
+  await reset();
+  process.env.FIREBASE_CONFIG = JSON.stringify({ projectId: "demo-mixtape", storageBucket: "demo-mixtape.appspot.com" });
+  const { _inflight } = require("../index.js");
+  const inflight = async () => (await db.collection("inflight").get()).size;
+  for (const [phase, plain, hook] of [["legacy", true, true], ["frozen", false, true], ["sealed", false, false], ["canonical", false, false]]) {
+    await db.collection("config").doc("migration").set({ phase });
+    const r1 = await _inflight.admit("patch", "x");
+    assert.equal(!!r1, plain, phase + " plain");
+    const r2 = await _inflight.admit("webhook", "x", { allowFrozen: true });
+    assert.equal(!!r2, hook, phase + " webhook");
+    assert.equal(await inflight(), (plain ? 1 : 0) + (hook ? 1 : 0));
+    for (const r of [r1, r2]) if (r) await r();
+    assert.equal(await inflight(), 0, "released");
+  }
 });

@@ -20,7 +20,9 @@ const SUBMITTED_STALE_MS = 2 * 60 * 60 * 1000;
 const ATTEMPTS_KEPT = 20;
 const OPS_KEPT = 50;
 
-const PHASES = ["legacy", "frozen", "canonical"];
+// frozen: admitted legacy jobs may still finish; sealed: nothing legacy is
+// admitted at all (the migrator copies under sealed); canonical: cut over.
+const PHASES = ["legacy", "frozen", "sealed", "canonical"];
 
 class CanonError extends Error {
   constructor(code, message, extra) { super(message); this.code = code; this.extra = extra || {}; }

@@ -10,7 +10,7 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const fsp = fs.promises;
-admin.initializeApp();
+if (!admin.apps.length) admin.initializeApp();
 
 const ALL_SCOPES = [
   "read:meta",
@@ -147,7 +147,7 @@ async function admit(kind, detail, { allowFrozen = false } = {}) {
   });
   return ok ? () => ref.delete().catch(() => {}) : null;
 }
-exports._inflight = { INFLIGHT_MAX_MS };
+exports._inflight = { INFLIGHT_MAX_MS, admit };
 
 // Under legacy, an id is found by scanning the sidecars; two paths with the
 // same id (the 9 known duplicates) are a 409, never a guess.
@@ -575,7 +575,10 @@ exports.mergeAudio = onCall(
     if (ph === "canonical" && !canonDest) throw new HttpsError("permission-denied", "dest must be rec2/<uid>/<id>/audio.m4a");
     const release = ph === "legacy" ? await admit("merge", dest) : () => {};
     if (!release) throw new HttpsError("unavailable", "migration in progress");
-
+    try { return await mergeAdmitted({ uid, segments, dest, ph, canonDest }); } finally { await release(); }
+  }
+);
+async function mergeAdmitted({ uid, segments, dest, ph, canonDest }) {
     const bucket = admin.storage().bucket();
 
     // No "already exists, skip" shortcut here. dest is the recording's own
@@ -639,11 +642,9 @@ exports.mergeAudio = onCall(
     } catch (e) {
       throw new HttpsError("internal", String((e && e.message) || e));
     } finally {
-      await fsp.rm(work, { recursive: true, force: true });
-      release();
+      await fsp.rm(work, { recursive: true, force: true }).catch(() => {});
     }
-  }
-);
+}
 
 function speakerName(s, letter) {
   return (
@@ -963,10 +964,12 @@ exports.transcriptionWebhook = onRequest(
         const r = await canon().webhook({ uid: String(req.query.uid || ""), id: req.query.id, lockId: String(req.query.job || ""), payload: req.body });
         return res.status(200).json({ ok: true, ...r });
       }
-      if ((await phase()) === "canonical") {
+      if (!["legacy", "frozen"].includes(await phase())) {
+        // Sealed or canonical: admission is closed. Recorded for the user to
+        // see what finished late; never applied to legacy paths again.
         await admin.firestore().collection("legacyWebhooks").doc(`${transcriptId}:${status || "?"}`)
           .set({ receivedAt: new Date().toISOString(), job: req.query.job || null, payload: req.body }, { merge: true });
-        return res.status(200).json({ ok: true, note: "legacy job after cutover; recorded, not applied" });
+        return res.status(200).json({ ok: true, note: "legacy admission closed; recorded, not applied" });
       }
 
       // Our job id comes back in the URL, so a job whose submit response was
@@ -1136,7 +1139,10 @@ exports.transcriptionSweep = onSchedule(
   { region: "us-central1", schedule: "every 15 minutes", secrets: TRANSCRIBE_SECRETS, timeoutSeconds: 300 },
   async () => {
     const ph = await phase();
-    console.log(JSON.stringify(ph === "legacy" ? await legacySweep() : await canon().sweepAll()));
+    if (ph !== "legacy") { console.log(JSON.stringify(await canon().sweepAll())); return; }
+    const release = await admit("sweep", null);
+    if (!release) return;
+    try { console.log(JSON.stringify(await legacySweep())); } finally { await release(); }
   }
 );
 
