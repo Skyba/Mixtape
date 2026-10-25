@@ -48,9 +48,10 @@ import {
   shareUrl,
 } from "../firebase";
 import { transcribeExisting } from "../recordingFlow";
-import { isCanonical, deleteRemote } from "../cloud";
+import { isCanonical, deleteRemote, onCloudChange } from "../cloud";
+import { readMeta } from "../recordings";
 import { remoteCanonicalPath } from "../firebase";
-import { pushMeta } from "../outbox";
+import { pushMeta, recordEdit, sendEdits } from "../outbox";
 import { isLayoutV2, idDir } from "../recordings";
 import {
   summarize,
@@ -106,6 +107,16 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const pending =
     rec.transcriptStatus === "pending" || rec.transcriptStatus === "processing";
   const canUseTranscript = done && !isRemote && !!transcript;
+
+  // A transcript finishing or an edit landing from the Mac while this screen
+  // is open: re-read the sidecar and its files.
+  useEffect(() => onCloudChange(async () => {
+    const cur = await readMeta(rec.id).catch(() => null);
+    if (!cur) return;
+    setRec(cur);
+    setTranscript(await readTranscript(cur));
+    setUtterances(await readAaiJson(cur));
+  }), [rec.id]);
 
   useEffect(() => {
     (async () => {
@@ -292,10 +303,11 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       // A field, stamped, through the outbox. Tags belong to the folder's
       // vocabulary, so a move clears or replaces them.
       const moved = touch({ ...rec, folder, ...(p ? { private: p.private, tags: p.tags } : {}) }, "folder", ...(p ? ["private", "tags"] : []));
+      await recordEdit(moved, { folder, ...(p ? { private: p.private, tags: p.tags } : {}) });
       await writeMeta(moved);
       await rememberFolder(folder);
       setRec(moved);
-      await pushMeta(moved, { folder, ...(p ? { private: p.private, tags: p.tags } : {}) });
+      await sendEdits(moved);
       setBusy("");
       return;
     }
@@ -337,9 +349,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   async function changeLanguage(language: string) {
     if (language === rec.language) return;
     const next = touch({ ...rec, language }, "language");
+    await recordEdit(next, { language });
     setRec(next);
     await writeMeta(next);
-    await pushMeta(next, { language });
+    await sendEdits(next);
     if (rec.transcriptStatus === "done") {
       Alert.alert(
         "Language changed",
@@ -358,9 +371,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   async function savePlacement(p: Placement) {
     if (p.folder !== rec.folder) return changeFolder(p.folder, p);
     const next = touch({ ...rec, private: p.private, tags: p.tags }, "private", "tags");
+    await recordEdit(next, { private: p.private, tags: p.tags });
     setRec(next);
     await writeMeta(next);
-    await pushMeta(next, { private: p.private, tags: p.tags });
+    await sendEdits(next);
   }
 
   /**
@@ -394,6 +408,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         patch[`speakerLabels.${l}`] = next.speakerLabels?.[l] ?? null;
       }
     }
+    await recordEdit(next, patch, rec.transcriptRevision ?? 0);
     setRec(next);
     await writeMeta(next);
     await rememberSpeakers(speakers.filter((s) => !/^Speaker \d+$/.test(s)));
@@ -403,7 +418,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       setTranscript(text);
       await writeTranscript(next, text);
     }
-    await pushMeta(next, patch, rec.transcriptRevision ?? 0);
+    await sendEdits(next);
   }
 
   function confirmDelete() {

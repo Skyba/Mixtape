@@ -18,7 +18,13 @@ export type SyncedField =
   | "meIncluded"
   | "tags"
   | "private"
-  | "note";
+  | "note"
+  | "topic"
+  | "place"
+  | "inputName"
+  | "language"
+  | "shareId"
+  | "base";
 
 export type Recording = {
   id: string; // stable, never changes (original timestamp)
@@ -66,6 +72,8 @@ export type Recording = {
   remoteCreated?: boolean;
   /** v2: an audio object with other bytes already owns this id. */
   audioConflict?: boolean;
+  /** v2: a server operation sent but not yet acknowledged (re-transcribe). */
+  pendingOp?: string;
   language: string;
   topic?: string;
   transcriptStatus: TranscriptStatus;

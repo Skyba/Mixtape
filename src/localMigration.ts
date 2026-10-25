@@ -46,6 +46,9 @@ const md5Of = async (uri: string) => {
 
 /** Target file name inside the id directory for a legacy extension. */
 function targetName(ext: string, rev: number): string {
+  // Legacy transcripts land under r0: they are whatever the phone had, not
+  // the server's current pair. pullTranscripts installs r{current} and only
+  // then flips the pointer.
   return { ".m4a": "audio.m4a", ".json": "meta.json", ".txt": `r${rev}/transcript.txt`, ".aai.json": `r${rev}/utterances.aai.json` }[ext]!;
 }
 
@@ -92,7 +95,7 @@ async function buildJournal(): Promise<Journal> {
     if (!chosen || !gs.some((x) => x.key === chosen)) for (const g of gs) g.target = "dupe";
   }
   for (const g of groups) {
-    const rev = 1;
+    const rev = 0;
     for (const f of g.files) {
       const name = f.from.split("/").pop()!;
       const ext = extOf(name)!;
@@ -105,8 +108,14 @@ async function buildJournal(): Promise<Journal> {
   return { startedAt: new Date().toISOString(), phase: 0, groups, report };
 }
 
-/** Runs or resumes the migration. Returns true when the v2 layout is live. */
-export async function runLocalMigration(): Promise<boolean> {
+let running: Promise<boolean> | null = null;
+/** Runs or resumes the migration. Returns true when the v2 layout is live. One at a time. */
+export function runLocalMigration(): Promise<boolean> {
+  if (running) return running;
+  running = doMigration().finally(() => { running = null; });
+  return running;
+}
+async function doMigration(): Promise<boolean> {
   if (await detectLayout()) return true;
   let j = await readJournal();
   if (!j) {
@@ -151,8 +160,7 @@ export async function runLocalMigration(): Promise<boolean> {
       const meta = `${V2_ROOT}${idDirName(g.id!)}/meta.json`;
       try {
         const raw = JSON.parse(await FileSystem.readAsStringAsync(meta));
-        const hasTx = g.files.some((f) => f.to.endsWith("transcript.txt") && f.state === "moved");
-        const next = { ...raw, folder: g.folder, base: g.base, transcriptLocalRev: hasTx ? 1 : undefined, remoteCreated: true };
+        const next = { ...raw, folder: g.folder, base: g.base, transcriptLocalRev: undefined, remoteCreated: true };
         await FileSystem.writeAsStringAsync(meta + ".tmp", JSON.stringify(next, null, 2));
         await FileSystem.moveAsync({ from: meta + ".tmp", to: meta });
       } catch {}

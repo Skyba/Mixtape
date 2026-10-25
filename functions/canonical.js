@@ -517,7 +517,7 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
   // descriptor it compares against before adopting an existing audio object.
   async function audioDescriptor(uid, id) {
     const [md] = await blob(uid, id, audioName).getMetadata().catch(() => [null]);
-    return md ? { generation: String(md.generation), size: Number(md.size), crc32c: md.crc32c } : null;
+    return md ? { generation: String(md.generation), size: Number(md.size), crc32c: md.crc32c, md5: md.md5Hash || null } : null;
   }
 
   // The document as clients and the API see it: no attempts/ops internals,

@@ -30,9 +30,9 @@ import {
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
 import { writeMeta } from "../recordings";
-import { isCanonical, deleteRemote, flushUploads } from "../cloud";
+import { isCanonical, isCanonicalSync, deleteRemote, flushUploads, onCloudChange } from "../cloud";
 import { canUploadNow } from "../network";
-import { pushMeta } from "../outbox";
+import { pushMeta, recordEdit, sendEdits } from "../outbox";
 import { iconOf, useFolderIcons } from "../folderIcons";
 import { placeLabel } from "../place";
 import { isGreen, missingForGreen, touch } from "../attribution";
@@ -62,6 +62,8 @@ export default function LibraryScreen() {
   const insets = useSafeAreaInsets();
 
   useEffect(() => subscribeAuth(setAuthEmail), []);
+  // The listener rewrites sidecars under us; redraw when it does.
+  useEffect(() => onCloudChange(() => { load(); }), []);
 
   function sortRecs(arr: Recording[]): Recording[] {
     return [...arr].sort((x, y) =>
@@ -73,7 +75,10 @@ export default function LibraryScreen() {
     setBusy(true);
     const recs = await listRecordings();
     setLocal(recs);
-    if (isFirebaseConfigured) {
+    // Under canonical every document already has a local entry (the
+    // listener writes one), and the legacy prefix would list the old copies
+    // as cloud-only duplicates until they are deleted.
+    if (isFirebaseConfigured && !isCanonicalSync()) {
       try {
         const localIds = new Set(recs.map((r) => r.id));
         const entries = await listRemote();
@@ -207,7 +212,7 @@ export default function LibraryScreen() {
     await enqueue(next, patch, stamps);
     await writeMeta(next);
     load();
-    replayOutbox().then(() => load()).catch(() => {});
+    sendEdits(next).then(() => load()).catch(() => {});
   }
 
   function askMe(r: Recording) {
@@ -242,10 +247,12 @@ export default function LibraryScreen() {
   // A folder change: under canonical a stamped field through the outbox,
   // under legacy the old copy-and-re-upload.
   async function moveFolderSynced(r: Recording, f: string): Promise<Recording> {
-    const moved = touch(await moveToFolder(r, f), "folder");
+    const moved = touch({ ...r, folder: f }, "folder");
+    await recordEdit(moved, { folder: f });
+    await moveToFolder(r, f);
     await writeMeta(moved);
     if (isFirebaseConfigured && isSignedIn()) {
-      if (await isCanonical()) await pushMeta(moved, { folder: f });
+      if (await isCanonical()) await sendEdits(moved);
       else {
         await deleteRemoteRecording(r).catch(() => {});
         await uploadRecording(moved, { skipAudio: !!moved.mergedInCloud }).catch(() => {});

@@ -83,10 +83,46 @@ export function normalizeRecording(raw: any): Recording {
 
 export async function writeMeta(r: Recording): Promise<void> {
   await ensureDir(isLayoutV2() ? idDir(r) : folderDir(r.folder));
-  // Atomic: a crash mid-write must not leave a half sidecar for the lister.
-  const tmp = metaPath(r) + ".tmp";
+  // Written whole to a private temp name, then renamed over the sidecar
+  // (a rename on Android; this app does not ship on iOS, where the legacy
+  // module removes the destination first).
+  const tmp = `${metaPath(r)}.${Math.random().toString(36).slice(2)}.tmp`;
   await FileSystem.writeAsStringAsync(tmp, JSON.stringify(r, null, 2));
   await FileSystem.moveAsync({ from: tmp, to: metaPath(r) });
+}
+
+/** v2 only: the sidecar for an id as it is on disk right now. */
+export async function readMeta(id: string): Promise<Recording | null> {
+  try {
+    const raw = await FileSystem.readAsStringAsync(`${idDir({ id })}meta.json`);
+    return normalizeRecording(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+const locks = new Map<string, Promise<unknown>>();
+/**
+ * Read-modify-write of one sidecar under a per-id lock: `fn` sees the
+ * current content, and two concurrent writers (a download finishing, an
+ * edit landing) cannot each put back a stale copy of the other's field.
+ * v2 layout only; under legacy the id has no fixed path.
+ */
+export async function updateMeta(
+  id: string,
+  fn: (cur: Recording) => Recording
+): Promise<{ rec: Recording; changed: boolean }> {
+  const prev = locks.get(id) ?? Promise.resolve();
+  const run = prev.then(async () => {
+    const cur = await readMeta(id);
+    if (!cur) throw new Error(`no sidecar for ${id}`);
+    const next = fn(cur);
+    const changed = JSON.stringify(next) !== JSON.stringify(cur);
+    if (changed) await writeMeta(next);
+    return { rec: next, changed };
+  });
+  locks.set(id, run.catch(() => {}));
+  return run;
 }
 
 export async function listRecordings(): Promise<Recording[]> {

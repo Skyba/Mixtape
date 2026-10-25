@@ -701,6 +701,11 @@ export async function pullCloudTranscripts(settings: Settings): Promise<number> 
           // the previous run and lose to anything the owner set since. First,
           // so the explicit fields below keep precedence.
           ...mergeNewest(r, remote, { serverWinsTies: true }),
+          // CONTAINMENT (as in reconcileFromCloud): the files were just
+          // written under OUR folder; a cloud folder change is not applied
+          // locally by this path.
+          folder: r.folder,
+          fieldsUpdatedAt: { ...mergeNewest(r, remote, { serverWinsTies: true }).fieldsUpdatedAt, ...(r.fieldsUpdatedAt?.folder ? { folder: r.fieldsUpdatedAt.folder } : {}) },
           transcriptStatus: "done",
           // A cap-stopped take can save 0 locally; the server backfills the
           // true duration from AssemblyAI — bring it down with the transcript.

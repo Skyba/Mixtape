@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { registerUploadTask } from "./src/background";
 import { replayOutbox } from "./src/outbox";
 import { isCanonical, startListener, pullTranscripts, flushUploads } from "./src/cloud";
+import { View, Text } from "react-native";
 import { runLocalMigration } from "./src/localMigration";
 import { canUploadNow } from "./src/network";
 import { AppState } from "react-native";
@@ -85,6 +86,10 @@ export default function App() {
   // Explicitly load the icon font — under the New Architecture @expo/vector-icons
   // doesn't always auto-register it, which shows icons as blank squares.
   const [fontReady, setFontReady] = useState(false);
+  // Nothing renders (so nothing records, lists or uploads) until the phase
+  // is known and, under canonical, the local layout move is complete.
+  const [storageReady, setStorageReady] = useState(false);
+  const [storageMsg, setStorageMsg] = useState("Preparing…");
   useEffect(() => {
     Font.loadAsync(Ionicons.font).finally(() => setFontReady(true));
   }, []);
@@ -113,9 +118,11 @@ export default function App() {
         // Storage migration done on the server: move local files to the
         // id-keyed layout first (journaled; nothing else runs until it is
         // complete), then sync through the document listener.
+        setStorageMsg("Moving recordings to the new layout…");
         const ok = await runLocalMigration().catch((e) => { logEvent(`local migration failed ${String(e?.message ?? e)}`); return false; });
-        if (!ok) return;
-        startListener(() => {});
+        if (!ok) { setStorageMsg("Some recordings could not be moved. Export the log from Settings."); return; }
+        setStorageReady(true);
+        startListener();
         await flushUploads(await canUploadNow(s)).catch(() => {});
         await replayOutbox().catch(() => {});
         retryPendingMerges(s);
@@ -123,6 +130,7 @@ export default function App() {
         try { await uploadDebugLog(await getLogText()); } catch {}
         return;
       }
+      setStorageReady(true);
       // Edits made offline go first, then the Mac's newer edits come down.
       await replayOutbox().catch(() => {});
       await reconcileFromCloud().catch(() => {});
@@ -143,7 +151,8 @@ export default function App() {
           await authReady();
           if (await isCanonical()) {
             if (!(await runLocalMigration().catch(() => false))) return;
-            startListener(() => {});
+            setStorageReady(true);
+            startListener();
             await flushUploads(await canUploadNow(s)).catch(() => {});
             await replayOutbox().catch(() => {});
             pullTranscripts();
@@ -161,6 +170,13 @@ export default function App() {
   }, []);
 
   if (!fontReady) return null;
+  if (!storageReady) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#0f1115", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <Text style={{ color: "#9ca3af", textAlign: "center" }}>{storageMsg}</Text>
+      </View>
+    );
+  }
 
   return (
     <SafeAreaProvider>

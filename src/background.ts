@@ -1,4 +1,8 @@
 import { flushPendingUploads, retryPendingMerges } from "./recordingFlow";
+import { isCanonical, flushUploads } from "./cloud";
+import { runLocalMigration } from "./localMigration";
+import { replayOutbox } from "./outbox";
+import { canUploadNow } from "./network";
 import { authReady } from "./firebase";
 import { getSettings } from "./storage";
 import { logEvent } from "./log";
@@ -41,8 +45,18 @@ if (mods) {
         // and the upload is skipped when the phone is on cellular and the
         // Wi-Fi-only setting is on. Without this the recording waits for the
         // next time the app is opened, which has been days.
-        const merged = await retryPendingMerges(settings);
-        const uploaded = await flushPendingUploads(settings);
+        let merged = 0, uploaded = 0;
+        if (await isCanonical()) {
+          // Same barrier as the foreground: never touch the legacy layout
+          // once the server has cut over, until the local move is complete.
+          if (!(await runLocalMigration())) return mods.BackgroundTask.BackgroundTaskResult.Failed;
+          merged = await retryPendingMerges(settings);
+          uploaded = await flushUploads(await canUploadNow(settings));
+          await replayOutbox().catch(() => {});
+        } else {
+          merged = await retryPendingMerges(settings);
+          uploaded = await flushPendingUploads(settings);
+        }
         if (merged || uploaded) {
           await logEvent(
             `background task: merged=${merged} uploaded=${uploaded}`

@@ -88,7 +88,8 @@ export function mergeNewest(
   theirs: Partial<Recording>,
   opts?: { serverWinsTies?: boolean }
 ): Recording {
-  const scalar: SyncedField[] = ["folder", "speakers", "speakerId", "meIncluded", "tags", "private", "note"];
+  const scalar: SyncedField[] = ["folder", "speakers", "speakerId", "meIncluded", "tags", "private", "note",
+    "topic", "place", "inputName", "language", "shareId", "base"];
   let out: Recording = { ...mine };
   const stamps: Record<string, string> = { ...(mine.fieldsUpdatedAt ?? {}) };
   const newer = (t?: string, m?: string) =>
