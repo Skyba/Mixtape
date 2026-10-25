@@ -246,8 +246,13 @@ export async function clearAllCacheAudio(): Promise<number> {
   if (!root) return 0;
   const found: CacheAudio[] = [];
   await scan(root, 2, found);
+  // Segments of a take whose merge has not landed are the only copy of
+  // everything after its first minutes; they are not cache to reclaim.
+  const keep = new Set<string>();
+  for (const r of await listRecordings()) for (const u of r.mergePending?.segments ?? []) keep.add(u);
   let freed = 0;
   for (const f of found) {
+    if (keep.has(f.uri)) continue;
     try {
       await FileSystem.deleteAsync(f.uri, { idempotent: true });
       freed += f.size;

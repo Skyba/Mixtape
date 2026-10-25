@@ -494,7 +494,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       // multi-segment take carries it until a merge lands, so a signed-out
       // save still keeps its segments and retryPendingMerges finishes it
       // after sign-in. Only the merge attempt itself needs the cloud.
-      mergePending: isFirebaseConfigured && args.segmentUris.length > 1
+      mergePending: args.segmentUris.length > 1
         ? { id, count: args.segmentUris.length, segments: args.segmentUris }
         : undefined,
     },
