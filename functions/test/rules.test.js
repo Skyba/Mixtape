@@ -45,6 +45,8 @@ test("R1 storage rules: legacy writable, canonical audio create-only and phase-g
   await assertFails(up(me, `rec2/u1/${ID}/audio.m4a`), "create-only: no overwrite");
   await assertFails(deleteObject(ref(me.storage(), `rec2/u1/${ID}/audio.m4a`)), "deleteObject(ref(me.storage(), `rec2/u1/${ID}/audio.m4a`))");
   await assertFails(up(me, "rec2/u1/not-an-id/audio.m4a"));
+  await assertSucceeds(up(me, "rec2/u1/2026-07-27T14:31:53.488Z-5h/audio.m4a"), "suffixed id accepted");
+  await assertFails(up(me, "rec2/u1/2026-07-27T14:31:53.488Z-toolongsuffix/audio.m4a"), "long suffix rejected");
   await assertFails(up(other, `rec2/u1/2026-10-25T10:00:01.000Z/audio.m4a`), "up(other, `rec2/u1/2026-10-25T10:00:01.000Z/audio.m4a`)");
   await assertFails(up(me, `rec2/u1/${ID}/transcript-r1.txt`), "up(me, `rec2/u1/${ID}/transcript-r1.txt`)");
   await assertFails(up(me, `rec2/u1/${ID}/meta.json`), "up(me, `rec2/u1/${ID}/meta.json`)");

@@ -19,7 +19,7 @@ service firebase.storage {
       allow read: if owner(uid);
       allow create: if owner(uid)
                     && resource == null
-                    && id.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$')
+                    && id.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z(-[A-Za-z0-9]{1,8})?$')
                     && request.resource.size > 0
                     && phase() == 'canonical';
       allow update, delete: if false;

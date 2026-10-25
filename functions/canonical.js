@@ -12,7 +12,9 @@
 const crypto = require("crypto");
 const lib = require("./lib");
 
-const ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+// An ISO instant, optionally with a short suffix (a split recording such as
+// 2026-07-27T14:31:53.488Z-5h). Mirrored in storage.rules.
+const ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z(-[A-Za-z0-9]{1,8})?$/;
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 
 const CLAIMED_STALE_MS = 10 * 60 * 1000;

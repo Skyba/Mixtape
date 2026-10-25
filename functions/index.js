@@ -570,7 +570,7 @@ exports.mergeAudio = onCall(
     const ph = await phase();
     const legacyDest = typeof dest === "string" && dest.startsWith(prefix) && dest.endsWith(".m4a") && !dest.includes("/_");
     const canonDest = typeof dest === "string" && new RegExp(`^rec2/${uid}/${canon().ID_RE.source.slice(1, -1)}/audio\\.m4a$`).test(dest);
-    if (ph === "frozen") throw new HttpsError("unavailable", "migration in progress");
+    if (ph !== "legacy" && ph !== "canonical") throw new HttpsError("unavailable", "migration in progress");
     if (ph === "legacy" && !legacyDest) throw new HttpsError("permission-denied", "dest must be your own recording .m4a");
     if (ph === "canonical" && !canonDest) throw new HttpsError("permission-denied", "dest must be rec2/<uid>/<id>/audio.m4a");
     const release = ph === "legacy" ? await admit("merge", dest) : () => {};
@@ -993,7 +993,11 @@ exports.transcriptionWebhook = onRequest(
         return res.status(200).json({ ok: true, note: "already final" });
       }
       const release = await admit("webhook", job.recordingId || transcriptId, { allowFrozen: true });
-      if (!release) return res.status(200).json({ ok: true, note: "phase changed; legacy result not written" });
+      if (!release) {
+        await admin.firestore().collection("legacyWebhooks").doc(`${transcriptId}:${status || "?"}`)
+          .set({ receivedAt: new Date().toISOString(), job: req.query.job || null, payload: req.body }, { merge: true });
+        return res.status(200).json({ ok: true, note: "legacy admission closed; recorded, not applied" });
+      }
       res.on("finish", release);
       await lockRef.set({ transcriptId, status: job.status === "submitted-unconfirmed" ? "processing" : job.status }, { merge: true });
       const metaPath = `recordings/${job.uid}/${job.folder}/${job.base}.json`;
