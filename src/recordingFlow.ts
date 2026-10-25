@@ -21,6 +21,8 @@ import {
   TranscribeResult,
 } from "./transcription";
 import { canUploadNow } from "./network";
+import { mergeNewest } from "./attribution";
+import { moveToFolder } from "./recordings";
 import {
   isFirebaseConfigured,
   isSignedIn,
@@ -32,6 +34,8 @@ import {
   downloadUrlForPath,
   remoteObjectPath,
   fetchRemoteMeta,
+  listRemote,
+  type RemoteEntry,
   liveSegmentPath,
   uploadDebugLog,
 } from "./firebase";
@@ -125,6 +129,11 @@ function sanitize(s: string): string {
   return s.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim();
 }
 
+function stampNow(fields: string[]): Record<string, string> {
+  const at = new Date().toISOString();
+  return Object.fromEntries(fields.map((f) => [f, at]));
+}
+
 function buildBase(
   recordedAt: string,
   speakers: string[],
@@ -155,6 +164,8 @@ export type StopArgs = {
   place?: Recording["place"];
   note?: string;
   inputName?: string;
+  /** Answered on the record screen. Absent only on builds that predate it. */
+  meIncluded?: "yes" | "no";
   cacheUri: string;
   durationSeconds: number;
   plannedDurationHours: number;
@@ -200,6 +211,10 @@ export async function processStop(args: StopArgs): Promise<Recording> {
       place: args.place,
       note: args.note?.trim() || undefined,
       inputName: args.inputName,
+      meIncluded: args.meIncluded,
+      // Everything set at record time is a phone edit as of now, so a later
+      // Mac batch can tell whether it is older or newer than this.
+      fieldsUpdatedAt: stampNow(["folder", "speakers", "meIncluded", "tags", "private", "note"]),
       owner:
         args.settings.ownerName.trim() && args.settings.ownerBio.trim()
           ? {
@@ -353,6 +368,8 @@ export type LiveStopArgs = {
   place?: Recording["place"];
   note?: string;
   inputName?: string;
+  /** Answered on the record screen. Absent only on builds that predate it. */
+  meIncluded?: "yes" | "no";
   segmentUris: string[]; // local segment files, in order
   liveText: string; // assembled plain-text transcript (no speakers)
   durationSeconds: number;
@@ -418,6 +435,10 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       place: args.place,
       note: args.note?.trim() || undefined,
       inputName: args.inputName,
+      meIncluded: args.meIncluded,
+      // Everything set at record time is a phone edit as of now, so a later
+      // Mac batch can tell whether it is older or newer than this.
+      fieldsUpdatedAt: stampNow(["folder", "speakers", "meIncluded", "tags", "private", "note"]),
       owner:
         args.settings.ownerName.trim() && args.settings.ownerBio.trim()
           ? {
@@ -658,4 +679,43 @@ export async function pullCloudTranscripts(settings: Settings): Promise<number> 
   }
   if (n) await flushLog();
   return n;
+}
+
+/**
+ * Pulls the Mac's edits down. For every recording we also hold locally, each
+ * synced field takes whichever side edited it more recently. A folder change
+ * from the Mac moves the local files; the cloud objects were already moved by
+ * the server, so nothing is uploaded here. Returns how many changed.
+ */
+export async function reconcileFromCloud(): Promise<number> {
+  if (!isFirebaseConfigured || !isSignedIn()) return 0;
+  const local = await listRecordings();
+  const byId = new Map(local.map((r) => [r.id, r]));
+  let changed = 0;
+  let entries: RemoteEntry[] = [];
+  try {
+    entries = await listRemote();
+  } catch {
+    return 0;
+  }
+  for (const e of entries) {
+    try {
+      const remote = await fetchRemoteMeta(e.jsonPath);
+      const mine = byId.get(remote.id);
+      if (!mine) continue;
+      const merged = mergeNewest(mine, remote);
+      if (JSON.stringify(merged) === JSON.stringify(mine)) continue;
+      let next = merged;
+      if (merged.folder !== mine.folder) {
+        next = await moveToFolder({ ...mine, fieldsUpdatedAt: merged.fieldsUpdatedAt }, merged.folder);
+        next = { ...merged, ...next, folder: merged.folder };
+      }
+      await writeMeta(next);
+      changed++;
+      logEvent(`reconciled from cloud: ${next.base}`);
+    } catch {
+      /* one bad sidecar must not stop the rest */
+    }
+  }
+  return changed;
 }

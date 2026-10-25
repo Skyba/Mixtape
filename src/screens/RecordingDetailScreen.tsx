@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { setLabel } from "../attribution";
 import {
   ActivityIndicator,
   Alert,
@@ -213,9 +214,18 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         ([l, n]) => mayShare || l === letter || n !== name
       )
     );
-    const nextMap = { ...base, [letter]: name };
+    const settings = await getSettings();
+    // Letters that lost the name are cleared from the labels too, so the
+    // legacy map and the provenance never disagree.
+    const kept: Recording = {
+      ...rec,
+      speakerLabels: Object.fromEntries(
+        Object.entries(rec.speakerLabels ?? {}).filter(([l]) => l in base)
+      ),
+    };
+    const next = setLabel(kept, letter, name, "user", settings.ownerName);
+    const nextMap = next.speakerMap ?? { ...base, [letter]: name };
     const nextText = renderTranscript(utterances, rec.speakers, nextMap);
-    const next = { ...rec, speakerMap: nextMap };
     setRec(next);
     setTranscript(nextText);
     await writeTranscript(next, nextText);

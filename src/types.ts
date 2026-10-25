@@ -1,6 +1,19 @@
 export type TranscriptStatus = "none" | "pending" | "processing" | "done" | "error";
 export type UploadStatus = "pending" | "uploaded" | "skipped";
 
+export type LabelSource = "user" | "mac" | "voiceprint" | "claude" | "aai";
+export type SpeakerLabel = { name: string; by: LabelSource; at: string };
+/** The fields that sync both ways between the phone and the Mac. */
+export type SyncedField =
+  | "folder"
+  | "speakers"
+  | "speakerLabels"
+  | "speakerId"
+  | "meIncluded"
+  | "tags"
+  | "private"
+  | "note";
+
 export type Recording = {
   id: string; // stable, never changes (original timestamp)
   base: string; // current filename base (no extension); may change after topic rename
@@ -9,7 +22,32 @@ export type Recording = {
   durationSeconds: number;
   plannedDurationHours: number;
   speakers: string[];
+  // Legacy view: letter -> name only. Kept for every reader that predates
+  // provenance; always derived from speakerLabels when that exists.
   speakerMap?: Record<string, string>; // AAI letter (A/B/…) -> display name
+  /**
+   * Letter -> who it is and who said so. `by` is what makes a label
+   * trustworthy: "user" is Basile confirming on the phone, "mac" is a batch
+   * review on the Mac, "voiceprint" and "claude" are the two automatic
+   * signals, "aai" is AssemblyAI's own identification. A recording is usually
+   * partial — A confirmed, C guessed — and this is the only place that
+   * distinction lives.
+   */
+  speakerLabels?: Record<string, SpeakerLabel>;
+  /** The letter that is the owner. Set when known; absent when undecided. */
+  speakerId?: string;
+  /**
+   * Answered at record time: is the owner one of the voices? "no" is a real
+   * answer (a conference, someone else's meeting), not a missing one. Absent
+   * means never asked. One of the two fields that turn a recording green.
+   */
+  meIncluded?: "yes" | "no";
+  /**
+   * Per-field edit times, ISO. Phone and Mac both edit these; on sync the
+   * newer value wins per field, so a Mac batch cannot silently revert a hand
+   * edit made since, and vice versa.
+   */
+  fieldsUpdatedAt?: Partial<Record<SyncedField, string>>;
   language: string;
   topic?: string;
   transcriptStatus: TranscriptStatus;

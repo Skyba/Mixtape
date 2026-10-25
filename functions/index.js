@@ -17,6 +17,12 @@ const ALL_SCOPES = [
   "read:json",
   "read:audio",
 ];
+// Granted only when asked for by name. A key minted with no scopes stays
+// read-only, so a leaked read key can never rewrite anything.
+const WRITE_SCOPES = ["write:meta"];
+const SYNCED_FIELDS = [
+  "folder", "speakers", "speakerLabels", "speakerId", "meIncluded", "tags", "private", "note",
+];
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 
 // ----- API key management (server-side hashing; raw key shown once) -----
@@ -27,7 +33,7 @@ exports.createApiKey = onCall({ region: "us-central1" }, async (req) => {
   const raw = "mxt_live_" + crypto.randomBytes(24).toString("hex");
   const valid =
     Array.isArray(scopes) && scopes.length
-      ? scopes.filter((s) => ALL_SCOPES.includes(s))
+      ? scopes.filter((s) => ALL_SCOPES.includes(s) || WRITE_SCOPES.includes(s))
       : ALL_SCOPES;
   await admin
     .firestore()
@@ -147,6 +153,16 @@ router.get("/recordings", async (req, res) => {
         note: m.note || undefined,
         place: m.place || undefined,
         inputName: m.inputName || undefined,
+        // Attribution, with provenance. green = folder set and the owner's
+        // presence decided; naming everyone else is optional.
+        speaker_labels: m.speakerLabels || undefined,
+        speaker_id: m.speakerId || undefined,
+        speaker_id_by:
+          (m.speakerId && m.speakerLabels && m.speakerLabels[m.speakerId] &&
+            m.speakerLabels[m.speakerId].by) || "none",
+        me_included: m.meIncluded || undefined,
+        fields_updated_at: m.fieldsUpdatedAt || undefined,
+        green: !!(m.folder && m.folder !== "Inbox" && m.meIncluded),
       });
     } catch {}
   }
@@ -191,6 +207,69 @@ router.get("/meta", requireScope("read:meta"), async (req, res) => {
     res.json(await readJson(pathFor(req.uid, q.folder, q.base, "json")));
   } catch {
     res.status(404).json({ error: "not found" });
+  }
+});
+
+// The Mac's write path. Newest edit wins per field: the caller sends the
+// fields it changed plus fieldsUpdatedAt for each, and a field is applied only
+// when its stamp is newer than ours — so a batch relabel cannot revert a hand
+// edit made on the phone since, and vice versa. A folder change moves the
+// objects inside the bucket; nothing is re-uploaded from anywhere.
+router.patch("/meta", requireScope("write:meta"), async (req, res) => {
+  const q = need(req, res);
+  if (!q) return;
+  const body = req.body || {};
+  const stamps = body.fieldsUpdatedAt || {};
+  const oldBase = `recordings/${req.uid}/${q.folder}/${q.base}`;
+  let meta;
+  try {
+    meta = await readJson(oldBase + ".json");
+  } catch {
+    return res.status(404).json({ error: "not found" });
+  }
+  const mine = meta.fieldsUpdatedAt || {};
+  const applied = [];
+  for (const f of SYNCED_FIELDS) {
+    if (!(f in body)) continue;
+    const t = stamps[f];
+    if (typeof t !== "string") {
+      return res.status(400).json({ error: `fieldsUpdatedAt.${f} required` });
+    }
+    if (mine[f] && mine[f] >= t) continue; // ours is newer: keep it
+    meta[f] = body[f];
+    mine[f] = t;
+    applied.push(f);
+  }
+  meta.fieldsUpdatedAt = mine;
+  if (meta.speakerLabels) {
+    meta.speakerMap = Object.fromEntries(
+      Object.entries(meta.speakerLabels).map(([l, v]) => [l, v && v.name])
+    );
+  }
+  try {
+    const newFolder = String(meta.folder || q.folder);
+    if (applied.includes("folder") && newFolder !== q.folder) {
+      if (!/^[^/\\]{1,80}$/.test(newFolder)) {
+        return res.status(400).json({ error: "bad folder" });
+      }
+      const newBase = `recordings/${req.uid}/${newFolder}/${q.base}`;
+      for (const ext of [".m4a", ".txt", ".aai.json"]) {
+        const src = bkt().file(oldBase + ext);
+        const [exists] = await src.exists();
+        if (exists) await src.copy(bkt().file(newBase + ext));
+      }
+      await bkt().file(newBase + ".json").save(JSON.stringify(meta, null, 2), {
+        contentType: "application/json",
+      });
+      for (const ext of [".m4a", ".txt", ".aai.json", ".json"]) {
+        await bkt().file(oldBase + ext).delete().catch(() => {});
+      }
+    } else {
+      await saveJson(oldBase + ".json", meta);
+    }
+    res.json({ applied, folder: newFolder, base: q.base });
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
   }
 });
 
@@ -449,8 +528,9 @@ function mmss(ms) {
 // Same resolution + rendering the app uses, so cloud .txt is byte-identical.
 function nameForSpeaker(letter, speakers, speakerMap) {
   if (speakerMap && speakerMap[letter]) return speakerMap[letter];
-  const idx = letter.charCodeAt(0) - 65;
-  if (idx >= 0 && idx < (speakers || []).length) return speakers[idx];
+  // Letter order is arbitrary, so the slot entered first is not the voice
+  // labelled A. Handing slots out by position named the wrong people with
+  // total confidence. An unmapped letter stays anonymous.
   return "Speaker " + letter;
 }
 function renderTranscript(utterances, speakers, speakerMap) {
@@ -536,22 +616,26 @@ function speakerIdentification(meta) {
 // Only trust an identification when the transcript actually says someone's
 // name. Measured against the archive: with a name spoken it is exact, without
 // one it returns the wrong person and still reports "success".
+// Does this person's first name actually occur in the transcript? AssemblyAI's
+// content-based identification is exact when someone is addressed by name and
+// confidently wrong when nobody is, so each assignment needs its own evidence.
+function nameSpoken(name, text) {
+  const first = (name || "").trim().split(/\s+/)[0];
+  if (first.length <= 2) return false;
+  return new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
+}
+
 function acceptSpeakerMapping(mapping, text, speakers) {
   if (!mapping) return null;
   const named = (speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
-  const spoken = named.some((n) => {
-    const first = n.trim().split(/\s+/)[0];
-    return (
-      first.length > 2 &&
-      new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text)
-    );
-  });
-  if (!spoken) return null;
   const mayShare = Object.keys(mapping).length > (speakers || []).length;
   const used = new Set();
   const clean = {};
   for (const [letter, name] of Object.entries(mapping)) {
     if (!named.includes(name)) continue;
+    // Previously one spoken name admitted the whole mapping, so a correct
+    // "Erica" dragged in a guessed "Tyler". Evidence is per person now.
+    if (!nameSpoken(name, text)) continue;
     if (!mayShare && used.has(name)) continue;
     used.add(name);
     clean[letter] = name;
@@ -795,9 +879,18 @@ exports.transcriptionWebhook = onRequest(
         utterances.map((u) => u.text).join(" "),
         speakers
       );
-      const speakerMap =
-        identified ||
-        (await inferSpeakerMap(utterances, speakers, process.env.ANTHROPIC_KEY));
+      // Two automatic sources, recorded as such: AssemblyAI's identification
+      // when it had per-person evidence, else Claude's guess. Neither is ever
+      // "verified" — only the owner confirming on the phone or the Mac is.
+      const claudeMap = identified
+        ? null
+        : await inferSpeakerMap(utterances, speakers, process.env.ANTHROPIC_KEY);
+      const speakerMap = identified || claudeMap || null;
+      const labelledAt = new Date().toISOString();
+      const speakerLabels = {};
+      for (const [letter, name] of Object.entries(speakerMap || {})) {
+        speakerLabels[letter] = { name, by: identified ? "aai" : "claude", at: labelledAt };
+      }
       const text = renderTranscript(utterances, speakers, speakerMap);
       const topic = await inferTopic(text, process.env.ANTHROPIC_KEY);
       const audioDurationSec = data.audio_duration || 0;
@@ -807,6 +900,9 @@ exports.transcriptionWebhook = onRequest(
       let meta = await patchMeta({
         transcriptStatus: "done",
         speakerMap: speakerMap,
+        // Re-transcription resets labels: letters can change between runs.
+        speakerLabels,
+        speakerId: null,
         topic: topic,
         aaiTranscriptId: transcriptId,
         audioDurationSec,

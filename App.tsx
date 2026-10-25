@@ -19,9 +19,10 @@ import VoiceEnrollScreen from "./src/screens/VoiceEnrollScreen";
 import { initNotifications } from "./src/notifications";
 import {
   flushPendingUploads,
+  pullCloudTranscripts,
+  reconcileFromCloud,
   retryPendingMerges,
   retryPendingTranscriptions,
-  pullCloudTranscripts,
 } from "./src/recordingFlow";
 import { logEvent, getLogText } from "./src/log";
 import { uploadDebugLog, authReady } from "./src/firebase";
@@ -104,6 +105,9 @@ export default function App() {
       // jobs below all read "signed out" and take their offline path, which
       // re-transcribes on-device what the backend already did in the cloud.
       await authReady();
+      // The Mac may have refiled or relabelled recordings since last launch.
+      // Take its newer edits first, so the jobs below see the current state.
+      await reconcileFromCloud().catch(() => {});
       flushPendingUploads(s);
       retryPendingMerges(s); // recover any live recording whose merge didn't finish
       pullCloudTranscripts(s); // collect transcripts the backend finished while closed
@@ -119,6 +123,7 @@ export default function App() {
       if (next === "active") {
         getSettings().then(async (s) => {
           await authReady();
+          await reconcileFromCloud().catch(() => {});
           flushPendingUploads(s);
           pullCloudTranscripts(s);
           retryPendingTranscriptions(s);

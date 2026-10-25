@@ -171,6 +171,10 @@ export default function RecordScreen() {
   // One line of context for the archive. Editable while recording, because
   // what a conversation turns out to be about is often clear only part way in.
   const [note, setNote] = useState("");
+  // Is the owner one of the voices? Default yes; one tap says no for a
+  // conference or someone else's meeting. Answered here because this is the
+  // one moment it is certainly known. Never gates recording.
+  const [meIn, setMeIn] = useState(true);
   const [durationH, setDurationH] = useState(2);
   const [language, setLanguage] = useState("Auto");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
@@ -1178,6 +1182,7 @@ export default function RecordScreen() {
         place: placeRef.current,
         note,
         inputName: extRef.current?.name,
+        meIncluded: meIn ? "yes" : "no",
       });
       setStatus(
         `Saved: ${rec.base}\nTranscript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
@@ -1272,6 +1277,7 @@ export default function RecordScreen() {
         place: placeRef.current,
         note,
         inputName: extRef.current?.name,
+        meIncluded: meIn ? "yes" : "no",
         transcribeAfterMerge: true,
         provisionalTopic: "untitled",
       });
@@ -1321,6 +1327,7 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         place: placeRef.current,
         note,
         inputName: extRef.current?.name,
+        meIncluded: meIn ? "yes" : "no",
         shareId: liveShareId.current ?? undefined,
       });
       if (liveShareId.current) {
@@ -1617,6 +1624,11 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         }}
       />
 
+      <View style={styles.meRow}>
+        <Text style={styles.meTxt}>I'm one of the speakers</Text>
+        <Switch value={meIn} onValueChange={setMeIn} />
+      </View>
+
       <Text style={styles.label}>What is this?</Text>
       <TextInput
         style={styles.noteInput}
@@ -1822,6 +1834,13 @@ const styles = StyleSheet.create({
   },
   presetGhostTxt: { color: "#7c828a", fontSize: 12 },
   presetSave: { flexDirection: "row", gap: 8, marginTop: 8, alignItems: "center" },
+  meRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 12,
+  },
+  meTxt: { color: "#e5e7eb", fontSize: 14 },
   noteInput: {
     backgroundColor: "#1a1d23",
     borderRadius: 8,

@@ -29,8 +29,10 @@ import {
   uploadRecording,
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
+import { writeMeta } from "../recordings";
 import { iconOf, useFolderIcons } from "../folderIcons";
 import { placeLabel } from "../place";
+import { isGreen, missingForGreen, touch } from "../attribution";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
 import type { RootStackParamList } from "../../App";
@@ -179,6 +181,30 @@ export default function LibraryScreen() {
             load();
           },
         },
+      ]
+    );
+  }
+
+  // The amber dot is the one-tap path. Answering here stamps the field so a
+  // Mac batch that ran earlier cannot overwrite it, and pushes the sidecar so
+  // the Mac sees it on its next pull.
+  async function decideMe(r: Recording, value: "yes" | "no") {
+    const next = touch({ ...r, meIncluded: value }, "meIncluded");
+    await writeMeta(next);
+    if (isFirebaseConfigured && isSignedIn()) {
+      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
+    }
+    load();
+  }
+
+  function askMe(r: Recording) {
+    Alert.alert(
+      "Are you one of the speakers?",
+      r.base,
+      [
+        { text: "Yes, I'm in it", onPress: () => decideMe(r, "yes") },
+        { text: "No, not me", onPress: () => decideMe(r, "no") },
+        { text: "Cancel", style: "cancel" },
       ]
     );
   }
@@ -339,6 +365,7 @@ export default function LibraryScreen() {
           rec={r}
           icon={iconOf(r.folder, icons)}
           onIcon={() => setMoveFor(r)}
+          onAttribution={isGreen(r) ? undefined : () => askMe(r)}
           onPress={() => navigation.navigate("Detail", { rec: r })}
           onDelete={() => remove(r, false)}
           selectMode={selectMode}
@@ -458,6 +485,7 @@ function Row({
   rec,
   icon,
   onIcon,
+  onAttribution,
   onPress,
   onDelete,
   remote,
@@ -468,6 +496,8 @@ function Row({
   rec: Recording;
   icon: string;
   onIcon?: () => void;
+  /** Present only while the recording is not yet green. */
+  onAttribution?: () => void;
   onPress: () => void;
   onDelete?: () => void;
   remote?: boolean;
@@ -513,8 +543,27 @@ function Row({
             {rec.tags.map((t) => `#${t}`).join(" ")}
           </Text>
         ) : null}
+        {!remote && !isGreen(rec) ? (
+          <Text style={styles.amberHint}>
+            Needs: {missingForGreen(rec).join(" · ")}
+          </Text>
+        ) : null}
         <View style={styles.metaRow}>
           {date ? <Text style={styles.rowDate}>{date}</Text> : null}
+          {!remote ? (
+            <TouchableOpacity
+              onPress={onAttribution}
+              disabled={!onAttribution}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <View
+                style={[
+                  styles.dot,
+                  { backgroundColor: isGreen(rec) ? "#4ade80" : "#f59e0b" },
+                ]}
+              />
+            </TouchableOpacity>
+          ) : null}
           <Text style={styles.rowMeta}>{fmtDur(rec.durationSeconds)}</Text>
           {placeLabel(rec.place) ? (
             <Text style={styles.rowMeta}>{placeLabel(rec.place)}</Text>
@@ -644,6 +693,8 @@ const styles = StyleSheet.create({
   },
   playOn: { backgroundColor: "#3b82f6" },
   folderIcon: { fontSize: 22 },
+  dot: { width: 10, height: 10, borderRadius: 5, marginRight: 8 },
+  amberHint: { color: "#f59e0b", fontSize: 11, marginTop: 2 },
   moveBackdrop: {
     flex: 1,
     backgroundColor: "#000000bb",

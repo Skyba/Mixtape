@@ -26,7 +26,12 @@ async function ensureDir(dir: string): Promise<void> {
 
 /** Fill in any missing fields so older/partial metadata can't crash the UI. */
 export function normalizeRecording(raw: any): Recording {
+  // Spread first, then default the fields that need defaults. This used to
+  // enumerate fields, and anything not on the list — tags, private, note,
+  // place, mergedInCloud, inputName — was dropped on every read, then written
+  // back without by the next writeMeta. A sidecar must round-trip intact.
   return {
+    ...raw,
     id: raw.id ?? raw.recordedAt ?? String(raw.base ?? "unknown"),
     base: raw.base ?? "untitled",
     folder: raw.folder ?? INBOX,
