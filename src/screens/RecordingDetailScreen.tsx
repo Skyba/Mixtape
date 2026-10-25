@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { setLabel } from "../attribution";
+import { setLabel, touch } from "../attribution";
+import { enqueue, replayOutbox } from "../outbox";
 import {
   ActivityIndicator,
   Alert,
@@ -47,6 +48,10 @@ import {
   shareUrl,
 } from "../firebase";
 import { transcribeExisting } from "../recordingFlow";
+import { isCanonical, deleteRemote } from "../cloud";
+import { remoteCanonicalPath } from "../firebase";
+import { pushMeta } from "../outbox";
+import { isLayoutV2, idDir } from "../recordings";
 import {
   summarize,
   renderTranscript,
@@ -114,6 +119,14 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   async function downloadFromCloud() {
     setBusy("Downloading…");
+    if (await isCanonical()) {
+      await FileSystem.makeDirectoryAsync(idDir(rec), { intermediates: true });
+      await downloadRemoteFile(remoteCanonicalPath(rec.id, "audio.m4a"), audioPath(rec));
+      await writeMeta(rec);
+      setIsRemote(false);
+      setBusy("");
+      return;
+    }
     await FileSystem.makeDirectoryAsync(`${ROOT}${rec.folder}/`, {
       intermediates: true,
     });
@@ -215,27 +228,29 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       )
     );
     const settings = await getSettings();
-    // Letters that lost the name are cleared from the labels too, so the
-    // legacy map and the provenance never disagree.
-    const kept: Recording = {
-      ...rec,
-      speakerLabels: Object.fromEntries(
-        Object.entries(rec.speakerLabels ?? {}).filter(([l]) => l in base)
-      ),
-    };
-    const next = setLabel(kept, letter, name, "user", settings.ownerName);
+    // setLabel carries a legacy map forward as labels of unknown provenance
+    // and only ever changes the one letter; the duplicate-name rule above is
+    // re-checked by the server against the merged state and refused, not
+    // silently dropped, if it would give one name to two letters.
+    const next = setLabel(rec, letter, name, "user", settings.ownerName);
     const nextMap = next.speakerMap ?? { ...base, [letter]: name };
     const nextText = renderTranscript(utterances, rec.speakers, nextMap);
     setRec(next);
     setTranscript(nextText);
     await writeTranscript(next, nextText);
+    // Queue first, then write locally, then send: the per-letter patch names
+    // the transcript revision it was made against so a re-run since refuses it.
+    const stamps = next.fieldsUpdatedAt ?? {};
+    const patch: Record<string, unknown> = { [`speakerLabels.${letter}`]: next.speakerLabels?.[letter] ?? null };
+    if (next.speakerId !== rec.speakerId) patch.speakerId = next.speakerId ?? null;
+    if (next.meIncluded !== rec.meIncluded) patch.meIncluded = next.meIncluded;
+    await enqueue(next, patch, stamps, rec.transcriptRevision ?? 0);
     await writeMeta(next);
     if (isFirebaseConfigured && isSignedIn()) {
-      try {
-        await uploadRecording(next, { skipAudio: !!next.mergedInCloud });
-      } catch {
-        /* best-effort; Sync will retry */
-      }
+      // Legacy: the re-rendered transcript text goes up as a file. Canonical:
+      // the server renders from the labels; nothing but the patch is sent.
+      if (!(await isCanonical())) uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
+      replayOutbox().catch(() => {});
     }
   }
 
@@ -254,7 +269,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   async function doTranscribe(target: Recording = rec) {
     const settings = await getSettings();
-    if (!settings.assemblyAiKey) {
+    if (!settings.assemblyAiKey && !(await isCanonical())) {
       Alert.alert("Add your AssemblyAI key in Settings first");
       return;
     }
@@ -273,6 +288,17 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     if (folder === rec.folder) return;
     setBusy("Moving…");
     const from = rec;
+    if (await isCanonical()) {
+      // A field, stamped, through the outbox. Tags belong to the folder's
+      // vocabulary, so a move clears or replaces them.
+      const moved = touch({ ...rec, folder, ...(p ? { private: p.private, tags: p.tags } : {}) }, "folder", ...(p ? ["private", "tags"] : []));
+      await writeMeta(moved);
+      await rememberFolder(folder);
+      setRec(moved);
+      await pushMeta(moved, { folder, ...(p ? { private: p.private, tags: p.tags } : {}) });
+      setBusy("");
+      return;
+    }
     // The cloud copy can hold files this phone never had — a transcript
     // repaired server-side, for instance. The move re-uploads what's local and
     // deletes the old path, so anything only in the cloud has to come down
@@ -310,12 +336,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
    */
   async function changeLanguage(language: string) {
     if (language === rec.language) return;
-    const next = { ...rec, language };
+    const next = touch({ ...rec, language }, "language");
     setRec(next);
     await writeMeta(next);
-    if (isFirebaseConfigured && isSignedIn()) {
-      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
-    }
+    await pushMeta(next, { language });
     if (rec.transcriptStatus === "done") {
       Alert.alert(
         "Language changed",
@@ -333,12 +357,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   /** Filing for the archive. The folder is a real move; the rest is metadata. */
   async function savePlacement(p: Placement) {
     if (p.folder !== rec.folder) return changeFolder(p.folder, p);
-    const next = { ...rec, private: p.private, tags: p.tags };
+    const next = touch({ ...rec, private: p.private, tags: p.tags }, "private", "tags");
     setRec(next);
     await writeMeta(next);
-    if (isFirebaseConfigured && isSignedIn()) {
-      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
-    }
+    await pushMeta(next, { private: p.private, tags: p.tags });
   }
 
   /**
@@ -362,7 +384,16 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
             .filter(([, name]) => speakers.includes(name as string))
         )
       : undefined;
-    const next: Recording = { ...rec, speakers, speakerMap: nextMap };
+    let next: Recording = touch({ ...rec, speakers, speakerMap: nextMap }, "speakers");
+    const patch: Record<string, unknown> = { speakers };
+    // A renamed slot renames the letter(s) carrying the old name, as a user
+    // label on each, so provenance follows the edit rather than being lost.
+    for (const [l, n] of Object.entries(nextMap ?? {})) {
+      if (rec.speakerMap?.[l] !== n) {
+        next = setLabel(next, l, n as string, "user", (await getSettings()).ownerName);
+        patch[`speakerLabels.${l}`] = next.speakerLabels?.[l] ?? null;
+      }
+    }
     setRec(next);
     await writeMeta(next);
     await rememberSpeakers(speakers.filter((s) => !/^Speaker \d+$/.test(s)));
@@ -372,9 +403,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       setTranscript(text);
       await writeTranscript(next, text);
     }
-    if (isFirebaseConfigured && isSignedIn()) {
-      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
-    }
+    await pushMeta(next, patch, rec.transcriptRevision ?? 0);
   }
 
   function confirmDelete() {
@@ -384,8 +413,11 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         text: "Delete",
         style: "destructive",
         onPress: async () => {
+          if (isFirebaseConfigured && isSignedIn()) {
+            if (await isCanonical()) await deleteRemote(rec.id);
+            else await deleteRemoteRecording(rec).catch(() => {});
+          }
           await deleteRecording(rec);
-          if (isFirebaseConfigured) await deleteRemoteRecording(rec);
           navigation.goBack();
         },
       },

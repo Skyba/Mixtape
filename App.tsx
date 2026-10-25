@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
 import { registerUploadTask } from "./src/background";
+import { replayOutbox } from "./src/outbox";
+import { isCanonical, startListener, pullTranscripts, flushUploads } from "./src/cloud";
+import { runLocalMigration } from "./src/localMigration";
+import { canUploadNow } from "./src/network";
 import { AppState } from "react-native";
 import * as Font from "expo-font";
 import { StatusBar } from "expo-status-bar";
@@ -105,8 +109,22 @@ export default function App() {
       // jobs below all read "signed out" and take their offline path, which
       // re-transcribes on-device what the backend already did in the cloud.
       await authReady();
-      // The Mac may have refiled or relabelled recordings since last launch.
-      // Take its newer edits first, so the jobs below see the current state.
+      if (await isCanonical()) {
+        // Storage migration done on the server: move local files to the
+        // id-keyed layout first (journaled; nothing else runs until it is
+        // complete), then sync through the document listener.
+        const ok = await runLocalMigration().catch((e) => { logEvent(`local migration failed ${String(e?.message ?? e)}`); return false; });
+        if (!ok) return;
+        startListener(() => {});
+        await flushUploads(await canUploadNow(s)).catch(() => {});
+        await replayOutbox().catch(() => {});
+        retryPendingMerges(s);
+        pullTranscripts();
+        try { await uploadDebugLog(await getLogText()); } catch {}
+        return;
+      }
+      // Edits made offline go first, then the Mac's newer edits come down.
+      await replayOutbox().catch(() => {});
       await reconcileFromCloud().catch(() => {});
       flushPendingUploads(s);
       retryPendingMerges(s); // recover any live recording whose merge didn't finish
@@ -123,6 +141,15 @@ export default function App() {
       if (next === "active") {
         getSettings().then(async (s) => {
           await authReady();
+          if (await isCanonical()) {
+            if (!(await runLocalMigration().catch(() => false))) return;
+            startListener(() => {});
+            await flushUploads(await canUploadNow(s)).catch(() => {});
+            await replayOutbox().catch(() => {});
+            pullTranscripts();
+            return;
+          }
+          await replayOutbox().catch(() => {});
           await reconcileFromCloud().catch(() => {});
           flushPendingUploads(s);
           pullCloudTranscripts(s);

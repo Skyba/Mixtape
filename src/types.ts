@@ -6,8 +6,9 @@ export type UploadStatus = "pending" | "uploaded" | "skipped";
  * "user" is any human — phone or Mac — "ai-review" is a dedicated review pass
  * (the Mac batch, voiceprint), "channel" is hardware separation.
  */
-export type LabelSource = "user" | "ai-review" | "channel" | "voiceprint" | "claude" | "aai";
-export type SpeakerLabel = { name: string; by: LabelSource; at: string };
+export type LabelSource = "user" | "ai-review" | "channel" | "voiceprint" | "claude" | "aai" | "none";
+/** `at` is null for a pre-provenance label: no one knows when it was made. */
+export type SpeakerLabel = { name: string; by: LabelSource; at: string | null };
 /** The fields that sync both ways between the phone and the Mac. */
 export type SyncedField =
   | "folder"
@@ -52,7 +53,19 @@ export type Recording = {
    * newer value wins per field, so a Mac batch cannot silently revert a hand
    * edit made since, and vice versa.
    */
-  fieldsUpdatedAt?: Partial<Record<SyncedField, string>>;
+  fieldsUpdatedAt?: Record<string, string>;
+  /**
+   * Bumped by the server each time a transcription is submitted. A letter
+   * edit names the revision it was made against and is refused if the
+   * recording has been re-run since — the letters may now be other voices.
+   */
+  transcriptRevision?: number;
+  /** v2 layout: which revision's transcript files are installed locally. */
+  transcriptLocalRev?: number;
+  /** v2: the server document exists (createRecording acknowledged). */
+  remoteCreated?: boolean;
+  /** v2: an audio object with other bytes already owns this id. */
+  audioConflict?: boolean;
   language: string;
   topic?: string;
   transcriptStatus: TranscriptStatus;

@@ -40,6 +40,8 @@ import {
   uploadDebugLog,
 } from "./firebase";
 import { notify } from "./notifications";
+import { isCanonical, createRemote, uploadAudioOnce, retranscribeRemote } from "./cloud";
+import { remoteCanonicalPath } from "./firebase";
 import { logEvent, getLogText } from "./log";
 import * as FileSystem from "expo-file-system/legacy";
 
@@ -151,12 +153,32 @@ async function tryUpload(
   if (!isFirebaseConfigured) return { ...r, uploadStatus: "skipped" };
   if (!isSignedIn()) return { ...r, uploadStatus: "pending" };
   if (!(await canUploadNow(settings))) return { ...r, uploadStatus: "pending" };
+  if (await isCanonical()) {
+    // Document first (idempotent), then the audio once. Nothing else goes up:
+    // the server owns metadata and transcripts.
+    try {
+      if (!r.remoteCreated) await createRemote(r, `create:${r.id}`);
+      r = { ...r, remoteCreated: true };
+      if (opts?.skipAudio) return { ...r, uploadStatus: "uploaded" };
+      const res = await uploadAudioOnce(r);
+      if (res === "conflict") return { ...r, uploadStatus: "skipped", audioConflict: true };
+      return { ...r, uploadStatus: "uploaded", mergedInCloud: true };
+    } catch (e: any) {
+      logEvent(`upload (canonical) ${r.id}: ${String(e?.message ?? e)}`);
+      return { ...r, uploadStatus: "pending" };
+    }
+  }
   try {
     await uploadRecording(r, opts);
     return { ...r, uploadStatus: "uploaded" };
   } catch {
     return { ...r, uploadStatus: "pending" };
   }
+}
+
+/** Where a merge of live segments lands: the recording's own audio object. */
+async function mergeDest(r: Recording): Promise<string> {
+  return (await isCanonical()) ? remoteCanonicalPath(r.id, "audio.m4a") : remoteObjectPath(r, "m4a");
 }
 
 export type StopArgs = {
@@ -312,6 +334,14 @@ export async function transcribeExisting(
   rec: Recording,
   settings: Settings
 ): Promise<Recording> {
+  if (await isCanonical()) {
+    // The server re-runs it against the audio it holds; the listener brings
+    // the result down. Nothing is transcribed on the phone.
+    await retranscribeRemote(rec.id);
+    const r: Recording = { ...rec, transcriptStatus: "pending" };
+    await writeMeta(r);
+    return r;
+  }
   activeTranscriptions.add(rec.id);
   const oldBase = rec.base;
   try {
@@ -473,12 +503,20 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
         remote.push(p);
       }
       logEvent(`uploaded ${remote.length} segments, merging…`);
+      if (await isCanonical()) {
+        // The document must exist before its audio object: the server's
+        // audio-finalize handler adopts a stub otherwise, but the fields set
+        // at record time would only arrive with the create.
+        await createRemote(rec, `create:${rec.id}`);
+        rec = { ...rec, remoteCreated: true };
+        await writeMeta(rec);
+      }
       // Merge straight to the recording's own object. The merged audio is then
       // complete in the cloud the moment the call returns, so transcription no
       // longer waits on the round trip back down to this phone — that download
       // is only for local playback, and failing it used to strand the whole
       // recording at transcriptStatus "none".
-      await mergeAudioSegments(remote, remoteObjectPath(rec, "m4a"));
+      await mergeAudioSegments(remote, await mergeDest(rec));
       mergedToCloud = true;
       rec = { ...rec, mergePending: undefined, mergedInCloud: true };
       if (args.transcribeAfterMerge && rec.transcriptStatus === "none") {
@@ -486,7 +524,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       }
       await writeMeta(rec);
       const local = `${FileSystem.cacheDirectory}merged_${id}.m4a`;
-      if (await downloadRemoteFile(remoteObjectPath(rec, "m4a"), local)) {
+      if (await downloadRemoteFile(await mergeDest(rec), local)) {
         await FileSystem.copyAsync({ from: local, to: audioPath(rec) });
         // Merged and saved — the pieces are no longer the only copy, so don't
         // leave them filling the cache and posing as unsaved audio.
@@ -527,8 +565,12 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
       const remote = Array.from({ length: mp.count }, (_, i) =>
         liveSegmentPath(mp.id, i)
       );
+      if ((await isCanonical()) && !r.remoteCreated) {
+        await createRemote(r, `create:${r.id}`);
+        await writeMeta({ ...r, remoteCreated: true });
+      }
       try {
-        await mergeAudioSegments(remote, remoteObjectPath(r, "m4a"));
+        await mergeAudioSegments(remote, await mergeDest(r));
       } catch (e) {
         // The upload can now be interrupted (the recording is saved before it
         // runs), leaving gaps the merge chokes on. Push the local copies again.
@@ -538,7 +580,7 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
           const info = await FileSystem.getInfoAsync(mp.segments[i]);
           if (info.exists) await uploadToPath(mp.segments[i], liveSegmentPath(mp.id, i));
         }
-        await mergeAudioSegments(remote, remoteObjectPath(r, "m4a"));
+        await mergeAudioSegments(remote, await mergeDest(r));
       }
       // The cloud audio is complete now, so mark it transcribable before
       // attempting the local copy — the download is for playback only.
@@ -555,7 +597,7 @@ export async function retryPendingMerges(settings: Settings): Promise<number> {
       await writeMeta(next);
       fixed++;
       const local = `${FileSystem.cacheDirectory}merged_${mp.id}.m4a`;
-      if (await downloadRemoteFile(remoteObjectPath(r, "m4a"), local)) {
+      if (await downloadRemoteFile(await mergeDest(r), local)) {
         await FileSystem.copyAsync({ from: local, to: audioPath(r) });
       }
       logEvent(`recovered merge for ${r.base}`);
@@ -613,6 +655,7 @@ export async function retryPendingTranscriptions(
 
 export async function flushPendingUploads(settings: Settings): Promise<number> {
   if (!isFirebaseConfigured || !isSignedIn()) return 0;
+  if (await isCanonical()) return 0; // cloud.flushUploads owns this now
   if (!(await canUploadNow(settings))) return 0;
   const all = await listRecordings();
   let n = 0;
@@ -640,6 +683,7 @@ export async function flushPendingUploads(settings: Settings): Promise<number> {
  */
 export async function pullCloudTranscripts(settings: Settings): Promise<number> {
   if (!isFirebaseConfigured || !isSignedIn()) return 0;
+  if (await isCanonical()) return 0; // cloud.pullTranscripts owns this now
   const all = await listRecordings();
   let n = 0;
   for (const r of all.filter(
@@ -652,11 +696,15 @@ export async function pullCloudTranscripts(settings: Settings): Promise<number> 
         await downloadRemoteFile(remoteObjectPath(r, "aai.json"), aaiJsonPath(r));
         await writeMeta({
           ...r,
+          // The run's labels, owner reset and revision come in through the
+          // merge: stamped with transcribedAt, they beat labels made against
+          // the previous run and lose to anything the owner set since. First,
+          // so the explicit fields below keep precedence.
+          ...mergeNewest(r, remote, { serverWinsTies: true }),
           transcriptStatus: "done",
           // A cap-stopped take can save 0 locally; the server backfills the
           // true duration from AssemblyAI — bring it down with the transcript.
           durationSeconds: r.durationSeconds || remote.durationSeconds || 0,
-          speakerMap: remote.speakerMap ?? r.speakerMap,
           topic: remote.topic ?? r.topic,
           aaiTranscriptId: remote.aaiTranscriptId ?? r.aaiTranscriptId,
           audioDurationSec: remote.audioDurationSec ?? r.audioDurationSec,
@@ -689,6 +737,7 @@ export async function pullCloudTranscripts(settings: Settings): Promise<number> 
  */
 export async function reconcileFromCloud(): Promise<number> {
   if (!isFirebaseConfigured || !isSignedIn()) return 0;
+  if (await isCanonical()) return 0; // the listener owns this now
   const local = await listRecordings();
   const byId = new Map(local.map((r) => [r.id, r]));
   let changed = 0;
@@ -702,17 +751,27 @@ export async function reconcileFromCloud(): Promise<number> {
     try {
       const remote = await fetchRemoteMeta(e.jsonPath);
       const mine = byId.get(remote.id);
-      if (!mine) continue;
-      const merged = mergeNewest(mine, remote);
-      // CONTAINMENT: a folder change from the cloud is recorded in metadata
-      // but the local files are not moved. moveToFolder deletes the source
-      // sidecar before writing the destination one, so a crash mid-move makes
-      // the recording vanish from the library; and the earlier version here
-      // spread the move result over the merge, discarding merged values while
-      // keeping their newer stamps, which no later sync could repair. Files
-      // follow the folder again once there is a crash-safe move.
-      const next: Recording = { ...merged, folder: mine.folder };
+      if (!mine) {
+        // Known to the cloud, absent here: a reinstall or a cleared app. A
+        // local entry with no audio is still a recording the library can
+        // show, label and re-download; without it the archive and the phone
+        // silently disagree about what exists.
+        await writeMeta({ ...remote, uploadStatus: "uploaded", mergedInCloud: true });
+        changed++;
+        logEvent(`reconcile: restored entry for ${remote.base}`);
+        continue;
+      }
+      // The server's copy is the authority on a tie, so both sides converge.
+      const merged = mergeNewest(mine, remote, { serverWinsTies: true });
+      // CONTAINMENT: a folder change is noted but local files are not moved
+      // yet (see commit a3d9360). Keep OUR folder and OUR folder stamp
+      // together, or the old value would carry the new stamp and no later
+      // sync could repair it.
+      let next: Recording = merged;
       if (merged.folder !== mine.folder) {
+        next = { ...merged, folder: mine.folder,
+          fieldsUpdatedAt: { ...(merged.fieldsUpdatedAt ?? {}), folder: mine.fieldsUpdatedAt?.folder ?? "" } };
+        if (!next.fieldsUpdatedAt!.folder) delete next.fieldsUpdatedAt!.folder;
         logEvent(`reconcile: cloud folder ${merged.folder} for ${mine.base} noted, local move deferred`);
       }
       if (JSON.stringify(next) === JSON.stringify(mine)) continue;

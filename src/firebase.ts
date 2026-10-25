@@ -155,6 +155,11 @@ function db(): Firestore {
 function remotePath(r: Recording, ext: string): string {
   return `recordings/${currentUid()}/${r.folder}/${r.base}.${ext}`;
 }
+/** Canonical blob path: rec2/{uid}/{id}/{name}. */
+export function remoteCanonicalPath(id: string, name: string): string {
+  return `rec2/${currentUid()}/${id}/${name}`;
+}
+export { db, currentUid, ensureSignedIn };
 
 /** uid-namespaced cloud path for a recording's file (for downloads). */
 export function remoteObjectPath(r: Recording, ext: string): string {
@@ -184,6 +189,14 @@ async function putFile(localUri: string, dest: string, contentType: string) {
     throw new Error(`upload ${res.status} ${String(res.body).slice(0, 120)}`);
   }
   logEvent(`upload ok ${dest.split("/").pop()} size=${info.size ?? 0}`);
+}
+
+/**
+ * Uploads to a create-only destination (the Storage rules refuse an
+ * overwrite, which surfaces as a 403). Same streaming path as putFile.
+ */
+export async function putFileCreateOnly(localUri: string, dest: string, contentType: string): Promise<void> {
+  await putFile(localUri, dest, contentType);
 }
 
 export async function uploadRecording(
@@ -380,6 +393,14 @@ export async function mergeAudioSegments(
   });
   const res: any = await fn({ segments, dest });
   return res.data.path as string;
+}
+
+/** Calls a callable Cloud Function as the signed-in user. */
+export async function callFunction<T = any>(name: string, data: unknown, timeoutMs = 30000): Promise<T> {
+  await ensureSignedIn();
+  const fn = httpsCallable(getFunctions(app(), "us-central1"), name, { timeout: timeoutMs });
+  const res: any = await fn(data);
+  return res.data as T;
 }
 
 export async function uploadDebugLog(text: string): Promise<void> {

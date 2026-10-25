@@ -5,10 +5,10 @@ const AAI = "https://api.assemblyai.com/v2";
 // Fields a client may change after creation (phone outbox, Mac PATCH).
 const CLIENT_FIELDS = [
   "folder", "speakers", "speakerLabels", "speakerId", "meIncluded", "tags", "private", "note",
-  "topic", "place", "inputName",
+  "topic", "place", "inputName", "language", "shareId", "base",
 ];
 // Fields set once at creation and never patched.
-const CREATE_ONLY_FIELDS = ["base", "recordedAt", "durationSeconds", "language", "owner", "shareId", "mergedInCloud"];
+const CREATE_ONLY_FIELDS = ["recordedAt", "durationSeconds", "owner", "mergedInCloud"];
 const SYNCED_FIELDS = CLIENT_FIELDS;
 
 
@@ -69,7 +69,7 @@ function canonStamp(t) {
 // these straight into paths and .map() calls, so a wrong type here is a crash
 // there, after the sidecar is already saved.
 function validField(f, v) {
-  if (v === null) return f === "note" || f === "speakerId" || f === "meIncluded";
+  if (v === null) return ["note", "speakerId", "meIncluded", "shareId", "topic", "place", "inputName"].includes(f);
   switch (f) {
     case "folder": return typeof v === "string" && /^(?!\.)(?!_)[^/\\]{1,80}$/.test(v) && v !== "..";
     case "speakers": return Array.isArray(v) && v.every((x) => typeof x === "string");
@@ -78,6 +78,12 @@ function validField(f, v) {
     case "note": return typeof v === "string" && v.length <= 2000;
     case "speakerId": return typeof v === "string" && /^[A-Z]$/.test(v);
     case "meIncluded": return v === "yes" || v === "no";
+    case "topic": return typeof v === "string" && v.length <= 200;
+    case "base": return typeof v === "string" && v.length <= 200 && !/[/\\]/.test(v);
+    case "language": return typeof v === "string" && v.length <= 40;
+    case "shareId": return typeof v === "string" && /^[A-Za-z0-9]{1,40}$/.test(v);
+    case "place": return typeof v === "object" && typeof v.lat === "number" && typeof v.lon === "number";
+    case "inputName": return typeof v === "string" && v.length <= 120;
     case "speakerLabels": return true; // handled per letter in applyPatch
     default: return false;
   }

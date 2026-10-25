@@ -25,15 +25,18 @@ import {
   subscribeAuth,
   listRemote,
   fetchRemoteMeta,
-  remoteObjectPath,
   deleteRemoteRecording,
   uploadRecording,
 } from "../firebase";
 import { flushPendingUploads, retryPendingMerges } from "../recordingFlow";
 import { writeMeta } from "../recordings";
+import { isCanonical, deleteRemote, flushUploads } from "../cloud";
+import { canUploadNow } from "../network";
+import { pushMeta } from "../outbox";
 import { iconOf, useFolderIcons } from "../folderIcons";
 import { placeLabel } from "../place";
-import { isGreen, mergeNewest, missingForGreen, touch } from "../attribution";
+import { isGreen, missingForGreen, touch } from "../attribution";
+import { enqueue, replayOutbox } from "../outbox";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
 import type { RootStackParamList } from "../../App";
@@ -100,7 +103,7 @@ export default function LibraryScreen() {
     }
     setMsg("Syncing…");
     const s = await getSettings();
-    const n = await flushPendingUploads(s);
+    const n = (await isCanonical()) ? await flushUploads(await canUploadNow(s)) : await flushPendingUploads(s);
     const merged = await retryPendingMerges(s);
     setMsg(
       `Uploaded ${n} pending` + (merged ? ` · recovered ${merged} audio` : "")
@@ -122,10 +125,12 @@ export default function LibraryScreen() {
           onPress: async () => {
             setMsg("Deleting…");
             try {
-              if (!isRemoteOnly) await deleteRecording(rec);
               if (isFirebaseConfigured && isSignedIn()) {
-                await deleteRemoteRecording(rec).catch(() => {});
+                // Server first under canonical: the tombstone is the record.
+                if (await isCanonical()) await deleteRemote(rec.id);
+                else await deleteRemoteRecording(rec).catch(() => {});
               }
+              if (!isRemoteOnly) await deleteRecording(rec);
               setMsg("Deleted.");
             } catch (e: any) {
               setMsg("Delete failed: " + String(e?.message ?? e));
@@ -171,10 +176,11 @@ export default function LibraryScreen() {
             for (const r of targets) {
               const isRemoteOnly = !local.some((l) => l.id === r.id);
               try {
-                if (!isRemoteOnly) await deleteRecording(r);
                 if (isFirebaseConfigured && isSignedIn()) {
-                  await deleteRemoteRecording(r).catch(() => {});
+                  if (await isCanonical()) await deleteRemote(r.id);
+                  else await deleteRemoteRecording(r).catch(() => {});
                 }
+                if (!isRemoteOnly) await deleteRecording(r);
               } catch {}
             }
             setMsg(`Deleted ${targets.length}.`);
@@ -190,33 +196,18 @@ export default function LibraryScreen() {
   // Mac batch that ran earlier cannot overwrite it, and pushes the sidecar so
   // the Mac sees it on its next pull.
   async function decideMe(r: Recording, value: "yes" | "no") {
+    // Persist the edit before anything else: a crash between this tap and
+    // the server's answer must not lose it. Then show it, then send it. The
+    // server returns the merged sidecar and replayOutbox writes that back.
     let next = touch({ ...r, meIncluded: value }, "meIncluded");
-    if (value === "no") next = { ...next, speakerId: undefined };
-    if (isFirebaseConfigured && isSignedIn()) {
-      // Uploading the local sidecar verbatim would push every field past the
-      // newest-wins rule, and could put a stale "pending" back over a cloud
-      // "done" — which re-queues a paid transcription. Take the cloud copy's
-      // newer fields first, and never regress server-owned job state.
-      try {
-        const remote = await fetchRemoteMeta(remoteObjectPath(next, "json"));
-        next = mergeNewest(next, remote);
-        if (remote.transcriptStatus === "done" || remote.transcriptStatus === "processing") {
-          next = {
-            ...next,
-            transcriptStatus: remote.transcriptStatus,
-            speakerMap: next.speakerMap ?? remote.speakerMap,
-            aaiTranscriptId: remote.aaiTranscriptId ?? next.aaiTranscriptId,
-          };
-        }
-      } catch {
-        /* no cloud copy yet: the local one is the only truth */
-      }
-    }
+    if (value === "no" && next.speakerId) next = touch({ ...next, speakerId: undefined }, "speakerId");
+    const stamps = next.fieldsUpdatedAt ?? {};
+    const patch: Record<string, unknown> = { meIncluded: value };
+    if (value === "no" && r.speakerId) patch.speakerId = null;
+    await enqueue(next, patch, stamps);
     await writeMeta(next);
-    if (isFirebaseConfigured && isSignedIn()) {
-      await uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
-    }
     load();
+    replayOutbox().then(() => load()).catch(() => {});
   }
 
   function askMe(r: Recording) {
@@ -240,18 +231,27 @@ export default function LibraryScreen() {
     }
     setMsg("Moving…");
     try {
-      const moved = await moveToFolder(r, f);
-      if (isFirebaseConfigured && isSignedIn()) {
-        await deleteRemoteRecording(r).catch(() => {});
-        await uploadRecording(moved, {
-          skipAudio: !!moved.mergedInCloud,
-        }).catch(() => {});
-      }
+      const moved = await moveFolderSynced(r, f);
       setMsg(`Moved to ${f}.`);
     } catch (e: any) {
       setMsg("Move failed: " + String(e?.message ?? e));
     }
     load();
+  }
+
+  // A folder change: under canonical a stamped field through the outbox,
+  // under legacy the old copy-and-re-upload.
+  async function moveFolderSynced(r: Recording, f: string): Promise<Recording> {
+    const moved = touch(await moveToFolder(r, f), "folder");
+    await writeMeta(moved);
+    if (isFirebaseConfigured && isSignedIn()) {
+      if (await isCanonical()) await pushMeta(moved, { folder: f });
+      else {
+        await deleteRemoteRecording(r).catch(() => {});
+        await uploadRecording(moved, { skipAudio: !!moved.mergedInCloud }).catch(() => {});
+      }
+    }
+    return moved;
   }
 
   function moveSelected() {
@@ -274,11 +274,7 @@ export default function LibraryScreen() {
             for (const r of localTargets) {
               try {
                 if (r.folder === f) continue;
-                const moved = await moveToFolder(r, f);
-                if (isFirebaseConfigured && isSignedIn()) {
-                  await deleteRemoteRecording(r).catch(() => {});
-                  await uploadRecording(moved, { skipAudio: !!moved.mergedInCloud }).catch(() => {});
-                }
+                await moveFolderSynced(r, f);
               } catch {}
             }
             setMsg(`Moved ${localTargets.length}.`);
