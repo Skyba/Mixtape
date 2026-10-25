@@ -24,7 +24,8 @@ const OPS_KEPT = 50;
 
 // frozen: admitted legacy jobs may still finish; sealed: nothing legacy is
 // admitted at all (the migrator copies under sealed); canonical: cut over.
-const PHASES = ["legacy", "frozen", "sealed", "canonical"];
+// rolling-back: the migrator is deleting its own copies; nothing is admitted.
+const PHASES = ["legacy", "frozen", "sealed", "rolling-back", "canonical"];
 
 class CanonError extends Error {
   constructor(code, message, extra) { super(message); this.code = code; this.extra = extra || {}; }

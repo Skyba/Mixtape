@@ -109,6 +109,13 @@ test("phase gate: nothing mutates outside canonical", async () => {
   await assert.rejects(c.createRecording(UID, { id: ID }), (e) => e.code === "unavailable");
   await db.collection("config").doc("migration").set({ phase: "sealed" });
   await assert.rejects(c.createRecording(UID, { id: ID }), (e) => e.code === "unavailable");
+  await db.collection("config").doc("migration").set({ phase: "rolling-back" });
+  await assert.rejects(c.createRecording(UID, { id: ID }), (e) => e.code === "unavailable");
+  await db.collection("config").doc("migration").set({ phase: "garbage" });
+  assert.equal(await c.readPhase(), "legacy", "unknown phase values read as legacy");
+  const { _inflight } = require("../index.js");
+  await db.collection("config").doc("migration").set({ phase: "rolling-back" });
+  assert.equal(await _inflight.admit("patch", "x"), null, "nothing legacy admitted while rolling back");
   assert.deepEqual(await c.sweepAll(), { skipped: true });
 });
 
