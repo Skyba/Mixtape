@@ -356,6 +356,7 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
       // Copy everything, write the new sidecar, confirm it exists — and only
       // then remove the old objects. At no point is there a moment with no
       // sidecar for this recording.
+      if ((await phase()) !== "legacy") return res.status(503).json({ error: "migration in progress" });
       for (const ext of [".m4a", ".txt", ".aai.json"]) {
         const src = bkt().file(oldBase + ext);
         const [exists] = await src.exists();
@@ -366,6 +367,7 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
       });
       const [written] = await bkt().file(newBase + ".json").exists();
       if (!written) return res.status(500).json({ error: "move did not land; nothing deleted" });
+      if ((await phase()) !== "legacy") return res.status(503).json({ error: "migration began mid-move; copies left in place, nothing deleted" });
       for (const ext of [".m4a", ".txt", ".aai.json", ".json"]) {
         await bkt().file(oldBase + ext).delete().catch(() => {});
       }
@@ -515,7 +517,7 @@ async function pooled(items, limit, fn) {
 }
 
 exports.mergeAudio = onCall(
-  { region: "us-central1", memory: "4GiB", timeoutSeconds: 540 },
+  { region: "us-central1", memory: "4GiB", timeoutSeconds: 540, secrets: TRANSCRIBE_SECRETS },
   async (req) => {
     const uid = req.auth && req.auth.uid;
     if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
@@ -591,6 +593,8 @@ exports.mergeAudio = onCall(
           (err, _so, se) => (err ? reject(new Error(se || err.message)) : resolve())
         );
       });
+      // ffmpeg may have run for minutes; the freeze may have begun meanwhile.
+      if ((await phase()) !== ph) throw new HttpsError("unavailable", "migration phase changed; merge not written");
       await bucket.upload(out, {
         destination: dest,
         metadata: { contentType: "audio/mp4" },
@@ -722,7 +726,7 @@ async function saveJson(p, obj) {
 // once. Two writers can no longer each read, each decide, and the second
 // quietly erase the first — which is how a finished transcription or a
 // confirmed label could vanish.
-async function mutateSidecar(path, fn) {
+async function mutateSidecar(path, fn, { allowFrozen = false } = {}) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const file = bkt().file(path);
     let meta = {}, generation = 0;
@@ -738,7 +742,8 @@ async function mutateSidecar(path, fn) {
     if (out === null) return { meta, generation, saved: false };
     // Admin writes bypass the frozen Storage rules; a handler that read
     // "legacy" at entry and was paused across the freeze must not land.
-    if ((await phase()) !== "legacy") throw new PatchError(503, "migration in progress");
+    const ph = await phase();
+    if (ph !== "legacy" && !(allowFrozen && ph === "frozen")) throw new PatchError(503, "migration in progress");
     try {
       await file.save(JSON.stringify(out, null, 2), {
         contentType: "application/json",
@@ -966,11 +971,14 @@ exports.transcriptionWebhook = onRequest(
       const transcribedAt = job.transcribedAt || new Date().toISOString();
       if (!job.transcribedAt) await lockRef.set({ transcribedAt }, { merge: true });
 
+      // An admitted job may finish during the freeze (the migrator waits
+      // for it); nothing legacy lands once canonical.
+      const legacyWritable = async () => ["legacy", "frozen"].includes(await phase());
       const patchMeta = async (patch) => {
         const r = await mutateSidecar(metaPath, async (cur) => {
           if (job.revision && Number((cur || {}).transcriptRevision || 0) !== Number(job.revision)) return null;
           return { ...(cur || {}), ...patch };
-        });
+        }, { allowFrozen: true });
         return r.meta;
       };
 
@@ -1011,6 +1019,7 @@ exports.transcriptionWebhook = onRequest(
       const topic = await inferTopic(text, process.env.ANTHROPIC_KEY);
       const audioDurationSec = data.audio_duration || 0;
 
+      if (!(await legacyWritable())) return res.status(200).json({ ok: true, note: "phase changed; legacy result not written" });
       await bkt().file(prefix + ".txt").save(text, { contentType: "text/plain" });
       await bkt().file(prefix + ".aai.json").save(JSON.stringify(utterances), { contentType: "application/json" });
       let meta = await patchMeta({

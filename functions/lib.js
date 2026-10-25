@@ -446,12 +446,23 @@ async function postProcess(data, meta, env, fetchImpl) {
 
 // Mirrors the public share doc, after checking the share is the owner's: this
 // runs with admin rights and shareId came from the client.
-async function updateShare(db, shareId, uid, fields) {
+// `rev` orders writes: a sync of an older transcript revision never lands
+// over a newer one, and a failed write reports false so the caller keeps
+// its retry marker.
+async function updateShare(db, shareId, uid, fields, rev) {
   const ref = db.doc(`shares/${shareId}`);
-  const s = await ref.get().catch(() => null);
-  if (!s || !s.exists || s.data().ownerUid !== uid) { console.warn(`share ${shareId} not owned by ${uid}`); return false; }
-  await ref.set(fields, { merge: true }).catch(() => {});
-  return true;
+  try {
+    return await db.runTransaction(async (tx) => {
+      const s = await tx.get(ref);
+      if (!s.exists || s.data().ownerUid !== uid) { console.warn(`share ${shareId} not owned by ${uid}`); return false; }
+      if (rev != null && Number(s.data().transcriptRev || 0) > rev) return true; // newer already there
+      tx.set(ref, { ...fields, ...(rev != null ? { transcriptRev: rev } : {}) }, { merge: true });
+      return true;
+    });
+  } catch (e) {
+    console.error("updateShare", shareId, String((e && e.message) || e));
+    return false;
+  }
 }
 
 module.exports = {

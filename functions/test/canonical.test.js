@@ -374,6 +374,23 @@ test("share sync: marker survives a crash and the sweep finishes it", async () =
   assert.equal((await docOf()).shareDirty, null);
 });
 
+test("share sync: a failed write keeps the marker; an older revision never overwrites a newer share", async () => {
+  await reset();
+  const aai = fakeAai(); const c = build(aai, { t: Date.now() });
+  await c.createRecording(UID, { id: ID, shareId: "sh2" }); // share doc does not exist yet -> write fails
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  aai.state.transcript = completed(gen);
+  await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } });
+  assert.deepEqual((await docOf()).shareDirty, { shareId: "sh2", rev: 1 }, "marker kept");
+  await db.doc("shares/sh2").set({ ownerUid: UID, transcriptRev: 5, topic: "newer" });
+  await c.sweepAll();
+  const sh = (await db.doc("shares/sh2").get()).data();
+  assert.equal(sh.topic, "newer"); assert.equal(sh.transcriptRev, 5);
+  assert.equal((await docOf()).shareDirty, null, "older sync is a no-op and clears its own marker");
+});
+
 test("a callback that arrived in the wrong phase is replayed by the sweep", async () => {
   await reset();
   const aai = fakeAai(); const c = build(aai, { t: Date.now() });
