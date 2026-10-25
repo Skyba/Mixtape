@@ -244,15 +244,23 @@ function listRow(m, folder, base) {
         note: m.note || undefined,
         place: m.place || undefined,
         inputName: m.inputName || undefined,
-        // Attribution, with provenance. green = folder set and the owner's
-        // presence decided; naming everyone else is optional.
+        // Attribution, with provenance. green = folder set, and either the
+        // owner's presence decided or the speakers named by hand. Naming them
+        // is the same work by another route, and older takes were labelled
+        // long before meIncluded existed. Mirrors isGreen() in
+        // src/attribution.ts — the two must agree, comm-relay reads this flag.
         speaker_labels: m.speakerLabels || undefined,
         owner_letter: m.speakerId || undefined,
         ...ownerAttribution(m),
         speech_model_used: m.speechModelUsed || undefined,
         me_included: m.meIncluded || undefined,
         fields_updated_at: m.fieldsUpdatedAt || undefined,
-        green: !!(m.folder && m.folder !== "Inbox" && m.meIncluded),
+        green: !!(
+          m.folder &&
+          m.folder !== "Inbox" &&
+          (m.meIncluded ||
+            Object.values(m.speakerLabels || {}).some((l) => l && l.by === "user"))
+        ),
   };
 }
 

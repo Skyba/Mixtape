@@ -598,19 +598,17 @@ function Row({
           {placeLabel(rec.place) ? (
             <Text style={styles.rowMeta}>{placeLabel(rec.place)}</Text>
           ) : null}
-          <View style={[styles.pill, { borderColor: sync.color }]}>
-            <Text style={[styles.pillTxt, { color: sync.color }]}>
-              {sync.label}
-            </Text>
+          <View style={[styles.pill, { backgroundColor: sync.color }]}>
+            <Text style={styles.pillTxt}>{sync.label}</Text>
           </View>
           {rec.transcriptStatus === "done" ? (
-            <View style={[styles.pill, { borderColor: "#4ade80" }]}>
-              <Text style={[styles.pillTxt, { color: "#4ade80" }]}>Transcript</Text>
+            <View style={[styles.pill, { backgroundColor: "#4ade80" }]}>
+              <Text style={styles.pillTxt}>Transcript</Text>
             </View>
           ) : rec.transcriptStatus === "pending" ||
             rec.transcriptStatus === "processing" ? (
-            <View style={[styles.pill, { borderColor: "#fbbf24" }]}>
-              <Text style={[styles.pillTxt, { color: "#fbbf24" }]}>Transcribing</Text>
+            <View style={[styles.pill, { backgroundColor: "#fbbf24" }]}>
+              <Text style={styles.pillTxt}>Transcribing</Text>
             </View>
           ) : null}
           {rec.mergePending ? (
@@ -760,12 +758,14 @@ const styles = StyleSheet.create({
   rowDate: { color: "#6b7280", fontSize: 11, fontWeight: "600" },
   rowMeta: { color: "#6b7280", fontSize: 11 },
   pill: {
-    borderWidth: 1,
     borderRadius: 8,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
   },
-  pillTxt: { fontSize: 9.5, fontWeight: "700" },
+  // Filled rather than outlined: the status is the point of the chip, so the
+  // colour carries it at a glance. Dark text because every status colour here
+  // is a light one.
+  pillTxt: { fontSize: 9.5, fontWeight: "700", color: "#0b1220" },
   del: {
     width: 36,
     height: 36,

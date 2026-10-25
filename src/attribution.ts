@@ -5,15 +5,23 @@ import { INBOX, LabelSource, Recording, SpeakerLabel, SyncedField } from "./type
  * is the owner one of the voices. Naming the other people is welcome but
  * optional — an unnamed co-speaker means "unknown", not "unreviewed".
  */
+/** At least one speaker named by hand, rather than by a model or a channel. */
+export function hasUserLabels(r: Recording): boolean {
+  return Object.values(r.speakerLabels ?? {}).some((l) => l.by === "user");
+}
+
 export function isGreen(r: Recording): boolean {
-  return r.folder !== INBOX && r.meIncluded !== undefined;
+  // Naming the speakers by hand counts as having attributed the recording.
+  // Older takes were labelled long before "are you in it" existed, and asking
+  // again for work already done is what made the dot nag rather than inform.
+  return r.folder !== INBOX && (r.meIncluded !== undefined || hasUserLabels(r));
 }
 
 /** What is still missing, for the amber hint. Empty when green. */
 export function missingForGreen(r: Recording): string[] {
   const out: string[] = [];
   if (r.folder === INBOX) out.push("folder");
-  if (r.meIncluded === undefined) out.push("are you in it");
+  if (r.meIncluded === undefined && !hasUserLabels(r)) out.push("are you in it");
   return out;
 }
 
