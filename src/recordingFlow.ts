@@ -154,6 +154,10 @@ async function tryUpload(
   if (!isFirebaseConfigured) return { ...r, uploadStatus: "skipped" };
   if (!isSignedIn()) return { ...r, uploadStatus: "pending" };
   if (!(await canUploadNow(settings))) return { ...r, uploadStatus: "pending" };
+  // A take whose cloud merge has not landed has only its first segment on
+  // disk. That must never become the recording's audio object: canonical
+  // audio is create-only, so a wrong first write blocks the real merge.
+  if (r.mergePending) opts = { ...(opts ?? {}), skipAudio: true };
   if (await isCanonical()) {
     // Document first (idempotent), then the audio once. Nothing else goes up:
     // the server owns metadata and transcripts.
@@ -517,8 +521,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
         // audio-finalize handler adopts a stub otherwise, but the fields set
         // at record time would only arrive with the create.
         await createRemote(rec, `create:${rec.id}`);
-        rec = { ...rec, remoteCreated: true };
-        await writeMeta(rec);
+        rec = await commitMeta(rec, (cur) => ({ ...cur, remoteCreated: true }));
       }
       // Merge straight to the recording's own object. The merged audio is then
       // complete in the cloud the moment the call returns, so transcription no
