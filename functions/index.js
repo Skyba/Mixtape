@@ -25,6 +25,7 @@ const lib = require("./lib");
 const { ownerAttribution, canonStamp, validField, PatchError, applyPatch, AAI, AAI_RATE_PER_HOUR, LANG_CODES, LANG_NAMES, renderTranscript, acceptSpeakerMapping, inferSpeakerMap, inferTopic, speakerIdentification } = lib;
 const { makeCanonical } = require("./canonical");
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+const TRANSCRIBE_SECRETS = ["ASSEMBLYAI_KEY", "ANTHROPIC_KEY", "TRANSCRIBE_WEBHOOK_SECRET"];
 
 // ----- API key management (server-side hashing; raw key shown once) -----
 exports.createApiKey = onCall({ region: "us-central1" }, async (req) => {
@@ -128,6 +129,25 @@ const pathFor = (uid, folder, base, ext) =>
 let _canon = null;
 const canon = () => _canon || (_canon = makeCanonical({ db: admin.firestore(), bucket: bkt(), env: process.env }));
 const phase = () => canon().readPhase();
+
+// In-flight legacy mutations. A per-write phase read cannot fence a write
+// that is already on the wire, so every legacy handler that writes with
+// admin rights registers itself here at admission (in a transaction that
+// requires phase legacy, or frozen for an admitted webhook) and releases
+// itself when done. The migrator's drain step waits for this collection to
+// be empty (entries older than the longest function timeout are stale).
+const INFLIGHT_MAX_MS = 10 * 60 * 1000;
+async function admit(kind, detail, { allowFrozen = false } = {}) {
+  const ref = admin.firestore().collection("inflight").doc();
+  const ok = await admin.firestore().runTransaction(async (tx) => {
+    const ph = await canon().readPhase(tx);
+    if (ph !== "legacy" && !(allowFrozen && ph === "frozen")) return false;
+    tx.set(ref, { kind, detail: detail || null, startedAt: new Date().toISOString() });
+    return true;
+  });
+  return ok ? () => ref.delete().catch(() => {}) : null;
+}
+exports._inflight = { INFLIGHT_MAX_MS };
 
 // Under legacy, an id is found by scanning the sidecars; two paths with the
 // same id (the 9 known duplicates) are a 409, never a guess.
@@ -312,6 +332,9 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
   if (ph !== "legacy") { res.set("Retry-After", "60"); return res.status(503).json({ error: "migration in progress" }); }
   const q = await resolveLegacy(req, res);
   if (!q) return;
+  const release = await admit("patch", `${q.folder}/${q.base}`);
+  if (!release) { res.set("Retry-After", "60"); return res.status(503).json({ error: "migration in progress" }); }
+  res.on("finish", release);
   if (!/^(?!\.)(?!_)[^/\\]{1,80}$/.test(q.folder) || /[/\\]/.test(q.base)) {
     return res.status(400).json({ error: "bad folder or base" });
   }
@@ -395,6 +418,11 @@ exports.patchMeta = onCall({ region: "us-central1" }, async (req) => {
     } catch (e) { throw toHttpsError(e); }
   }
   if (ph !== "legacy") throw new HttpsError("unavailable", "migration in progress");
+  const release = await admit("patchMeta", `${folder}/${base}`);
+  if (!release) throw new HttpsError("unavailable", "migration in progress");
+  try { return await legacyPatchMeta(uid, folder, base, patch); } finally { release(); }
+});
+async function legacyPatchMeta(uid, folder, base, patch) {
   if (typeof folder !== "string" || typeof base !== "string" || !patch || typeof patch !== "object") {
     throw new HttpsError("invalid-argument", "folder, base and patch required");
   }
@@ -419,7 +447,7 @@ exports.patchMeta = onCall({ region: "us-central1" }, async (req) => {
     }
     throw new HttpsError("internal", String((e && e.message) || e));
   }
-});
+}
 
 function toHttpsError(e) {
   if (e instanceof PatchError) {
@@ -545,6 +573,8 @@ exports.mergeAudio = onCall(
     if (ph === "frozen") throw new HttpsError("unavailable", "migration in progress");
     if (ph === "legacy" && !legacyDest) throw new HttpsError("permission-denied", "dest must be your own recording .m4a");
     if (ph === "canonical" && !canonDest) throw new HttpsError("permission-denied", "dest must be rec2/<uid>/<id>/audio.m4a");
+    const release = ph === "legacy" ? await admit("merge", dest) : () => {};
+    if (!release) throw new HttpsError("unavailable", "migration in progress");
 
     const bucket = admin.storage().bucket();
 
@@ -610,6 +640,7 @@ exports.mergeAudio = onCall(
       throw new HttpsError("internal", String((e && e.message) || e));
     } finally {
       await fsp.rm(work, { recursive: true, force: true });
+      release();
     }
   }
 );
@@ -758,7 +789,6 @@ async function mutateSidecar(path, fn, { allowFrozen = false } = {}) {
   throw new Error("sidecar changed twice during one write; try again");
 }
 
-const TRANSCRIBE_SECRETS = ["ASSEMBLYAI_KEY", "ANTHROPIC_KEY", "TRANSCRIBE_WEBHOOK_SECRET"];
 
 // Fires when a recording's meta .json is finalized. Only new, uploaded, but
 // untranscribed recordings ("pending") start a job — re-uploads and the
@@ -801,6 +831,12 @@ exports.startTranscription = onObjectFinalized(
     const m4a = `recordings/${uid}/${folder}/${base}.m4a`;
     const [audioExists] = await bkt().file(m4a).exists();
     if (!audioExists) return; // audio not up yet (m4a normally uploads first)
+    const release = await admit("start", `${folder}/${base}`);
+    if (!release) return;
+    try { await legacyStart({ name, uid, folder, base, meta, m4a }); } finally { release(); }
+  }
+);
+async function legacyStart({ name, uid, folder, base, meta, m4a }) {
 
     // One job per (recording, transcript revision), keyed by the recording's
     // stable id rather than its path, so a later move cannot create a second
@@ -901,8 +937,7 @@ exports.startTranscription = onObjectFinalized(
       } catch {}
       console.error("startTranscription", base, msg);
     }
-  }
-);
+}
 
 // AssemblyAI calls this (via the stable /hooks/transcription hosting rewrite)
 // when a job finishes. Writes the transcript back to the owner's storage.
@@ -954,6 +989,9 @@ exports.transcriptionWebhook = onRequest(
       if (job.status === "done" || job.status === "error") {
         return res.status(200).json({ ok: true, note: "already final" });
       }
+      const release = await admit("webhook", job.recordingId || transcriptId, { allowFrozen: true });
+      if (!release) return res.status(200).json({ ok: true, note: "phase changed; legacy result not written" });
+      res.on("finish", release);
       await lockRef.set({ transcriptId, status: job.status === "submitted-unconfirmed" ? "processing" : job.status }, { merge: true });
       const metaPath = `recordings/${job.uid}/${job.folder}/${job.base}.json`;
       const prefix = `recordings/${job.uid}/${job.folder}/${job.base}`;
