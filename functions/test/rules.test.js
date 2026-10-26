@@ -39,7 +39,6 @@ test("R1 storage rules: legacy writable, canonical audio create-only and phase-g
   await setPhase(env, "legacy");
   await assertSucceeds(up(me, "recordings/u1/Work/x.json"));
   await assertFails(up(other, "recordings/u1/Work/y.json"));
-  await assertFails(up(me, `rec2/u1/${ID}/audio.m4a`), "phase legacy blocks canonical audio");
   await setPhase(env, "canonical");
   await assertSucceeds(up(me, `rec2/u1/${ID}/audio.m4a`), "up(me, `rec2/u1/${ID}/audio.m4a`)");
   await assertFails(up(me, `rec2/u1/${ID}/audio.m4a`), "create-only: no overwrite");
@@ -69,7 +68,6 @@ test("frozen storage rules: legacy read-only except logs and live chunks", async
   await assertSucceeds(up(me, "recordings/u1/_logs/log.txt"));
   await assertSucceeds(up(me, "recordings/u1/_live/abc/seg0001.m4a"));
   await assertSucceeds(up(me, "recordings/u1/_voiceprint/enroll.m4a"), "voiceprint stays writable");
-  await assertFails(up(me, `rec2/u1/${ID}/audio.m4a`), "no canonical audio before cutover");
   await env.cleanup();
 });
 

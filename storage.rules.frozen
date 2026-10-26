@@ -2,9 +2,6 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     function owner(uid) { return request.auth != null && request.auth.uid == uid; }
-    function phase() {
-      return firestore.get(/databases/(default)/documents/config/migration).data.phase;
-    }
 
     // Legacy layout: recordings/{uid}/{folder}/{base}.{ext}. Read-only once
     // the migration freezes (storage.rules.frozen); gone after it.
@@ -18,14 +15,16 @@ service firebase.storage {
     match /recordings/{uid}/_voiceprint/{allPaths=**} { allow write: if owner(uid); }
 
     // Canonical blobs. Audio is written once by the owner and never changed;
-    // everything else under an id is server-only.
+    // everything else under an id is server-only. (A pre-cutover gate on the
+    // migration phase used to live here; it needed a Firestore lookup from
+    // Storage rules, which needs an IAM grant the CLI cannot make, and the
+    // cut-over is one-way, so it is gone.)
     match /rec2/{uid}/{id}/audio.m4a {
       allow read: if owner(uid);
       allow create: if owner(uid)
                     && resource == null
                     && id.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z(-[A-Za-z0-9]{1,8})?$')
-                    && request.resource.size > 0
-                    && phase() == 'canonical';
+                    && request.resource.size > 0;
       allow update, delete: if false;
     }
     match /rec2/{uid}/{id}/{file} {
