@@ -422,6 +422,10 @@ function aaiRequestBody(meta, signedAudioUrl) {
   const lang = LANG_CODES[meta.language];
   if (lang) {
     body.language_code = lang;
+    // Fillers ("um", "you know") are kept only when the language is known
+    // to be English: the option is English-only at AssemblyAI, and with
+    // detection on we do not know the language until the job is done.
+    if (lang === "en") body.disfluencies = true;
   } else {
     body.language_detection = true;
     body.language_detection_options = { code_switching: true };
