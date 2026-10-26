@@ -32,6 +32,26 @@ Behaviour that is real, non-obvious, and not written down clearly anywhere else.
 
 **Ten hours is the hard ceiling.** A longer file cannot be transcribed at all, so cap recording length below it rather than discovering this at upload time.
 
+## Firebase
+
+**`firebase.json` `functions.runtime` overrides `package.json` `engines`.** A Node bump in `engines` alone deploys on the old runtime with no warning; set both.
+
+**Storage rules cannot be narrowed by depth.** `recordings/{uid}/{folder}/{base}.json` and `rec2/{uid}/{id}/meta.json` have the same shape, and overlapping `match` blocks OR their grants together. Separate namespaces by prefix, never by pattern.
+
+**The Storage emulator ignores `ifGenerationMatch` on `save()`.** A create-only write that must not overwrite needs a HEAD first to be testable; production enforces the precondition as well.
+
+**`getDownloadURL()` mints a token on the object.** The first download of an artifact bumps its metageneration and `updated` time; generation and checksum are unchanged. A daily check must compare generations, not timestamps.
+
+**AssemblyAI identification rewrites the utterance keys.** With `speaker_identification` on, utterances come back keyed by the person's name instead of a letter, so a label validator that accepts only `[A-Z]` rejects every edit on those recordings.
+
+**Firestore collection-group queries need their own single-field index.** `where()` on a collection group throws at runtime until `firestore.indexes.json` declares the field with `COLLECTION_GROUP` scope.
+
+## Android
+
+**The system Alert caps at three buttons.** A fourth is dropped silently.
+
+**`durationMillis` reports the cap when the recorder dies.** A take stopped by the native `forDuration` limit says it ran the full length even when the mic went dead minutes in; trust the audio, not the number.
+
 ## Anthropic API
 
 **A thinking-capable model puts a `thinking` block first**, so `content[0].text` is `undefined` and any code reading it silently falls back. Filter the content array for `type === "text"`. Give it a real `max_tokens` budget too: a small one gets spent entirely on thinking, and the reply comes back empty.
