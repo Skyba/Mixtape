@@ -37,7 +37,8 @@ function fakeAai() {
   };
   return { fetch: f, state };
 }
-const signer = async (file, opts) => [`https://signed.test/${file.name}?generation=${opts.queryParams.generation}`];
+// Like a real v4 signed URL: the id's colons are percent-encoded.
+const signer = async (file, opts) => [`https://signed.test/${encodeURI(file.name).replace(/:/g, "%3A")}?generation=${opts.queryParams.generation}`];
 
 function build(aai, clockRef) {
   return makeCanonical({
@@ -48,7 +49,7 @@ function build(aai, clockRef) {
 }
 const completed = (gen, extra = {}) => ({
   id: "t1", status: "completed",
-  audio_url: `https://signed.test/rec2/${UID}/${ID}/audio.m4a?generation=${gen}`,
+  audio_url: `https://signed.test/${encodeURI(`rec2/${UID}/${ID}/audio.m4a`).replace(/:/g, "%3A")}?generation=${gen}`,
   utterances: [{ speaker: "A", start: 0, end: 1000, text: "Hello there" }, { speaker: "B", start: 1000, end: 2000, text: "Hi" }],
   audio_duration: 2, speech_model: "best", ...extra,
 });
@@ -83,7 +84,7 @@ test("happy path: create, audio, claim, submit, webhook, publish, read", async (
   assert.equal(st.submitted, true);
   let d = await docOf();
   assert.equal(d.rev, 1); assert.equal(d.status, "processing"); assert.equal(d.attempts[d.active].state, "submitted");
-  assert.equal(aai.state.posts[0].audio_url, `https://signed.test/rec2/${UID}/${ID}/audio.m4a?generation=${gen}`);
+  assert.equal(aai.state.posts[0].audio_url, `https://signed.test/${encodeURI(`rec2/${UID}/${ID}/audio.m4a`).replace(/:/g, "%3A")}?generation=${gen}`);
   assert.match(aai.state.posts[0].webhook_url, new RegExp(`job=${st.lockId}&id=`));
   aai.state.transcript = completed(gen);
   const w = await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } });
@@ -437,4 +438,28 @@ test("legacy admission: open under legacy, webhooks only under frozen, closed un
     for (const r of [r1, r2]) if (r) await r();
     assert.equal(await inflight(), 0, "released");
   }
+});
+
+test("language changed while the job ran: publish, then one automatic re-run", async () => {
+  await reset();
+  const aai = fakeAai(); const clock = { t: Date.parse("2026-10-26T12:00:00Z") };
+  const c = build(aai, clock);
+  await c.createRecording(UID, { id: ID, language: "English", speakers: ["Basile"] });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  clock.t += 60_000;
+  await c.patch(UID, ID, { language: "French", fieldsUpdatedAt: { language: new Date(clock.t).toISOString() } });
+  aai.state.postResult = { id: "t2" };
+  aai.state.transcript = completed(gen);
+  assert.equal((await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } })).note, "published");
+  let d = await docOf();
+  assert.equal(d.current.rev, 1, "the first run is published");
+  assert.equal(d.status, "processing", "and a second run started");
+  assert.equal(d.rev, 2); assert.equal(aai.state.posts.length, 2);
+  assert.equal(aai.state.posts[1].language_code, "fr");
+  aai.state.transcript = { ...completed(gen), id: "t2" };
+  assert.equal((await c.webhook({ uid: UID, id: ID, lockId: d.active, payload: { transcript_id: "t2", status: "completed" } })).note, "published");
+  d = await docOf();
+  assert.equal(d.status, "done"); assert.equal(d.current.rev, 2); assert.equal(aai.state.posts.length, 2, "no third run");
 });

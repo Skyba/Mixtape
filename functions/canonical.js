@@ -166,7 +166,7 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
   }
 
   // ---- maybeStart: the single owner of revision allocation ----
-  async function maybeStart(uid, id) {
+  async function maybeStart(uid, id, { rerunForEdit = false } = {}) {
     // The claim is whatever the COMMITTED transaction returned: a body that
     // ran, lost the conflict and re-ran against someone else's claim returns
     // null, and nothing is submitted here.
@@ -175,7 +175,7 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       const rev = Number(cur.rev || 0) + 1;
       const lockId = sha256(`${uid}:${id}:${rev}`);
       const t = iso();
-      const attempts = { ...cur.attempts, [lockId]: { rev, state: "claimed", aaiTranscriptId: null, sourceAudioGeneration: cur.audio.generation, createdAt: t, updatedAt: t } };
+      const attempts = { ...cur.attempts, [lockId]: { rev, state: "claimed", aaiTranscriptId: null, sourceAudioGeneration: cur.audio.generation, createdAt: t, updatedAt: t, languageAtSubmit: cur.language || "", speakersAtSubmit: cur.speakers || [], ...(rerunForEdit ? { rerunForEdit: true } : {}) } };
       return { doc: { ...cur, rev, active: lockId, attempts, status: "processing" }, result: { claimed: { rev, lockId, sourceAudioGeneration: cur.audio.generation } } };
     });
     const claimed = r.result && r.result.claimed;
@@ -274,7 +274,8 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
     if (!data || data.id !== transcriptId || data.status !== "completed") return { note: "transcript not completed at AAI; ignored" };
     const gen = genFromAudioUrl(data.audio_url);
     const objectPath = `rec2/${uid}/${id}/${audioName}`;
-    const objectOk = typeof data.audio_url === "string" && (data.audio_url.includes(objectPath) || data.audio_url.includes(encodeURIComponent(objectPath)));
+    // A signed URL percent-encodes the id's colons; compare decoded paths.
+    const objectOk = typeof data.audio_url === "string" && decodedPath(data.audio_url).includes(objectPath);
     if (!objectOk) return { note: "audio object mismatch; ignored" };
     if (!gen || gen !== String(a.sourceAudioGeneration)) return { note: "audio generation mismatch; ignored" };
 
@@ -323,8 +324,17 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       const current = { rev, lockId, aaiTranscriptId: transcriptId, sourceAudioGeneration: at.sourceAudioGeneration, txt, aai, post: { name: postName }, publishedAt: t, producer: "aai", speechModelUsed: post.speechModelUsed, transcribedAt };
       const attempts = { ...cur.attempts, [lockId]: { ...at, state: "published", aaiTranscriptId: transcriptId, txt, aai, updatedAt: t, transcribedAt } };
       const speakerMap = Object.fromEntries(Object.entries(speakerLabels).map(([L, v]) => [L, v.name]));
+      // The owner changed the language (or the names fed to identification)
+      // while this job ran: what it produced is in the wrong language or
+      // without the names. Publish it, then run again once, automatically.
+      const langStamp = (cur.fieldsUpdatedAt || {}).language || "";
+      const spkStamp = (cur.fieldsUpdatedAt || {}).speakers || "";
+      const changedMeanwhile =
+        (langStamp > at.createdAt && (cur.language || "") !== (at.languageAtSubmit || "")) ||
+        (spkStamp > at.createdAt && JSON.stringify(cur.speakers || []) !== JSON.stringify(at.speakersAtSubmit || []));
       const doc2 = {
-        ...cur, attempts, active: null, current, status: "done",
+        ...cur, attempts, active: null, current, status: changedMeanwhile && !at.rerunForEdit ? "pending" : "done",
+        rerunQueued: changedMeanwhile && !at.rerunForEdit ? { afterRev: rev, reason: "language or speakers changed while the job ran" } : null,
         speakerMap: Object.keys(speakerMap).length ? speakerMap : null, speakerLabels, speakerId: keepOwner ? cur.speakerId : null,
         fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), ...labelStamps, ...(keepOwner ? {} : { speakerId: transcribedAt }),
           // The inferred title is a server edit of a client field: stamped,
@@ -341,6 +351,10 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       return { doc: doc2, result: { published: true } };
     });
     if (r.result && r.result.published) await syncShare(uid, id);
+    if (r.result && r.result.published && r.doc.rerunQueued) {
+      await mutate(uid, id, (cur) => (cur.rerunQueued ? { doc: { ...cur, rerunQueued: null } } : null));
+      await maybeStart(uid, id, { rerunForEdit: true });
+    }
     return r.result && r.result.published ? { note: "published", rev } : r.result && r.result.audit ? { note: "audit", rev } : { note: "no-op" };
   }
 
@@ -545,6 +559,9 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
   };
 }
 
+function decodedPath(u) {
+  try { return decodeURIComponent(new URL(u).pathname); } catch { return String(u); }
+}
 function genFromAudioUrl(u) {
   try { return new URL(u).searchParams.get("generation"); } catch { return null; }
 }
