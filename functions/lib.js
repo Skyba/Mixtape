@@ -76,7 +76,7 @@ function validField(f, v) {
     case "tags": return Array.isArray(v) && v.every((x) => typeof x === "string");
     case "private": return typeof v === "boolean";
     case "note": return typeof v === "string" && v.length <= 2000;
-    case "speakerId": return typeof v === "string" && /^[A-Z]$/.test(v);
+    case "speakerId": return typeof v === "string" && /^[^.\s/][^./]{0,39}$/.test(v);
     case "meIncluded": return v === "yes" || v === "no";
     case "topic": return typeof v === "string" && v.length <= 200;
     case "base": return typeof v === "string" && v.length <= 200 && !/[/\\]/.test(v);
@@ -149,7 +149,10 @@ function applyPatch(meta, body, ownerName, opts = {}) {
     }
     const labels = { ...(meta.speakerLabels || {}) };
     for (const [L, v] of Object.entries(letters)) {
-      if (!/^[A-Z]$/.test(L)) throw new PatchError(400, `bad letter ${L}`);
+      // A diarization key is a letter — or a name, when AssemblyAI's
+      // identification already replaced the letters. Dots are the stamp
+      // separator (speakerLabels.<key>), so a key cannot contain one.
+      if (!/^[^.\s/][^./]{0,39}$/.test(L)) throw new PatchError(400, `bad letter ${L}`);
       if (v !== null && !validLabel(v)) throw new PatchError(400, `bad label for ${L}`);
       if (!take(`speakerLabels.${L}`, v)) continue;
       if (v === null) delete labels[L]; else labels[L] = v;
