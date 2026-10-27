@@ -24,7 +24,8 @@ export type SyncedField =
   | "inputName"
   | "language"
   | "shareId"
-  | "base";
+  | "base"
+  | "reviewFlag";
 
 export type Recording = {
   id: string; // stable, never changes (original timestamp)
@@ -72,6 +73,11 @@ export type Recording = {
   remoteCreated?: boolean;
   /** v2: an audio object with other bytes already owns this id. */
   audioConflict?: boolean;
+  /**
+   * Set by the Mac review when its signals disagree about who a speaker is;
+   * cleared (null) when a person confirms the speakers. Drives the red row.
+   */
+  reviewFlag?: { reason: string; at: string } | null;
   /** v2: a server operation sent but not yet acknowledged (re-transcribe). */
   pendingOp?: string;
   language: string;

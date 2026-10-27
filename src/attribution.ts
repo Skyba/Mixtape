@@ -17,6 +17,26 @@ export function isGreen(r: Recording): boolean {
   return r.folder !== INBOX && (r.meIncluded !== undefined || hasUserLabels(r));
 }
 
+/**
+ * How far the speakers of a recording can be trusted, for the row colour:
+ *  - review:    the Mac review found its signals disagreeing (red);
+ *  - confirmed: every speaker label was set or confirmed by a person (green);
+ *  - likely:    at least one label rests on two agreeing signals (yellow);
+ *  - none:      model guesses or nothing yet (no colour).
+ */
+export type SpeakerStatus = "review" | "confirmed" | "likely" | "none";
+export function speakerStatus(r: Recording): SpeakerStatus {
+  if (r.reviewFlag) return "review";
+  const labels = Object.values(r.speakerLabels ?? {});
+  if (labels.length && labels.every((l) => l.by === "user")) return "confirmed";
+  if (labels.some((l) => l.by === "ai-review" || l.by === "channel")) return "likely";
+  return "none";
+}
+/** Labels a person could confirm in one tap (anything a model or the voice set). */
+export function confirmableLetters(r: Recording): string[] {
+  return Object.entries(r.speakerLabels ?? {}).filter(([, l]) => l.by !== "user").map(([L]) => L);
+}
+
 /** What is still missing, for the amber hint. Empty when green. */
 export function missingForGreen(r: Recording): string[] {
   const out: string[] = [];
@@ -132,7 +152,7 @@ export function mergeNewest(
   opts?: { serverWinsTies?: boolean }
 ): Recording {
   const scalar: SyncedField[] = ["folder", "speakers", "speakerId", "meIncluded", "tags", "private", "note",
-    "topic", "place", "inputName", "language", "shareId", "base"];
+    "topic", "place", "inputName", "language", "shareId", "base", "reviewFlag"];
   let out: Recording = { ...mine };
   const stamps: Record<string, string> = { ...(mine.fieldsUpdatedAt ?? {}) };
   const newer = (t?: string, m?: string) =>

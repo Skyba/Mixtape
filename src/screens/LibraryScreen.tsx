@@ -35,7 +35,10 @@ import { canUploadNow } from "../network";
 import { pushMeta, recordEdit, sendEdits } from "../outbox";
 import { iconOf, useFolderIcons } from "../folderIcons";
 import { placeLabel } from "../place";
-import { isGreen, missingForGreen, touch, adopt, changedKeys } from "../attribution";
+import { isGreen, missingForGreen, touch, adopt, changedKeys, speakerStatus } from "../attribution";
+
+// Row edge colour by how far the speakers can be trusted.
+const STATUS_COLOR = { confirmed: "#4ade80", likely: "#facc15", review: "#ef4444", none: "transparent" } as const;
 import { enqueue, replayOutbox } from "../outbox";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
@@ -543,7 +546,7 @@ function Row({
   const title = rec.topic || split.title;
   return (
     <View>
-    <View style={[styles.row, selected && styles.rowSel]}>
+    <View style={[styles.row, selected && styles.rowSel, !remote && { borderLeftWidth: 4, borderLeftColor: STATUS_COLOR[speakerStatus(rec)] }]}>
       {selectMode ? (
         <TouchableOpacity style={styles.play} onPress={onToggle}>
           <Ionicons

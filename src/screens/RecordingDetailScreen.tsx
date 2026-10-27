@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { setLabel, touch, adopt, changedKeys } from "../attribution";
+import { setLabel, touch, adopt, changedKeys, speakerStatus, confirmableLetters } from "../attribution";
 import { enqueue, replayOutbox } from "../outbox";
 import {
   ActivityIndicator,
@@ -295,6 +295,30 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       if (!(await isCanonical())) uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
       replayOutbox().catch(() => {});
     }
+  }
+
+  /** One tap: every label a model or the voice set becomes the user's, and
+   *  the review flag clears. Same outbox path as any label edit. */
+  async function confirmSpeakers() {
+    const settings = await getSettings();
+    let preview: Recording = rec;
+    for (const L of confirmableLetters(rec)) preview = setLabel(preview, L, rec.speakerLabels![L].name, "user", settings.ownerName);
+    if (rec.reviewFlag) preview = touch({ ...preview, reviewFlag: null }, "reviewFlag");
+    const patch: Record<string, unknown> = {};
+    for (const L of confirmableLetters(rec)) patch[`speakerLabels.${L}`] = preview.speakerLabels?.[L] ?? null;
+    if (preview.speakerId !== rec.speakerId) patch.speakerId = preview.speakerId ?? null;
+    if (preview.meIncluded !== rec.meIncluded) patch.meIncluded = preview.meIncluded;
+    if (rec.reviewFlag) patch.reviewFlag = null;
+    await enqueue(preview, patch, preview.fieldsUpdatedAt ?? {}, shownRev);
+    const keys = changedKeys(rec, preview);
+    try {
+      const next = await commitMeta(rec, (cur) => adopt(sameRev(cur), preview, keys));
+      setRec(next);
+    } catch {
+      Alert.alert("New transcript arrived", "Check the speakers on the new one.");
+      return;
+    }
+    await sendEdits(preview);
   }
 
   async function shareFile(uri: string) {
@@ -623,6 +647,23 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         ))}
       </View>
 
+      {speakerStatus(rec) !== "none" || confirmableLetters(rec).length ? (
+        <View style={styles.attrBox}>
+          <Text style={[styles.attrTxt, { color: { confirmed: "#4ade80", likely: "#facc15", review: "#ef4444", none: "#9aa0a6" }[speakerStatus(rec)] }]}>
+            {{ confirmed: "Speakers confirmed by you.", likely: "Speakers likely right (two signals agree).", review: `Needs a look: ${rec.reviewFlag?.reason ?? "the signals disagree"}`, none: "Speakers not confirmed yet." }[speakerStatus(rec)]}
+          </Text>
+          {Object.entries(rec.speakerLabels ?? {}).map(([L, l]) => (
+            <Text key={L} style={styles.attrLine}>{L === l.name ? l.name : `${L} = ${l.name}`} · {{ user: "you", "ai-review": "likely", channel: "certain", voiceprint: "voice only", claude: "guess", aai: "guess", none: "unknown" }[l.by]}</Text>
+          ))}
+          {confirmableLetters(rec).length && !revisionBehind ? (
+            <TouchableOpacity style={styles.attrBtn} onPress={confirmSpeakers}>
+              <Text style={styles.attrBtnTxt}>These are right — confirm</Text>
+            </TouchableOpacity>
+          ) : null}
+          <Text style={styles.attrHint}>Wrong? Rename a speaker under Talk time below; that confirms it too.</Text>
+        </View>
+      ) : null}
+
       <SpeakerSelector
         count={rec.speakers.length}
         names={toNames(rec.speakers)}
@@ -839,6 +880,12 @@ function LockBtn({
 }
 
 const styles = StyleSheet.create({
+  attrBox: { backgroundColor: "#15181d", borderRadius: 10, padding: 12, marginTop: 16 },
+  attrTxt: { fontSize: 13, fontWeight: "600" },
+  attrLine: { color: "#c9cdd3", fontSize: 13, marginTop: 6 },
+  attrBtn: { backgroundColor: "#2f6fd0", borderRadius: 10, padding: 12, alignItems: "center", marginTop: 10 },
+  attrBtnTxt: { color: "#fff", fontWeight: "700" },
+  attrHint: { color: "#7c828a", fontSize: 11, marginTop: 8 },
   container: { backgroundColor: "#0f1115", flex: 1, padding: 20, paddingTop: 50 },
   langRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
   langChip: {
