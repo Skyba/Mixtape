@@ -1,3 +1,4 @@
+import { markPending } from "../pendingTake";
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -674,6 +675,13 @@ export default function RecordScreen() {
       liveWarnedRef.current = false;
       armLiveness();
       logEvent(`start normal: recording, cap=${durationH}h`);
+      if (recorder.uri) {
+        markPending({
+          cacheUri: recorder.uri, startedAt: new Date().toISOString(), plannedDurationHours: durationH,
+          speakers: resolveSpeakers(), folder, language, note, inputName: extRef.current?.name,
+          meIncluded: meIn ? "yes" : "no",
+        });
+      }
       refreshMic();
       setTimeout(probeRoutedMic, 3000);
       markRecording(true);

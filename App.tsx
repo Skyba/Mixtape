@@ -5,6 +5,8 @@ import { isCanonical, startListener, pullTranscripts, flushUploads } from "./src
 import { View, Text } from "react-native";
 import { runLocalMigration } from "./src/localMigration";
 import { detectLayout } from "./src/recordings";
+import { readPending, clearPending } from "./src/pendingTake";
+import { processStop, isRecordingInProgress } from "./src/recordingFlow";
 import { canUploadNow } from "./src/network";
 import { AppState } from "react-native";
 import * as Font from "expo-font";
@@ -83,6 +85,23 @@ function Tabs() {
   );
 }
 
+/**
+ * A take whose app died mid-recording: save what is on disk, stamped with
+ * its real start. Cold launch only — nothing can be recording yet.
+ */
+async function savePendingTake(settings: any) {
+  if (isRecordingInProgress()) return;
+  const p = await readPending();
+  if (!p) return;
+  logEvent(`saving interrupted take from ${p.startedAt}`);
+  try {
+    const { startedAt, ...args } = p;
+    await processStop({ ...args, recordedAt: startedAt, durationSeconds: 0, settings });
+  } catch (e: any) {
+    logEvent(`interrupted take not saved: ${String(e?.message ?? e)}`);
+  }
+}
+
 export default function App() {
   // Explicitly load the icon font — under the New Architecture @expo/vector-icons
   // doesn't always auto-register it, which shows icons as blank squares.
@@ -123,6 +142,7 @@ export default function App() {
         const ok = await runLocalMigration().catch((e) => { logEvent(`local migration failed ${String(e?.message ?? e)}`); return false; });
         if (!ok) { setStorageMsg("Some recordings could not be moved. Export the log from Settings."); return; }
         setStorageReady(true);
+        savePendingTake(s);
         startListener();
         await flushUploads(await canUploadNow(s)).catch(() => {});
         await replayOutbox().catch(() => {});
@@ -132,6 +152,7 @@ export default function App() {
         return;
       }
       setStorageReady(true);
+      savePendingTake(s);
       // Edits made offline go first, then the Mac's newer edits come down.
       await replayOutbox().catch(() => {});
       await reconcileFromCloud().catch(() => {});

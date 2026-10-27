@@ -41,6 +41,7 @@ import {
   uploadDebugLog,
 } from "./firebase";
 import { notify } from "./notifications";
+import { clearPending } from "./pendingTake";
 import { isCanonical, createRemote, uploadAudioOnce, retranscribeRemote } from "./cloud";
 import { remoteCanonicalPath } from "./firebase";
 import { logEvent, getLogText } from "./log";
@@ -197,6 +198,9 @@ async function mergeDest(r: Recording): Promise<string> {
 }
 
 export type StopArgs = {
+  /** When the take began. Absent for an ordinary stop (= now); a take saved
+   *  after the app died passes its real start. */
+  recordedAt?: string;
   /** Where the take started, when a fix was available. */
   place?: Recording["place"];
   note?: string;
@@ -216,7 +220,7 @@ export type StopArgs = {
 };
 
 export async function processStop(args: StopArgs): Promise<Recording> {
-  const recordedAt = new Date().toISOString();
+  const recordedAt = args.recordedAt ?? new Date().toISOString();
   const id = recordedAt;
   await rememberSpeakers(
     args.speakers.filter((s) => !/^Speaker \d+$/.test(s))
@@ -263,6 +267,8 @@ export async function processStop(args: StopArgs): Promise<Recording> {
     args.folder
   );
   logEvent(`saved local ${rec.base}`);
+  // The audio is in the library now; a relaunch must not save it twice.
+  await clearPending(args.cacheUri);
   await notify("Recording saved", `${rec.base} (${rec.folder})`);
 
   const cloudMode = isFirebaseConfigured && isSignedIn();
