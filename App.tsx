@@ -93,6 +93,9 @@ async function savePendingTake(settings: any) {
   if (isRecordingInProgress()) return;
   const p = await readPending();
   if (!p) return;
+  // Already saved (the app died after the save, before the marker went).
+  const { listRecordings } = await import("./src/recordings");
+  if ((await listRecordings()).some((r) => r.id === p.startedAt)) { await clearPending(); return; }
   logEvent(`saving interrupted take from ${p.startedAt}`);
   try {
     const { startedAt, ...args } = p;

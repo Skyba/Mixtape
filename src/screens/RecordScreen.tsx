@@ -1,4 +1,4 @@
-import { markPending } from "../pendingTake";
+import { markPending, clearPending } from "../pendingTake";
 import { useEffect, useRef, useState } from "react";
 import {
   Alert,
@@ -578,6 +578,8 @@ export default function RecordScreen() {
   // Your own name in a speaker slot answers "are you in it": yes. An empty
   // or other-names-only list leaves it open — "not me" is answered on the
   // recording's review card, where it is a deliberate choice.
+  const takeStartRef = useRef<string | null>(null);
+
   function meFromSlots(): "yes" | undefined {
     const me = (settings.ownerName || "").trim().toLowerCase();
     return me && resolveSpeakers().some((x) => x.trim().toLowerCase() === me) ? "yes" : undefined;
@@ -683,9 +685,10 @@ export default function RecordScreen() {
       liveWarnedRef.current = false;
       armLiveness();
       logEvent(`start normal: recording, cap=${durationH}h`);
+      takeStartRef.current = new Date().toISOString();
       if (recorder.uri) {
         markPending({
-          cacheUri: recorder.uri, startedAt: new Date().toISOString(), plannedDurationHours: durationH,
+          cacheUri: recorder.uri, startedAt: takeStartRef.current, plannedDurationHours: durationH,
           speakers: resolveSpeakers(), folder, language, note, inputName: extRef.current?.name,
           meIncluded: meFromSlots(),
         });
@@ -1113,6 +1116,9 @@ export default function RecordScreen() {
   }
 
   async function discard() {
+    // A discarded take must not come back as an "interrupted" one on the
+    // next launch.
+    clearPending();
     recordingRef.current = false;
     takeGenRef.current += 1;
     // Every path that ends or suspends a take must kill the native tick too,
@@ -1188,6 +1194,9 @@ export default function RecordScreen() {
     setStatus("Saving…");
     try {
       const rec = await processStop({
+        // The take's id and time are its start, the same value an
+        // interrupted-take save would use, so the two can never both exist.
+        recordedAt: takeStartRef.current ?? undefined,
         cacheUri: uri,
         durationSeconds: seconds,
         plannedDurationHours: durationH,

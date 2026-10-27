@@ -511,7 +511,16 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     let preview: Recording = touch({ ...rec, meIncluded: "no" as const }, "meIncluded");
     const patch: Record<string, unknown> = { meIncluded: "no" };
     if (rec.speakerId) { preview = touch({ ...preview, speakerId: undefined }, "speakerId"); patch.speakerId = null; }
-    await recordEdit(preview, patch);
+    // Any voice still named after you is wrong now: drop that name (it goes
+    // back to "Speaker X"), against the revision on screen.
+    const me = ((await getSettings()).ownerName || "").trim().toLowerCase();
+    const mine = Object.entries(rec.speakerLabels ?? {}).filter(([, l]) => me && l.name.trim().toLowerCase() === me).map(([L]) => L);
+    if (mine.length) {
+      const labels = { ...(preview.speakerLabels ?? {}) };
+      for (const L of mine) { delete labels[L]; patch[`speakerLabels.${L}`] = null; }
+      preview = touch({ ...preview, speakerLabels: labels, speakerMap: Object.fromEntries(Object.entries(labels).map(([L, l]) => [L, l.name])) }, ...mine.map((L) => `speakerLabels.${L}`));
+    }
+    await recordEdit(preview, patch, mine.length ? shownRev : undefined);
     const next = await commitMeta(rec, (cur) => adopt(cur, preview, changedKeys(rec, preview)));
     setRec(next);
     await sendEdits(next);
