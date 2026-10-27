@@ -4,6 +4,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
@@ -28,6 +29,10 @@ const HARD_CAP_SECONDS = 120;
 // storage.rules (recordings/{uid}/**), so enrollment 403'd on every attempt
 // and no voiceprint was ever uploaded.
 export const VOICEPRINT_PATH = "_voiceprint/enroll.m4a";
+/** Someone else's sample: _voiceprint/people/<name>.m4a. The Mac matcher
+ *  reads the name back from the file name, so the name is the key. */
+export const personVoicePath = (name: string) =>
+  `_voiceprint/people/${encodeURIComponent(name.trim())}.m4a`;
 
 const SCRIPT = [
   "Read this out loud at a normal speaking distance, the way you'd talk in a meeting — not into the mic.",
@@ -42,6 +47,11 @@ export default function VoiceEnrollScreen() {
   const [elapsed, setElapsed] = useState(0);
   const [busy, setBusy] = useState("");
   const [enrolledAt, setEnrolledAt] = useState<string>("");
+  // Whose voice this take is: the owner's (default), or someone else's, by
+  // name — the person sits next to the phone and reads the script.
+  const [whose, setWhose] = useState<"me" | "other">("me");
+  const [otherName, setOtherName] = useState("");
+  const [savedOthers, setSavedOthers] = useState<string[]>([]);
   const tick = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -52,6 +62,10 @@ export default function VoiceEnrollScreen() {
   }, []);
 
   async function start() {
+    if (whose === "other" && !otherName.trim()) {
+      Alert.alert("Whose voice?", "Type the person's name first — the same spelling you use for them as a speaker.");
+      return;
+    }
     const perm = await AudioModule.requestRecordingPermissionsAsync();
     if (!perm.granted) {
       Alert.alert("Microphone permission denied");
@@ -99,6 +113,15 @@ export default function VoiceEnrollScreen() {
     }
     setBusy("Uploading…");
     try {
+      if (whose === "other") {
+        const name = otherName.trim();
+        await uploadToPath(uri, userPath(personVoicePath(name)));
+        setSavedOthers((x) => Array.from(new Set([...x, name])));
+        logEvent(`voiceprint enrolled for ${name} ${elapsed}s`);
+        setBusy("");
+        Alert.alert("Voice sample saved", `${name}: ${elapsed}s stored. Recording again for the same name replaces it.`);
+        return;
+      }
       await uploadToPath(uri, userPath(VOICEPRINT_PATH));
       const when = new Date().toISOString();
       const s = await getSettings();
@@ -127,7 +150,30 @@ export default function VoiceEnrollScreen() {
         seconds — more is better than less.
       </Text>
 
-      {enrolledAt ? (
+      <View style={styles.whoRow}>
+        {(["me", "other"] as const).map((w) => (
+          <TouchableOpacity key={w} style={[styles.who, whose === w && styles.whoOn]} onPress={() => setWhose(w)} disabled={recording}>
+            <Text style={styles.whoTxt}>{w === "me" ? "My voice" : "Someone else"}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      {whose === "other" ? (
+        <>
+          <TextInput
+            style={styles.input}
+            placeholder="Their name, as you label them (e.g. Erica)"
+            placeholderTextColor="#6b7280"
+            value={otherName}
+            onChangeText={setOtherName}
+            editable={!recording}
+            autoCapitalize="words"
+          />
+          <Text style={styles.step}>Hand them the phone: they read the script below in their own voice.</Text>
+          {savedOthers.length ? <Text style={styles.enrolled}>✓ Saved this session: {savedOthers.join(", ")}</Text> : null}
+        </>
+      ) : null}
+
+      {whose === "me" && enrolledAt ? (
         <Text style={styles.enrolled}>
           ✓ Enrolled {new Date(enrolledAt).toLocaleDateString()} — recording
           again replaces it.
@@ -152,7 +198,7 @@ export default function VoiceEnrollScreen() {
         disabled={!!busy}
       >
         <Text style={styles.btnTxt}>
-          {busy || (recording ? "Stop & save" : enrolledAt ? "Record again" : "Start")}
+          {busy || (recording ? "Stop & save" : whose === "me" && enrolledAt ? "Record again" : "Start")}
         </Text>
       </TouchableOpacity>
 
@@ -204,4 +250,9 @@ const styles = StyleSheet.create({
   btnTxt: { color: "#fff", fontSize: 16, fontWeight: "700" },
   warn: { color: "#fbbf24", fontSize: 12, marginTop: 12, lineHeight: 17 },
   hint: { color: "#7c828a", fontSize: 12, marginTop: 16, lineHeight: 17 },
+  whoRow: { flexDirection: "row", gap: 8, marginTop: 16 },
+  who: { flex: 1, borderRadius: 10, padding: 10, alignItems: "center", backgroundColor: "#15181d" },
+  whoOn: { backgroundColor: "#2f6fd0" },
+  whoTxt: { color: "#fff", fontWeight: "600" },
+  input: { color: "#fff", backgroundColor: "#15181d", borderRadius: 10, padding: 12, marginTop: 10 },
 });
