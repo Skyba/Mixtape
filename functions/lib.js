@@ -5,7 +5,7 @@ const AAI = "https://api.assemblyai.com/v2";
 // Fields a client may change after creation (phone outbox, Mac PATCH).
 const CLIENT_FIELDS = [
   "folder", "speakers", "speakerLabels", "speakerId", "meIncluded", "tags", "private", "note",
-  "topic", "place", "inputName", "language", "shareId", "base", "reviewFlag",
+  "topic", "place", "inputName", "language", "shareId", "base", "reviewFlag", "folderSuggestion",
 ];
 // Fields set once at creation and never patched.
 const CREATE_ONLY_FIELDS = ["recordedAt", "durationSeconds", "owner", "mergedInCloud"];
@@ -69,7 +69,7 @@ function canonStamp(t) {
 // these straight into paths and .map() calls, so a wrong type here is a crash
 // there, after the sidecar is already saved.
 function validField(f, v) {
-  if (v === null) return ["note", "speakerId", "meIncluded", "shareId", "topic", "place", "inputName", "reviewFlag"].includes(f);
+  if (v === null) return ["note", "speakerId", "meIncluded", "shareId", "topic", "place", "inputName", "reviewFlag", "folderSuggestion"].includes(f);
   switch (f) {
     case "folder": return typeof v === "string" && /^(?!\.)(?!_)[^/\\]{1,80}$/.test(v) && v !== "..";
     case "speakers": return Array.isArray(v) && v.every((x) => typeof x === "string");
@@ -84,6 +84,7 @@ function validField(f, v) {
     case "shareId": return typeof v === "string" && /^[A-Za-z0-9]{1,40}$/.test(v);
     case "place": return typeof v === "object" && typeof v.lat === "number" && typeof v.lon === "number";
     case "inputName": return typeof v === "string" && v.length <= 120;
+    case "folderSuggestion": return typeof v === "object" && typeof v.folder === "string" && v.folder.length <= 80 && typeof v.why === "string" && v.why.length <= 300 && typeof v.at === "string";
     case "reviewFlag": return typeof v === "object" && typeof v.reason === "string" && v.reason.length <= 500 && typeof v.at === "string";
     case "speakerLabels": return true; // handled per letter in applyPatch
     default: return false;

@@ -32,6 +32,35 @@ export function speakerStatus(r: Recording): SpeakerStatus {
   if (labels.some((l) => l.by === "ai-review" || l.by === "channel")) return "likely";
   return "none";
 }
+/**
+ * One colour per recording, for the library row and the review card:
+ *  - red:    the Mac review found its signals disagreeing;
+ *  - green:  you confirmed both the speakers and the folder;
+ *  - yellow: something is inferred (a voice match, an AI label, a suggested
+ *            folder) or only one of the two is confirmed;
+ *  - grey:   nothing yet — no inference, no confirmation.
+ */
+export type Trust = "grey" | "yellow" | "green" | "red";
+export function speakersConfirmed(r: Recording): boolean {
+  const labels = Object.values(r.speakerLabels ?? {});
+  return labels.length > 0 && labels.every((l) => l.by === "user");
+}
+export function folderConfirmed(r: Recording): boolean {
+  return r.folder !== INBOX;
+}
+export function trustOf(r: Recording): Trust {
+  if (r.reviewFlag) return "red";
+  const sp = speakersConfirmed(r), fo = folderConfirmed(r);
+  if (sp && fo) return "green";
+  const inferred = Object.keys(r.speakerLabels ?? {}).length > 0 || !!r.folderSuggestion;
+  return sp || fo || inferred ? "yellow" : "grey";
+}
+export const TRUST_COLOR: Record<Trust, string> = { grey: "#4b5058", yellow: "#facc15", green: "#4ade80", red: "#ef4444" };
+/** Where a speaker's name came from, in words. */
+export const SOURCE_WORD: Record<string, string> = {
+  user: "you", "ai-review": "AI review", channel: "channel", voiceprint: "voice", claude: "AI guess", aai: "AssemblyAI", none: "old label",
+};
+
 /** Labels a person could confirm in one tap (anything a model or the voice set). */
 export function confirmableLetters(r: Recording): string[] {
   return Object.entries(r.speakerLabels ?? {}).filter(([, l]) => l.by !== "user").map(([L]) => L);
@@ -152,7 +181,7 @@ export function mergeNewest(
   opts?: { serverWinsTies?: boolean }
 ): Recording {
   const scalar: SyncedField[] = ["folder", "speakers", "speakerId", "meIncluded", "tags", "private", "note",
-    "topic", "place", "inputName", "language", "shareId", "base", "reviewFlag"];
+    "topic", "place", "inputName", "language", "shareId", "base", "reviewFlag", "folderSuggestion"];
   let out: Recording = { ...mine };
   const stamps: Record<string, string> = { ...(mine.fieldsUpdatedAt ?? {}) };
   const newer = (t?: string, m?: string) =>

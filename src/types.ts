@@ -25,7 +25,8 @@ export type SyncedField =
   | "language"
   | "shareId"
   | "base"
-  | "reviewFlag";
+  | "reviewFlag"
+  | "folderSuggestion";
 
 export type Recording = {
   id: string; // stable, never changes (original timestamp)
@@ -78,6 +79,9 @@ export type Recording = {
    * cleared (null) when a person confirms the speakers. Drives the red row.
    */
   reviewFlag?: { reason: string; at: string } | null;
+  /** A folder the Mac classifier proposes for an Inbox recording; yellow
+   *  until accepted (which sets folder and clears this). */
+  folderSuggestion?: { folder: string; why: string; at: string } | null;
   /** v2: a server operation sent but not yet acknowledged (re-transcribe). */
   pendingOp?: string;
   language: string;

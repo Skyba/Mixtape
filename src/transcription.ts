@@ -128,13 +128,12 @@ export function nameForSpeaker(
   speakerMap?: Record<string, string>
 ): string {
   if (speakerMap?.[letter]) return speakerMap[letter];
-  const idx = letter.charCodeAt(0) - 65; // "A" -> 0
-  const slot = idx >= 0 && idx < speakers.length ? speakers[idx] : "";
-  // Letter order is arbitrary, so the positional slot is only a guess — never
-  // let it hand back a name the map already gave to another letter.
-  const taken = new Set(Object.values(speakerMap ?? {}));
-  if (slot && !taken.has(slot)) return slot;
-  return `Speaker ${idx + 1}`;
+  // AssemblyAI's identification already keys utterances by name.
+  if (!/^[A-Z]$/.test(letter)) return letter;
+  // Letter order is arbitrary, so the speakers list says nothing about which
+  // letter is whom; a positional guess named the wrong people with total
+  // confidence. An unmapped letter stays anonymous (same rule as the server).
+  return `Speaker ${letter}`;
 }
 
 /** Renders the labelled transcript text from utterances + a speaker→name map. */

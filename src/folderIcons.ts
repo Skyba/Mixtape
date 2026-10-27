@@ -46,5 +46,7 @@ export async function saveFolderIcon(folder: string, icon: string) {
 }
 
 export function iconOf(folder: string, icons: Record<string, string>): string {
+  // Inbox is a state, not a folder anyone chose an icon for.
+  if (folder === "Inbox") return "📥";
   return icons[folder] || DEFAULT_ICONS[folder] || "📁";
 }

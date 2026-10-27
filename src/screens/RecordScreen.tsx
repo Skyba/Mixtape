@@ -175,7 +175,7 @@ export default function RecordScreen() {
   // Is the owner one of the voices? Default yes; one tap says no for a
   // conference or someone else's meeting. Answered here because this is the
   // one moment it is certainly known. Never gates recording.
-  const [meIn, setMeIn] = useState(true);
+
   const [durationH, setDurationH] = useState(2);
   const [language, setLanguage] = useState("Auto");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
@@ -575,6 +575,14 @@ export default function RecordScreen() {
     }, 1000);
   }
 
+  // Your own name in a speaker slot answers "are you in it": yes. An empty
+  // or other-names-only list leaves it open — "not me" is answered on the
+  // recording's review card, where it is a deliberate choice.
+  function meFromSlots(): "yes" | undefined {
+    const me = (settings.ownerName || "").trim().toLowerCase();
+    return me && resolveSpeakers().some((x) => x.trim().toLowerCase() === me) ? "yes" : undefined;
+  }
+
   function resolveSpeakers(): string[] {
     return names.map((n, i) => (n && n.trim() ? n.trim() : `Speaker ${i + 1}`));
   }
@@ -679,7 +687,7 @@ export default function RecordScreen() {
         markPending({
           cacheUri: recorder.uri, startedAt: new Date().toISOString(), plannedDurationHours: durationH,
           speakers: resolveSpeakers(), folder, language, note, inputName: extRef.current?.name,
-          meIncluded: meIn ? "yes" : "no",
+          meIncluded: meFromSlots(),
         });
       }
       refreshMic();
@@ -1190,7 +1198,7 @@ export default function RecordScreen() {
         place: placeRef.current,
         note,
         inputName: extRef.current?.name,
-        meIncluded: meIn ? "yes" : "no",
+        meIncluded: meFromSlots(),
       });
       setStatus(
         `Saved: ${rec.base}\nTranscript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
@@ -1285,7 +1293,7 @@ export default function RecordScreen() {
         place: placeRef.current,
         note,
         inputName: extRef.current?.name,
-        meIncluded: meIn ? "yes" : "no",
+        meIncluded: meFromSlots(),
         transcribeAfterMerge: true,
         provisionalTopic: "untitled",
       });
@@ -1335,7 +1343,7 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         place: placeRef.current,
         note,
         inputName: extRef.current?.name,
-        meIncluded: meIn ? "yes" : "no",
+        meIncluded: meFromSlots(),
         shareId: liveShareId.current ?? undefined,
       });
       if (liveShareId.current) {
@@ -1631,11 +1639,6 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
           setTags(p.tags);
         }}
       />
-
-      <View style={styles.meRow}>
-        <Text style={styles.meTxt}>I'm one of the speakers</Text>
-        <Switch value={meIn} onValueChange={setMeIn} />
-      </View>
 
       <Text style={styles.label}>What is this?</Text>
       <TextInput

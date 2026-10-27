@@ -258,19 +258,16 @@ export default function SettingsScreen() {
     <ScrollView style={styles.container}>
       <Text style={styles.title}>Settings</Text>
 
-      <Text style={styles.label}>AssemblyAI API key</Text>
-      <MaskedKeyField
-        value={s.assemblyAiKey}
-        onChangeText={(v) => setS({ ...s, assemblyAiKey: v })}
-        placeholder="paste key"
-      />
+      <View style={styles.appRow}>
+        <Text style={styles.appVer}>
+          Mixtape v{APP_VERSION}
+          {Updates.isEmbeddedLaunch ? "" : ` · ${(Updates.updateId ?? "").slice(0, 8)}`}
+        </Text>
+        <TouchableOpacity style={styles.appBtn} onPress={checkForUpdate} disabled={updating}>
+          {updating ? <ActivityIndicator color="#fff" /> : <Text style={styles.appBtnTxt}>Check for updates</Text>}
+        </TouchableOpacity>
+      </View>
 
-      <Text style={styles.label}>Anthropic API key (topic + summaries)</Text>
-      <MaskedKeyField
-        value={s.anthropicKey}
-        onChangeText={(v) => setS({ ...s, anthropicKey: v })}
-        placeholder="paste key"
-      />
 
       <Text style={styles.label}>Who you are</Text>
       <Text style={styles.hint}>
@@ -372,6 +369,20 @@ export default function SettingsScreen() {
       <TouchableOpacity style={styles.save} onPress={save}>
         <Text style={styles.saveTxt}>{saved ? "Saved ✓" : "Save"}</Text>
       </TouchableOpacity>
+
+      <Text style={styles.label}>AssemblyAI API key</Text>
+      <MaskedKeyField
+        value={s.assemblyAiKey}
+        onChangeText={(v) => setS({ ...s, assemblyAiKey: v })}
+        placeholder="paste key"
+      />
+
+      <Text style={styles.label}>Anthropic API key (topic + summaries)</Text>
+      <MaskedKeyField
+        value={s.anthropicKey}
+        onChangeText={(v) => setS({ ...s, anthropicKey: v })}
+        placeholder="paste key"
+      />
 
       <Text style={styles.label}>Cloud account</Text>
       {!isFirebaseConfigured ? (
@@ -554,42 +565,16 @@ export default function SettingsScreen() {
         </>
       ) : null}
 
-      <Text style={styles.label}>App</Text>
-      <TouchableOpacity
-        style={styles.updateBtn}
-        onPress={checkForUpdate}
-        disabled={updating}
-      >
-        {updating ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <>
-            <Ionicons name="cloud-download-outline" size={20} color="#fff" />
-            <Text style={styles.saveTxt}>Check for updates</Text>
-          </>
-        )}
-      </TouchableOpacity>
-      <Text style={styles.hint}>
-        Pulls the latest version over-the-air and restarts.
-      </Text>
-
-      <Text style={styles.version}>
-        Mixtape v{APP_VERSION}
-        {"\n"}
-        {Updates.isEmbeddedLaunch
-          ? "build base"
-          : `update ${(Updates.updateId ?? "").slice(0, 8)}${
-              Updates.createdAt
-                ? " · " + new Date(Updates.createdAt).toLocaleDateString()
-                : ""
-            }`}
-      </Text>
       <View style={{ height: 40 }} />
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  appRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8 },
+  appVer: { color: "#9aa0a6", fontSize: 13 },
+  appBtn: { backgroundColor: "#23262d", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
+  appBtnTxt: { color: "#e8eaed", fontSize: 13, fontWeight: "600" },
   container: { backgroundColor: "#0f1115", flex: 1, padding: 20, paddingTop: 60 },
   title: { color: "#fff", fontSize: 26, fontWeight: "700", marginBottom: 10 },
   label: {

@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { setLabel, touch, adopt, changedKeys, speakerStatus, confirmableLetters } from "../attribution";
+import { setLabel, touch, adopt, changedKeys, confirmableLetters, SOURCE_WORD } from "../attribution";
+import ReviewCard from "../components/ReviewCard";
+import { fmtWhen, fmtLength } from "../when";
+import { placeLabel } from "../place";
+import { Modal } from "react-native";
+import { downloadUrlForPath } from "../firebase";
 import { enqueue, replayOutbox } from "../outbox";
 import {
   ActivityIndicator,
@@ -113,12 +118,27 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const [utterances, setUtterances] = useState<Utterance[] | null>(null);
   const [copied, setCopied] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
+  const [showPlacement, setShowPlacement] = useState(rec.folder === "Inbox" && !rec.folderSuggestion);
+  const [menu, setMenu] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  // What the review card's clips play: the local file, else the cloud copy.
+  const [clipSource, setClipSource] = useState<string | null>(null);
+  useEffect(() => {
+    (async () => {
+      const local = await FileSystem.getInfoAsync(audioPath(rec)).catch(() => ({ exists: false }));
+      if (local.exists) return setClipSource(audioPath(rec));
+      try { setClipSource(await downloadUrlForPath(remoteCanonicalPath(rec.id, "audio.m4a"))); } catch { setClipSource(null); }
+    })();
+  }, [rec.id, isRemote]);
   const insets = useSafeAreaInsets();
 
   const done = rec.transcriptStatus === "done";
   const pending =
     rec.transcriptStatus === "pending" || rec.transcriptStatus === "processing";
   const canUseTranscript = done && !isRemote && !!transcript;
+  // A speaker's name everywhere on this screen: its label first (whoever set
+  // it), then the legacy map, then the key itself.
+  const nameOf = (L: string) => rec.speakerLabels?.[L]?.name ?? nameForSpeaker(L, rec.speakers, rec.speakerMap);
 
   // A transcript finishing or an edit landing from the Mac while this screen
   // is open: re-read the sidecar and its files.
@@ -299,13 +319,14 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   /** One tap: every label a model or the voice set becomes the user's, and
    *  the review flag clears. Same outbox path as any label edit. */
-  async function confirmSpeakers() {
+  async function confirmSpeakers(named?: { letter: string; name: string }[]) {
     const settings = await getSettings();
+    const list = named ?? confirmableLetters(rec).map((L) => ({ letter: L, name: rec.speakerLabels![L].name }));
     let preview: Recording = rec;
-    for (const L of confirmableLetters(rec)) preview = setLabel(preview, L, rec.speakerLabels![L].name, "user", settings.ownerName);
+    for (const { letter, name } of list) preview = setLabel(preview, letter, name, "user", settings.ownerName);
     if (rec.reviewFlag) preview = touch({ ...preview, reviewFlag: null }, "reviewFlag");
     const patch: Record<string, unknown> = {};
-    for (const L of confirmableLetters(rec)) patch[`speakerLabels.${L}`] = preview.speakerLabels?.[L] ?? null;
+    for (const { letter } of list) patch[`speakerLabels.${letter}`] = preview.speakerLabels?.[letter] ?? null;
     if (preview.speakerId !== rec.speakerId) patch.speakerId = preview.speakerId ?? null;
     if (preview.meIncluded !== rec.meIncluded) patch.meIncluded = preview.meIncluded;
     if (rec.reviewFlag) patch.reviewFlag = null;
@@ -351,15 +372,16 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setBusy("");
   }
 
-  async function changeFolder(folder: string, p?: Placement) {
+  async function changeFolder(folder: string, p?: Placement, clearSuggestion = !!rec.folderSuggestion) {
     if (folder === rec.folder) return;
     setBusy("Moving…");
     const from = rec;
     if (await isCanonical()) {
       // A field, stamped, through the outbox. Tags belong to the folder's
       // vocabulary, so a move clears or replaces them.
-      const preview = touch({ ...rec, folder, ...(p ? { private: p.private, tags: p.tags } : {}) }, "folder", ...(p ? ["private", "tags"] : []));
-      await recordEdit(preview, { folder, ...(p ? { private: p.private, tags: p.tags } : {}) });
+      const preview = touch({ ...rec, folder, ...(p ? { private: p.private, tags: p.tags } : {}), ...(clearSuggestion ? { folderSuggestion: null } : {}) },
+        "folder", ...(p ? ["private", "tags"] : []), ...(clearSuggestion ? ["folderSuggestion"] : []));
+      await recordEdit(preview, { folder, ...(p ? { private: p.private, tags: p.tags } : {}), ...(clearSuggestion ? { folderSuggestion: null } : {}) });
       const moved = await commitMeta(rec, (cur) => adopt(cur, preview, changedKeys(rec, preview)));
       await rememberFolder(folder);
       setRec(moved);
@@ -484,6 +506,22 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     await sendEdits(next);
   }
 
+  /** "I'm not in this": answers the question and clears an owner letter. */
+  async function notMe() {
+    let preview: Recording = touch({ ...rec, meIncluded: "no" as const }, "meIncluded");
+    const patch: Record<string, unknown> = { meIncluded: "no" };
+    if (rec.speakerId) { preview = touch({ ...preview, speakerId: undefined }, "speakerId"); patch.speakerId = null; }
+    await recordEdit(preview, patch);
+    const next = await commitMeta(rec, (cur) => adopt(cur, preview, changedKeys(rec, preview)));
+    setRec(next);
+    await sendEdits(next);
+  }
+
+  /** Accepting the suggested folder files it there and clears the suggestion. */
+  async function acceptFolder(folder: string) {
+    await changeFolder(folder, undefined, true);
+  }
+
   function confirmDelete() {
     Alert.alert("Delete recording?", rec.base, [
       { text: "Cancel", style: "cancel" },
@@ -507,29 +545,15 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       {copied ? <Text style={styles.copiedBanner}>Copied ✓</Text> : null}
       <Text style={styles.title}>{rec.topic || rec.base}</Text>
       <Text style={styles.meta}>
-        {new Date(rec.recordedAt).toLocaleString()} ·{" "}
-        {Math.round(rec.durationSeconds / 60)} min · {rec.language}
+        {[fmtWhen(rec.recordedAt), fmtLength(rec.durationSeconds || rec.audioDurationSec), placeLabel(rec.place), rec.language].filter(Boolean).join(" · ")}
       </Text>
-      <View style={styles.badges}>
-        <Badge
-          text={
-            done
-              ? "Transcribed ✓"
-              : pending
-              ? "Transcribing…"
-              : "No transcript"
-          }
-          color={done ? "#16331f" : pending ? "#3a2f12" : "#2a2d34"}
-          fg={done ? "#4ade80" : pending ? "#fbbf24" : "#9aa0a6"}
-        />
-        <Badge
-          text={`Upload: ${rec.uploadStatus}`}
-          color="#2a2d34"
-          fg="#9aa0a6"
-        />
-      </View>
+      {!done || rec.uploadStatus !== "uploaded" ? (
+        <Text style={[styles.meta, { color: pending ? "#fbbf24" : "#9aa0a6" }]}>
+          {[done ? "" : pending ? "Transcribing…" : "No transcript", rec.uploadStatus === "uploaded" ? "" : `upload ${rec.uploadStatus}`].filter(Boolean).join(" · ")}
+        </Text>
+      ) : null}
 
-      {(rec.aaiTranscriptId || rec.estCostUsd != null) && (
+      {showDetails && (rec.aaiTranscriptId || rec.estCostUsd != null) && (
         <View style={styles.metaCard}>
           {rec.transcribedAt ? (
             <MetaRow
@@ -577,56 +601,99 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         </TouchableOpacity>
       ) : (
         <>
-          {/* Transcript-gated actions */}
-          <View style={styles.btnRow}>
-            <LockBtn
-              label="Copy transcript"
-              enabled={canUseTranscript}
-              onPress={copyTranscript}
-            />
-            <LockBtn
-              label="Save .txt"
-              enabled={canUseTranscript}
-              onPress={() => shareFile(transcriptPath(rec))}
-            />
-          </View>
-
           <AudioPlayerBar uri={audioPath(rec)} />
-          <TouchableOpacity
-            style={styles.audioShare}
-            onPress={() => shareFile(audioPath(rec))}
-          >
-            <Text style={styles.btnTxt}>Share / save audio (.m4a)</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.transcribe,
-              done && styles.transcribeDone,
-              pending && styles.transcribeBusy,
-            ]}
-            disabled={pending || !!rec.damaged}
-            onPress={() => doTranscribe()}
-          >
-            <Text style={styles.btnTxt}>
-              {done
-                ? "Re-transcribe"
-                : pending
-                ? "Transcribing…"
-                : "Transcribe now"}
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.actRow}>
+            <TouchableOpacity style={[styles.act, !canUseTranscript && styles.actOff]} disabled={!canUseTranscript} onPress={copyTranscript}>
+              <Text style={styles.actTxt}>Copy text</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.act} onPress={() => shareFile(audioPath(rec))}>
+              <Text style={styles.actTxt}>Share audio</Text>
+            </TouchableOpacity>
+            {!done && !pending ? (
+              <TouchableOpacity style={[styles.act, styles.actPrimary]} disabled={!!rec.damaged} onPress={() => doTranscribe()}>
+                <Text style={styles.actTxt}>Transcribe</Text>
+              </TouchableOpacity>
+            ) : null}
+            <TouchableOpacity style={styles.act} onPress={() => setMenu(true)}>
+              <Text style={styles.actTxt}>⋯</Text>
+            </TouchableOpacity>
+          </View>
         </>
       )}
 
-      <PlacementPicker
-        value={{
-          folder: rec.folder,
-          private: !!rec.private,
-          tags: rec.tags ?? [],
-        }}
-        onChange={savePlacement}
+      <ReviewCard
+        rec={rec}
+        utterances={utterances}
+        audioSource={clipSource}
+        editable={!revisionBehind && !!utterances}
+        options={Array.from(new Set([...rec.speakers.filter((s) => !/^Speaker \d+$/.test(s)), ...speakerHist]))}
+        onSetName={remapSpeaker}
+        onConfirmAll={confirmSpeakers}
+        onNotMe={notMe}
+        onAcceptFolder={acceptFolder}
+        onChangeFolder={() => setShowPlacement((v) => !v)}
       />
+
+      {canUseTranscript ? (
+        <>
+          <Text style={styles.sectionLabel}>Transcript</Text>
+          <ScrollView style={styles.transcriptBox} nestedScrollEnabled>
+            {utterances && utterances.length > 0 ? (
+              utterances.map((u, i) => (
+                <View key={i} style={styles.uttRow}>
+                  <Text
+                    style={[
+                      styles.uttSpeaker,
+                      { color: colorForLetter(u.speaker) },
+                    ]}
+                  >
+                    {nameOf(u.speaker)}
+                    {rec.speakerLabels?.[u.speaker] ? (
+                      rec.speakerLabels[u.speaker].by !== "user" ? <Text style={styles.uttSrc}> ({SOURCE_WORD[rec.speakerLabels[u.speaker].by]})</Text> : null
+                    ) : !/^[A-Z]$/.test(u.speaker) ? <Text style={styles.uttSrc}> (AssemblyAI)</Text> : null}
+                    <Text style={styles.uttTime}>
+                      {"  "}
+                      {tstamp(u.start)}
+                    </Text>
+                  </Text>
+                  <Text style={styles.uttText}>{u.text}</Text>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.transcriptTxt}>{transcript}</Text>
+            )}
+          </ScrollView>
+        </>
+      ) : null}
+
+      <Modal visible={menu} transparent animationType="fade" onRequestClose={() => setMenu(false)}>
+        <TouchableOpacity style={styles.sheetBack} activeOpacity={1} onPress={() => setMenu(false)}>
+          <View style={[styles.sheet, { paddingBottom: 16 + insets.bottom }]}>
+            {[
+              canUseTranscript ? { t: "Save transcript (.txt)", f: () => shareFile(transcriptPath(rec)) } : null,
+              canUseTranscript && isFirebaseConfigured && !rec.shareId ? { t: "Publish a public link", f: publish } : null,
+              done && !pending && !rec.damaged ? { t: "Re-transcribe", f: () => doTranscribe() } : null,
+              { t: showDetails ? "Hide job details" : "Show job details", f: () => setShowDetails((v) => !v) },
+              { t: "Delete recording", f: confirmDelete, danger: true },
+            ].filter(Boolean).map((o: any) => (
+              <TouchableOpacity key={o.t} style={styles.sheetItem} onPress={() => { setMenu(false); o.f(); }}>
+                <Text style={[styles.sheetTxt, o.danger && { color: "#f87171" }]}>{o.t}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {showPlacement ? (
+        <PlacementPicker
+          value={{
+            folder: rec.folder,
+            private: !!rec.private,
+            tags: rec.tags ?? [],
+          }}
+          onChange={savePlacement}
+        />
+      ) : null}
       <Text style={styles.sectionLabel}>Language</Text>
       <View style={styles.langRow}>
         {DETAIL_LANGUAGES.map((l) => (
@@ -647,23 +714,6 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         ))}
       </View>
 
-      {speakerStatus(rec) !== "none" || confirmableLetters(rec).length ? (
-        <View style={styles.attrBox}>
-          <Text style={[styles.attrTxt, { color: { confirmed: "#4ade80", likely: "#facc15", review: "#ef4444", none: "#9aa0a6" }[speakerStatus(rec)] }]}>
-            {{ confirmed: "Speakers confirmed by you.", likely: "Speakers likely right (two signals agree).", review: `Needs a look: ${rec.reviewFlag?.reason ?? "the signals disagree"}`, none: "Speakers not confirmed yet." }[speakerStatus(rec)]}
-          </Text>
-          {Object.entries(rec.speakerLabels ?? {}).map(([L, l]) => (
-            <Text key={L} style={styles.attrLine}>{L === l.name ? l.name : `${L} = ${l.name}`} · {{ user: "you", "ai-review": "likely", channel: "certain", voiceprint: "voice only", claude: "guess", aai: "guess", none: "unknown" }[l.by]}</Text>
-          ))}
-          {confirmableLetters(rec).length && !revisionBehind ? (
-            <TouchableOpacity style={styles.attrBtn} onPress={confirmSpeakers}>
-              <Text style={styles.attrBtnTxt}>These are right — confirm</Text>
-            </TouchableOpacity>
-          ) : null}
-          <Text style={styles.attrHint}>Wrong? Rename a speaker under Talk time below; that confirms it too.</Text>
-        </View>
-      ) : null}
-
       <SpeakerSelector
         count={rec.speakers.length}
         names={toNames(rec.speakers)}
@@ -676,23 +726,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
           <Text style={styles.sectionLabel}>Talk time</Text>
           <SpeakerTimeline
             utterances={utterances}
-            nameFor={(l) => nameForSpeaker(l, rec.speakers, rec.speakerMap)}
+            nameFor={(l) => nameOf(l)}
           />
 
-          <Text style={styles.sectionLabel}>Fix speaker names</Text>
-          <SpeakerRemap
-            letters={Array.from(
-              new Set(utterances.map((u) => u.speaker))
-            ).sort()}
-            nameFor={(l) => nameForSpeaker(l, rec.speakers, rec.speakerMap)}
-            options={Array.from(
-              new Set([
-                ...rec.speakers.filter((s) => !/^Speaker \d+$/.test(s)),
-                ...speakerHist,
-              ])
-            )}
-            onPick={remapSpeaker}
-          />
+
         </>
       ) : null}
 
@@ -751,7 +788,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
           {isFirebaseConfigured ? (
             <>
-              <Text style={styles.sectionLabel}>Public share link</Text>
+              {rec.shareId ? <Text style={styles.sectionLabel}>Public share link</Text> : null}
               {rec.shareId ? (
                 <View style={styles.shareCard}>
                   <Text style={styles.shareUrl} numberOfLines={1}>
@@ -773,54 +810,16 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
                     </TouchableOpacity>
                   </View>
                 </View>
-              ) : (
-                <TouchableOpacity
-                  style={styles.summarizeBtn}
-                  onPress={publish}
-                  disabled={shareBusy}
-                >
-                  {shareBusy ? (
-                    <ActivityIndicator color="#fff" />
-                  ) : (
-                    <Text style={styles.btnTxt}>🔗 Publish public link</Text>
-                  )}
-                </TouchableOpacity>
-              )}
+              ) : null}
             </>
           ) : null}
 
-          <Text style={styles.sectionLabel}>Transcript</Text>
-          <ScrollView style={styles.transcriptBox} nestedScrollEnabled>
-            {utterances && utterances.length > 0 ? (
-              utterances.map((u, i) => (
-                <View key={i} style={styles.uttRow}>
-                  <Text
-                    style={[
-                      styles.uttSpeaker,
-                      { color: colorForLetter(u.speaker) },
-                    ]}
-                  >
-                    {nameForSpeaker(u.speaker, rec.speakers, rec.speakerMap)}
-                    <Text style={styles.uttTime}>
-                      {"  "}
-                      {tstamp(u.start)}
-                    </Text>
-                  </Text>
-                  <Text style={styles.uttText}>{u.text}</Text>
-                </View>
-              ))
-            ) : (
-              <Text style={styles.transcriptTxt}>{transcript}</Text>
-            )}
-          </ScrollView>
+
         </>
       ) : !isRemote && !done ? (
         <Text style={styles.meta}>No transcript yet.</Text>
       ) : null}
 
-      <TouchableOpacity style={styles.del} onPress={confirmDelete}>
-        <Text style={styles.btnTxt}>Delete</Text>
-      </TouchableOpacity>
       <View style={{ height: 40 + insets.bottom }} />
     </ScrollView>
   );
@@ -880,13 +879,23 @@ function LockBtn({
 }
 
 const styles = StyleSheet.create({
+  actRow: { flexDirection: "row", gap: 8, marginTop: 8 },
+  act: { backgroundColor: "#23262d", borderRadius: 10, paddingVertical: 9, paddingHorizontal: 12, alignItems: "center" },
+  actPrimary: { backgroundColor: "#2f6fd0" },
+  actOff: { opacity: 0.4 },
+  actTxt: { color: "#e8eaed", fontSize: 13, fontWeight: "600" },
+  sheetBack: { flex: 1, backgroundColor: "#000000aa", justifyContent: "flex-end" },
+  sheet: { backgroundColor: "#1a1d23", borderTopLeftRadius: 16, borderTopRightRadius: 16, paddingTop: 8 },
+  sheetItem: { paddingVertical: 16, paddingHorizontal: 20 },
+  sheetTxt: { color: "#e8eaed", fontSize: 16 },
+  uttSrc: { color: "#7c828a", fontSize: 11, fontWeight: "400" },
   attrBox: { backgroundColor: "#15181d", borderRadius: 10, padding: 12, marginTop: 16 },
   attrTxt: { fontSize: 13, fontWeight: "600" },
   attrLine: { color: "#c9cdd3", fontSize: 13, marginTop: 6 },
   attrBtn: { backgroundColor: "#2f6fd0", borderRadius: 10, padding: 12, alignItems: "center", marginTop: 10 },
   attrBtnTxt: { color: "#fff", fontWeight: "700" },
   attrHint: { color: "#7c828a", fontSize: 11, marginTop: 8 },
-  container: { backgroundColor: "#0f1115", flex: 1, padding: 20, paddingTop: 50 },
+  container: { backgroundColor: "#0f1115", flex: 1, paddingHorizontal: 16, paddingTop: 8 },
   langRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
   langChip: {
     backgroundColor: "#23262d",

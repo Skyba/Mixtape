@@ -35,10 +35,8 @@ import { canUploadNow } from "../network";
 import { pushMeta, recordEdit, sendEdits } from "../outbox";
 import { iconOf, useFolderIcons } from "../folderIcons";
 import { placeLabel } from "../place";
-import { isGreen, missingForGreen, touch, adopt, changedKeys, speakerStatus } from "../attribution";
-
-// Row edge colour by how far the speakers can be trusted.
-const STATUS_COLOR = { confirmed: "#4ade80", likely: "#facc15", review: "#ef4444", none: "transparent" } as const;
+import { isGreen, touch, adopt, changedKeys, trustOf, TRUST_COLOR, type Trust } from "../attribution";
+import { fmtWhen, fmtLength } from "../when";
 import { enqueue, replayOutbox } from "../outbox";
 import { getSettings } from "../storage";
 import { INBOX, Recording } from "../types";
@@ -56,6 +54,8 @@ export default function LibraryScreen() {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [folderFilter, setFolderFilter] = useState<string | null>(null);
+  const [trustFilter, setTrustFilter] = useState<"all" | "review" | "confirmed">("all");
+  const [folderPick, setFolderPick] = useState(false);
   const icons = useFolderIcons();
   // Tapping a row's icon files that one recording. It used to open the folder
   // icon editor, which changed the badge on every recording in the folder —
@@ -302,7 +302,7 @@ export default function LibraryScreen() {
     );
   }
 
-  const folders = Array.from(new Set(local.map((r) => r.folder))).sort();
+  const folders = Array.from(new Set(local.map((r) => r.folder).filter((f) => f && f.trim()))).sort();
 
   const hasAny = local.length + remote.length > 0;
 
@@ -353,45 +353,45 @@ export default function LibraryScreen() {
       ) : null}
       {msg ? <Text style={styles.msg}>{msg}</Text> : null}
       {hasAny && !selectMode ? (
-        <View style={styles.sortRow}>
-          <TouchableOpacity
-            style={[styles.sortChip, !folderFilter && styles.sortChipOn]}
-            onPress={() => setFolderFilter(null)}
-          >
-            <Text
-              style={[
-                styles.sortChipTxt,
-                !folderFilter && styles.sortChipTxtOn,
-              ]}
-            >
-              all {local.length}
+        <View style={styles.filterRow}>
+          {(["all", "review", "confirmed"] as const).map((k) => {
+            const n = k === "all" ? local.length : local.filter((r) => (k === "confirmed") === (trustOf(r) === "green")).length;
+            return (
+              <TouchableOpacity key={k} style={[styles.seg, trustFilter === k && styles.segOn]} onPress={() => setTrustFilter(k)}>
+                <Text style={[styles.segTxt, trustFilter === k && styles.segTxtOn]}>
+                  {{ all: "All", review: "To review", confirmed: "Confirmed" }[k]} {n}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+          <TouchableOpacity style={[styles.seg, !!folderFilter && styles.segOn]} onPress={() => setFolderPick(true)}>
+            <Text style={[styles.segTxt, !!folderFilter && styles.segTxtOn]} numberOfLines={1}>
+              {folderFilter ? `${iconOf(folderFilter, icons)} ${folderFilter}` : "Folder ▾"}
             </Text>
           </TouchableOpacity>
-          {folders.map((f) => (
-            <TouchableOpacity
-              key={f}
-              style={[styles.sortChip, folderFilter === f && styles.sortChipOn]}
-              onPress={() => setFolderFilter(folderFilter === f ? null : f)}
-            >
-              <Text
-                style={[
-                  styles.sortChipTxt,
-                  folderFilter === f && styles.sortChipTxtOn,
-                ]}
-              >
-                {iconOf(f, icons)} {f}{" "}
-                {local.filter((r) => r.folder === f).length}
-              </Text>
-            </TouchableOpacity>
-          ))}
         </View>
       ) : null}
+      <Modal visible={folderPick} transparent animationType="fade" onRequestClose={() => setFolderPick(false)}>
+        <TouchableOpacity style={styles.moveBackdrop} activeOpacity={1} onPress={() => setFolderPick(false)}>
+          <View style={styles.moveCard}>
+            {[null, ...folders].map((f) => (
+              <TouchableOpacity key={f ?? "__all"} style={styles.moveItem} onPress={() => { setFolderFilter(f); setFolderPick(false); }}>
+                <Text style={styles.moveItemTxt}>
+                  {f ? `${iconOf(f, icons)}  ${f}` : "All folders"}  <Text style={{ color: "#7c828a" }}>{f ? local.filter((r) => r.folder === f).length : local.length}</Text>
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </TouchableOpacity>
+      </Modal>
       {busy && local.length === 0 ? (
         <ActivityIndicator color="#fff" style={{ marginTop: 40 }} />
       ) : null}
 
       {sortRecs(
-        folderFilter ? local.filter((r) => r.folder === folderFilter) : local
+        local
+          .filter((r) => !folderFilter || r.folder === folderFilter)
+          .filter((r) => trustFilter === "all" || (trustFilter === "confirmed") === (trustOf(r) === "green"))
       ).map((r) => (
         <Row
           key={r.id}
@@ -538,20 +538,34 @@ function Row({
   selected?: boolean;
   onToggle?: () => void;
 }) {
-  const sync = syncInfo(rec, remote);
   const split = splitBase(rec.base);
   const date = split.date;
   // Prefer the AI topic — cloud recordings keep a provisional filename, so the
   // real title lives in the topic field rather than in the base.
   const title = rec.topic || split.title;
+  const trust = remote ? "grey" : trustOf(rec);
+  const status = [
+    rec.mergePending ? "finishing audio" : "",
+    rec.transcriptStatus === "pending" || rec.transcriptStatus === "processing" ? "transcribing" : "",
+    rec.transcriptStatus === "error" ? "transcription failed" : "",
+    !remote && rec.uploadStatus === "pending" ? "not uploaded" : "",
+    remote ? "cloud only" : "",
+  ].filter(Boolean).join(" · ");
+  const who = (rec.speakers ?? []).filter((x) => !/^Speaker \d+$/.test(x)).join(", ");
   return (
-    <View>
-    <View style={[styles.row, selected && styles.rowSel, !remote && { borderLeftWidth: 4, borderLeftColor: STATUS_COLOR[speakerStatus(rec)] }]}>
+    <View
+      style={[
+        styles.row,
+        { borderLeftColor: TRUST_COLOR[trust] },
+        trust === "green" && styles.rowGreen,
+        selected && styles.rowSel,
+      ]}
+    >
       {selectMode ? (
         <TouchableOpacity style={styles.play} onPress={onToggle}>
           <Ionicons
             name={selected ? "checkmark-circle" : "ellipse-outline"}
-            size={28}
+            size={24}
             color={selected ? "#3b82f6" : "#6b7280"}
           />
         </TouchableOpacity>
@@ -560,75 +574,21 @@ function Row({
           <Text style={styles.folderIcon}>{icon}</Text>
         </TouchableOpacity>
       )}
-      <TouchableOpacity
-        style={styles.rowBody}
-        onPress={selectMode ? onToggle : onPress}
-      >
-        <Text style={styles.rowTitle} numberOfLines={1}>
-          {title}
-        </Text>
+      <TouchableOpacity style={styles.rowBody} onPress={selectMode ? onToggle : onPress}>
+        <View style={styles.titleLine}>
+          <Text style={[styles.rowTitle, { flex: 1, flexShrink: 1 }]} numberOfLines={1} ellipsizeMode="tail">{title}</Text>
+          <Text style={styles.rowLen}>{fmtLength(rec.durationSeconds || rec.audioDurationSec)}</Text>
+        </View>
         <Text style={styles.rowSub} numberOfLines={1}>
-          {(rec.speakers ?? []).join(", ") || "no speakers"}
+          {[fmtWhen(rec.recordedAt) || date, placeLabel(rec.place), who].filter(Boolean).join(" · ")}
           {rec.private ? "  🔒" : ""}
         </Text>
-        {rec.tags?.length ? (
-          <Text style={styles.rowFiling} numberOfLines={1}>
-            {rec.tags.map((t) => `#${t}`).join(" ")}
+        {status || rec.reviewFlag || (rec.folder === INBOX && rec.folderSuggestion) ? (
+          <Text style={[styles.rowStatus, rec.reviewFlag ? { color: "#f87171" } : null]} numberOfLines={1}>
+            {[rec.reviewFlag ? "speakers disagree" : "", rec.folder === INBOX && rec.folderSuggestion ? `→ ${rec.folderSuggestion.folder}?` : "", status].filter(Boolean).join(" · ")}
           </Text>
         ) : null}
-        {!remote && !isGreen(rec) ? (
-          <Text style={styles.amberHint}>
-            Needs: {missingForGreen(rec).join(" · ")}
-          </Text>
-        ) : null}
-        <View style={styles.metaRow}>
-          {date ? <Text style={styles.rowDate}>{date}</Text> : null}
-          {!remote ? (
-            <TouchableOpacity
-              onPress={onAttribution}
-              disabled={!onAttribution}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <View
-                style={[
-                  styles.dot,
-                  { backgroundColor: isGreen(rec) ? "#4ade80" : "#f59e0b" },
-                ]}
-              />
-            </TouchableOpacity>
-          ) : null}
-          <Text style={styles.rowMeta}>{fmtDur(rec.durationSeconds)}</Text>
-          {placeLabel(rec.place) ? (
-            <Text style={styles.rowMeta}>{placeLabel(rec.place)}</Text>
-          ) : null}
-          <View style={[styles.pill, { backgroundColor: sync.color }]}>
-            <Text style={styles.pillTxt}>{sync.label}</Text>
-          </View>
-          {rec.transcriptStatus === "done" ? (
-            <View style={[styles.pill, { backgroundColor: "#4ade80" }]}>
-              <Text style={styles.pillTxt}>Transcript</Text>
-            </View>
-          ) : rec.transcriptStatus === "pending" ||
-            rec.transcriptStatus === "processing" ? (
-            <View style={[styles.pill, { backgroundColor: "#fbbf24" }]}>
-              <Text style={styles.pillTxt}>Transcribing</Text>
-            </View>
-          ) : null}
-          {rec.mergePending ? (
-            <Text style={styles.rowMeta}>⏳ finishing (Sync)</Text>
-          ) : null}
-        </View>
       </TouchableOpacity>
-      {!selectMode && onDelete ? (
-        <TouchableOpacity
-          style={styles.del}
-          onPress={onDelete}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Ionicons name="trash-outline" size={20} color="#9aa0a6" />
-        </TouchableOpacity>
-      ) : null}
-    </View>
     </View>
   );
 }
@@ -657,6 +617,18 @@ function splitBase(base: string): { date: string; title: string } {
 }
 
 const styles = StyleSheet.create({
+  rowGreen: { borderWidth: 1.5, borderColor: "#4ade80" },
+  moveCard: { backgroundColor: "#1a1d23", borderRadius: 14, paddingVertical: 6, maxHeight: "80%" },
+  moveItem: { paddingVertical: 13, paddingHorizontal: 18 },
+  moveItemTxt: { color: "#e8eaed", fontSize: 16 },
+  titleLine: { flexDirection: "row", alignItems: "center", gap: 8, width: "100%" },
+  rowLen: { color: "#9aa0a6", fontSize: 12, flexShrink: 0 },
+  rowStatus: { color: "#facc15", fontSize: 12, marginTop: 2 },
+  filterRow: { flexDirection: "row", gap: 6, marginTop: 8, marginBottom: 4 },
+  seg: { backgroundColor: "#1a1d23", borderRadius: 16, paddingHorizontal: 10, paddingVertical: 6, flexShrink: 1 },
+  segOn: { backgroundColor: "#2f6fd0" },
+  segTxt: { color: "#c9cdd3", fontSize: 13 },
+  segTxtOn: { color: "#fff", fontWeight: "600" },
   screen: { flex: 1, backgroundColor: "#0f1115" },
   container: { backgroundColor: "#0f1115", flex: 1, padding: 20, paddingTop: 60 },
   header: {
@@ -708,22 +680,24 @@ const styles = StyleSheet.create({
   row: {
     backgroundColor: "#1a1d23",
     borderRadius: 12,
-    padding: 14,
-    marginBottom: 8,
+    borderLeftWidth: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    marginBottom: 6,
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 10,
   },
   play: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: "#23262d",
     alignItems: "center",
     justifyContent: "center",
   },
   playOn: { backgroundColor: "#3b82f6" },
-  folderIcon: { fontSize: 22 },
+  folderIcon: { fontSize: 18 },
   dot: { width: 10, height: 10, borderRadius: 5, marginRight: 8 },
   amberHint: { color: "#f59e0b", fontSize: 11, marginTop: 2 },
   moveBackdrop: {
@@ -748,7 +722,7 @@ const styles = StyleSheet.create({
   rowFiling: { color: "#7c828a", fontSize: 11.5, marginTop: 2 },
   playTxt: { color: "#fff", fontSize: 16 },
   rowSel: { backgroundColor: "#1e2740" },
-  rowBody: { flex: 1 },
+  rowBody: { flex: 1, minWidth: 0 },
   rowTitle: { color: "#fff", fontSize: 15, fontWeight: "600" },
   rowSub: { color: "#9aa0a6", fontSize: 13, marginTop: 4 },
   metaRow: {
