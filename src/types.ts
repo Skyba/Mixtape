@@ -8,7 +8,11 @@ export type UploadStatus = "pending" | "uploaded" | "skipped";
  */
 export type LabelSource = "user" | "ai-review" | "channel" | "voiceprint" | "claude" | "aai" | "none";
 /** `at` is null for a pre-provenance label: no one knows when it was made. */
-export type SpeakerLabel = { name: string; by: LabelSource; at: string | null };
+export type SpeakerLabel = {
+  name: string; by: LabelSource; at: string | null;
+  /** Why the name was given, in words: "voice 72%", "AI: answered when called Basile". */
+  evidence?: string;
+};
 /** The fields that sync both ways between the phone and the Mac. */
 export type SyncedField =
   | "folder"
@@ -82,6 +86,10 @@ export type Recording = {
   /** A folder the Mac classifier proposes for an Inbox recording; yellow
    *  until accepted (which sets folder and clears this). */
   folderSuggestion?: { folder: string; why: string; at: string } | null;
+  /** The speaker keys of the current transcript (set by the server when it
+   *  publishes, cached by the phone when it reads utterances), so colours are
+   *  computed over the voices that exist now, not labels left from a re-run. */
+  speakerKeys?: string[];
   /** v2: a server operation sent but not yet acknowledged (re-transcribe). */
   pendingOp?: string;
   language: string;

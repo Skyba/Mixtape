@@ -5,6 +5,7 @@ import { fmtWhen, fmtLength } from "../when";
 import { placeLabel } from "../place";
 import { Modal } from "react-native";
 import { downloadUrlForPath } from "../firebase";
+import { iconOf, useFolderIcons } from "../folderIcons";
 import { enqueue, replayOutbox } from "../outbox";
 import {
   ActivityIndicator,
@@ -118,6 +119,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const [utterances, setUtterances] = useState<Utterance[] | null>(null);
   const [copied, setCopied] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
+  const folderIcons = useFolderIcons();
+  const [rerun, setRerun] = useState(false);
+  const [rerunN, setRerunN] = useState(2);
   const [showPlacement, setShowPlacement] = useState(rec.folder === "Inbox" && !rec.folderSuggestion);
   const [menu, setMenu] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
@@ -147,6 +151,12 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     const [t, u] = await Promise.all([readTranscript(r), readAaiJson(r)]);
     setTranscript(t);
     setUtterances(u);
+    // Remember which voices this transcript has, so the library colours by
+    // them (labels can outlive the run they were made for).
+    const keys = u ? Array.from(new Set(u.map((x) => x.speaker))).sort() : null;
+    if (keys && JSON.stringify(keys) !== JSON.stringify(r.speakerKeys ?? null)) {
+      commitMeta(r, (cur) => ({ ...cur, speakerKeys: keys })).then((n) => setRec(n)).catch(() => {});
+    }
     setLoadedRev(isLayoutV2() ? (r.transcriptLocalRev ?? 0) : (r.transcriptRevision ?? 0));
   }
   useEffect(() => onCloudChange(async () => {
@@ -506,24 +516,43 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     await sendEdits(next);
   }
 
-  /** "I'm not in this": answers the question and clears an owner letter. */
-  async function notMe() {
-    let preview: Recording = touch({ ...rec, meIncluded: "no" as const }, "meIncluded");
-    const patch: Record<string, unknown> = { meIncluded: "no" };
-    if (rec.speakerId) { preview = touch({ ...preview, speakerId: undefined }, "speakerId"); patch.speakerId = null; }
-    // Any voice still named after you is wrong now: drop that name (it goes
-    // back to "Speaker X"), against the revision on screen.
-    const me = ((await getSettings()).ownerName || "").trim().toLowerCase();
-    const mine = Object.entries(rec.speakerLabels ?? {}).filter(([, l]) => me && l.name.trim().toLowerCase() === me).map(([L]) => L);
-    if (mine.length) {
-      const labels = { ...(preview.speakerLabels ?? {}) };
-      for (const L of mine) { delete labels[L]; patch[`speakerLabels.${L}`] = null; }
-      preview = touch({ ...preview, speakerLabels: labels, speakerMap: Object.fromEntries(Object.entries(labels).map(([L, l]) => [L, l.name])) }, ...mine.map((L) => `speakerLabels.${L}`));
+  /** Takes the name off a voice (it goes back to "Speaker X"). Taking your
+   *  own name off is how you say you are not that voice. */
+  async function removeName(L: string) {
+    const lab = rec.speakerLabels?.[L];
+    let preview: Recording = rec;
+    const patch: Record<string, unknown> = {};
+    const labels = { ...(rec.speakerLabels ?? {}) };
+    delete labels[L];
+    preview = touch({ ...preview, speakerLabels: labels, speakerMap: Object.fromEntries(Object.entries(labels).map(([k, l]) => [k, l.name])) }, `speakerLabels.${L}`);
+    patch[`speakerLabels.${L}`] = null;
+    if (rec.speakerId === L || (lab && lab.name === (await getSettings()).ownerName)) {
+      preview = touch({ ...preview, speakerId: undefined }, "speakerId");
+      patch.speakerId = null;
     }
-    await recordEdit(preview, patch, mine.length ? shownRev : undefined);
-    const next = await commitMeta(rec, (cur) => adopt(cur, preview, changedKeys(rec, preview)));
+    await recordEdit(preview, patch, shownRev);
+    let next: Recording;
+    try {
+      next = await commitMeta(rec, (cur) => adopt(sameRev(cur), preview, changedKeys(rec, preview)));
+    } catch {
+      Alert.alert("New transcript arrived", "Check the speakers on the new one.");
+      return;
+    }
     setRec(next);
     await sendEdits(next);
+  }
+
+  /** Re-transcribe with a given number of voices: the names already known
+   *  fill the first slots, the rest stay open. */
+  async function rerunWith(n: number) {
+    const known = Array.from(new Set([
+      ...Object.values(rec.speakerLabels ?? {}).filter((l) => l.by === "user").map((l) => l.name),
+      ...rec.speakers.filter((x) => !/^Speaker \d+$/.test(x)),
+    ])).slice(0, n);
+    const names: (string | null)[] = [...known, ...Array(Math.max(0, n - known.length)).fill(null)];
+    await saveSpeakers(names);
+    const cur = (await readMeta(rec.id).catch(() => null)) ?? rec;
+    await doTranscribe(cur);
   }
 
   /** Accepting the suggested folder files it there and clears the suggestion. */
@@ -635,13 +664,32 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         utterances={utterances}
         audioSource={clipSource}
         editable={!revisionBehind && !!utterances}
-        options={Array.from(new Set([...rec.speakers.filter((s) => !/^Speaker \d+$/.test(s)), ...speakerHist]))}
+        folderIcon={iconOf(rec.folder === "Inbox" && rec.folderSuggestion ? rec.folderSuggestion.folder : rec.folder, folderIcons)}
+        history={speakerHist}
         onSetName={remapSpeaker}
+        onRemoveName={removeName}
         onConfirmAll={confirmSpeakers}
-        onNotMe={notMe}
         onAcceptFolder={acceptFolder}
         onChangeFolder={() => setShowPlacement((v) => !v)}
+        onRerun={() => { setRerunN(new Set((utterances ?? []).map((u) => u.speaker)).size || rec.speakers.length || 2); setRerun(true); }}
       />
+
+      <Modal visible={rerun} transparent animationType="fade" onRequestClose={() => setRerun(false)}>
+        <TouchableOpacity style={styles.sheetBack} activeOpacity={1} onPress={() => setRerun(false)}>
+          <TouchableOpacity activeOpacity={1} style={[styles.sheet, { padding: 18, paddingBottom: 18 + insets.bottom }]}>
+            <Text style={styles.sheetTxt}>How many people were speaking?</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 24, marginVertical: 16 }}>
+              <TouchableOpacity style={styles.act} onPress={() => setRerunN((n) => Math.max(1, n - 1))}><Text style={styles.actTxt}>−</Text></TouchableOpacity>
+              <Text style={[styles.sheetTxt, { fontSize: 24, fontWeight: "700" }]}>{rerunN}</Text>
+              <TouchableOpacity style={styles.act} onPress={() => setRerunN((n) => n + 1)}><Text style={styles.actTxt}>+</Text></TouchableOpacity>
+            </View>
+            <Text style={styles.meta}>Transcribes the recording again with that many voices (about ${(((rec.audioDurationSec || rec.durationSeconds || 0) / 3600) * 0.12).toFixed(2)}). Names you confirmed are kept for the new run.</Text>
+            <TouchableOpacity style={[styles.act, styles.actPrimary, { marginTop: 14 }]} onPress={() => { setRerun(false); rerunWith(rerunN); }}>
+              <Text style={styles.actTxt}>Re-transcribe with {rerunN}</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
       {canUseTranscript ? (
         <>
@@ -723,12 +771,14 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         ))}
       </View>
 
-      <SpeakerSelector
-        count={rec.speakers.length}
-        names={toNames(rec.speakers)}
-        history={speakerHist}
-        onChange={(_, n) => saveSpeakers(n)}
-      />
+      {!done && !pending ? (
+        <SpeakerSelector
+          count={rec.speakers.length}
+          names={toNames(rec.speakers)}
+          history={speakerHist}
+          onChange={(_, n) => saveSpeakers(n)}
+        />
+      ) : null}
 
       {canUseTranscript && utterances && utterances.length > 0 ? (
         <>

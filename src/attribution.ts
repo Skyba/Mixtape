@@ -41,19 +41,40 @@ export function speakerStatus(r: Recording): SpeakerStatus {
  *  - grey:   nothing yet — no inference, no confirmation.
  */
 export type Trust = "grey" | "yellow" | "green" | "red";
+/** The voices that count: those of the current transcript when known. */
+export function currentKeys(r: Recording): string[] {
+  return r.speakerKeys?.length ? r.speakerKeys : Object.keys(r.speakerLabels ?? {});
+}
+/** Every voice of the current transcript carries a name you gave or confirmed
+ *  (merging a voice into someone is giving it that name). */
 export function speakersConfirmed(r: Recording): boolean {
-  const labels = Object.values(r.speakerLabels ?? {});
-  return labels.length > 0 && labels.every((l) => l.by === "user");
+  const keys = currentKeys(r);
+  return keys.length > 0 && keys.every((k) => r.speakerLabels?.[k]?.by === "user");
 }
 export function folderConfirmed(r: Recording): boolean {
   return r.folder !== INBOX;
 }
+/** Something inferred is waiting for a tap: a model's or the voice's name for
+ *  a voice, AssemblyAI naming a voice directly, or a suggested folder. */
+export function hasSuggestion(r: Recording): boolean {
+  const keys = currentKeys(r);
+  const named = keys.some((k) => {
+    const l = r.speakerLabels?.[k];
+    return l ? l.by !== "user" : !/^[A-Z]$/.test(k);
+  });
+  return named || (r.folder === INBOX && !!r.folderSuggestion);
+}
+/**
+ * One colour per recording:
+ *  - red:    a review found the signals contradicting each other (or you);
+ *  - green:  every current voice named by you, and the folder set;
+ *  - yellow: a suggestion is waiting for your ✓;
+ *  - grey:   nothing known and nothing suggested.
+ */
 export function trustOf(r: Recording): Trust {
   if (r.reviewFlag) return "red";
-  const sp = speakersConfirmed(r), fo = folderConfirmed(r);
-  if (sp && fo) return "green";
-  const inferred = Object.keys(r.speakerLabels ?? {}).length > 0 || !!r.folderSuggestion;
-  return sp || fo || inferred ? "yellow" : "grey";
+  if (speakersConfirmed(r) && folderConfirmed(r)) return "green";
+  return hasSuggestion(r) ? "yellow" : "grey";
 }
 export const TRUST_COLOR: Record<Trust, string> = { grey: "#4b5058", yellow: "#facc15", green: "#4ade80", red: "#ef4444" };
 /** Where a speaker's name came from, in words. */

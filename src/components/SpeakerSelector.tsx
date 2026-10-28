@@ -1,13 +1,7 @@
 import { useState } from "react";
-import {
-  Modal,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from "react-native";
+import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { colorForIndex } from "../colors";
+import NamePicker from "./NamePicker";
 
 type Props = {
   count: number;
@@ -22,8 +16,10 @@ export default function SpeakerSelector({
   history,
   onChange,
 }: Props) {
+  // Tapping a slot, empty or named, opens one picker: names already in
+  // other slots, five recent ones, a search box that also adds a new name,
+  // and Remove for a named slot. Any change is two taps.
   const [editing, setEditing] = useState<number | null>(null);
-  const [draft, setDraft] = useState("");
 
   function setCount(next: number) {
     const c = Math.max(0, next);
@@ -32,141 +28,52 @@ export default function SpeakerSelector({
     onChange(c, arr);
   }
 
-  function openSlot(i: number) {
-    setDraft(names[i] ?? "");
-    setEditing(i);
-  }
-
-  function commit(value: string | null) {
-    if (editing === null) return;
+  function put(i: number, value: string | null) {
     const arr = [...names];
-    arr[editing] = value && value.trim() ? value.trim() : null;
-    onChange(count, arr);
-    setEditing(null);
-  }
-
-  function pickHistory(name: string) {
-    const slot = names.findIndex((n) => n === null);
-    if (slot === -1) return; // no free slot
-    const arr = [...names];
-    arr[slot] = name;
+    arr[i] = value && value.trim() ? value.trim() : null;
     onChange(count, arr);
   }
+
+  const taken = names.filter((n): n is string => !!n);
 
   return (
     <View style={styles.box}>
       <View style={styles.headerRow}>
         <Text style={styles.label}>Speakers</Text>
         <View style={styles.stepper}>
-          <TouchableOpacity
-            style={styles.stepBtn}
-            onPress={() => setCount(count - 1)}
-          >
+          <TouchableOpacity style={styles.stepBtn} onPress={() => setCount(count - 1)}>
             <Text style={styles.stepTxt}>−</Text>
           </TouchableOpacity>
           <Text style={styles.stepVal}>{count}</Text>
-          <TouchableOpacity
-            style={styles.stepBtn}
-            onPress={() => setCount(count + 1)}
-          >
+          <TouchableOpacity style={styles.stepBtn} onPress={() => setCount(count + 1)}>
             <Text style={styles.stepTxt}>+</Text>
           </TouchableOpacity>
         </View>
       </View>
 
       <View style={styles.wrap}>
-        {names.map((n, i) => {
-          const named = !!n;
-          return (
-            <TouchableOpacity
-              key={i}
-              style={[
-                styles.slot,
-                named
-                  ? [styles.slotNamed, { backgroundColor: colorForIndex(i) }]
-                  : styles.slotEmpty,
-              ]}
-              onPress={() => openSlot(i)}
-            >
-              <Text style={named ? styles.slotTxtNamed : styles.slotTxtEmpty}>
-                {n ?? `Unnamed ${i + 1}`}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-        {count === 0 ? (
-          <Text style={styles.hint}>
-            0 speakers — number unknown, let diarization decide
-          </Text>
-        ) : null}
+        {names.map((n, i) => (
+          <TouchableOpacity
+            key={i}
+            style={[styles.slot, n ? [styles.slotNamed, { backgroundColor: colorForIndex(i) }] : styles.slotEmpty]}
+            onPress={() => setEditing(i)}
+          >
+            <Text style={n ? styles.slotTxtNamed : styles.slotTxtEmpty}>{n ?? `+ name ${i + 1}`}</Text>
+          </TouchableOpacity>
+        ))}
+        {count === 0 ? <Text style={styles.hint}>0 = number unknown, the transcription decides</Text> : null}
       </View>
 
-      {history.length > 0 && (
-        <>
-          <Text style={styles.sub}>Recent — tap to fill a slot</Text>
-          <View style={styles.wrap}>
-            {history.map((h) => {
-              const used = names.includes(h);
-              return (
-                <TouchableOpacity
-                  key={h}
-                  style={[styles.recent, used && styles.recentUsed]}
-                  onPress={() => pickHistory(h)}
-                  disabled={used}
-                >
-                  <Text
-                    style={[
-                      styles.recentTxt,
-                      used && styles.recentTxtUsed,
-                    ]}
-                  >
-                    {used ? `✓ ${h}` : h}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </>
-      )}
-
-      <Modal visible={editing !== null} transparent animationType="fade">
-        <View style={styles.backdrop}>
-          <View style={styles.sheet}>
-            <Text style={styles.sheetTitle}>
-              Name speaker {editing !== null ? editing + 1 : ""}
-            </Text>
-            <TextInput
-              style={styles.input}
-              value={draft}
-              onChangeText={setDraft}
-              placeholder="Speaker name"
-              placeholderTextColor="#6b7280"
-              autoFocus
-              onSubmitEditing={() => commit(draft)}
-            />
-            <View style={styles.sheetRow}>
-              <TouchableOpacity
-                style={styles.sheetBtn}
-                onPress={() => commit(null)}
-              >
-                <Text style={styles.sheetBtnTxt}>Clear</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.sheetBtn}
-                onPress={() => setEditing(null)}
-              >
-                <Text style={styles.sheetBtnTxt}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.sheetBtn, styles.sheetSave]}
-                onPress={() => commit(draft)}
-              >
-                <Text style={styles.sheetBtnTxt}>Save</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      <NamePicker
+        visible={editing !== null}
+        title={editing !== null ? (names[editing] ? `Change ${names[editing]}` : `Speaker ${editing + 1}`) : ""}
+        here={[]}
+        history={history.filter((h) => !taken.includes(h))}
+        canRemove={editing !== null && !!names[editing]}
+        onPick={(name) => { const i = editing!; setEditing(null); put(i, name); }}
+        onRemove={() => { const i = editing!; setEditing(null); put(i, null); }}
+        onClose={() => setEditing(null)}
+      />
     </View>
   );
 }

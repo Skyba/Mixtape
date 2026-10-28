@@ -334,6 +334,9 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
         (spkStamp > at.createdAt && JSON.stringify(cur.speakers || []) !== JSON.stringify(at.speakersAtSubmit || []));
       const doc2 = {
         ...cur, attempts, active: null, current, status: changedMeanwhile && !at.rerunForEdit ? "pending" : "done",
+        // Which voices this transcript has: the phone colours by these, not
+        // by labels left from an earlier run.
+        speakerKeys: Array.from(new Set(utterances.map((u) => u.speaker))).sort(),
         rerunQueued: changedMeanwhile && !at.rerunForEdit ? { afterRev: rev, reason: "language or speakers changed while the job ran" } : null,
         speakerMap: Object.keys(speakerMap).length ? speakerMap : null, speakerLabels, speakerId: keepOwner ? cur.speakerId : null,
         fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), ...labelStamps, ...(keepOwner ? {} : { speakerId: transcribedAt }),

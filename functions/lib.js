@@ -193,6 +193,7 @@ function validLabel(e) {
   if (!e || typeof e !== "object") return false;
   if (typeof e.name !== "string") return false;
   if (!["user", "ai-review", "channel", "voiceprint", "claude", "aai", "none"].includes(e.by)) return false;
+  if (e.evidence !== undefined && (typeof e.evidence !== "string" || e.evidence.length > 200)) return false;
   // Legacy labels carry no time of attribution: null is honest, a made-up one
   // is not. Anything present must parse.
   return e.at === null || e.at === undefined || !!canonStamp(e.at);
