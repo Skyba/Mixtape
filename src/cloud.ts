@@ -119,6 +119,7 @@ function serverOwned(d: any): Partial<Recording> {
     mergedInCloud: !!d.audio,
     remoteCreated: true,
     ...(d.audio ? { uploadStatus: "uploaded" as const } : {}),
+    ...(Array.isArray(d.speakerKeys) ? { speakerKeys: d.speakerKeys } : {}),
   };
 }
 
