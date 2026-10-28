@@ -156,7 +156,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     const keys = u ? Array.from(new Set(u.map((x) => x.speaker))).sort() : null;
     const current = !isLayoutV2() || (r.transcriptLocalRev ?? 0) === (r.transcriptRevision ?? 0);
     if (keys && current && JSON.stringify(keys) !== JSON.stringify(r.speakerKeys ?? null)) {
-      commitMeta(r, (cur) => ({ ...cur, speakerKeys: keys })).then((n) => setRec(n)).catch(() => {});
+      // Re-checked inside the lock: a newer revision installed meanwhile wins.
+      commitMeta(r, (cur) => (cur.transcriptRevision === r.transcriptRevision && cur.transcriptLocalRev === r.transcriptLocalRev ? { ...cur, speakerKeys: keys } : cur))
+        .then((n) => setRec(n)).catch(() => {});
     }
     setLoadedRev(isLayoutV2() ? (r.transcriptLocalRev ?? 0) : (r.transcriptRevision ?? 0));
   }
@@ -338,6 +340,11 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
    */
   async function confirmSpeakers(named?: { letter: string; name: string; evidence?: string }[]) {
     if (revisionBehind) { Alert.alert("New transcript downloading", "Label speakers once it has arrived."); return; }
+    const now = (await readMeta(rec.id).catch(() => null)) ?? rec;
+    if (now.transcriptStatus === "pending" || now.transcriptStatus === "processing") {
+      Alert.alert("Transcribing again", "Name the voices once the new transcript has arrived.");
+      return;
+    }
     const settings = await getSettings();
     const list: { letter: string; name: string; evidence?: string }[] = named ?? confirmableLetters(rec).map((L) => ({ letter: L, name: rec.speakerLabels![L].name }));
     let preview: Recording = rec;

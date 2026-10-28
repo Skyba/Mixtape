@@ -180,9 +180,14 @@ export default function ReviewCard(p: Props) {
         here={here}
         history={p.history}
         mergeInto={speakers.filter((s) => s.L !== picking && !s.unnamed).map((s) => ({ key: s.L, name: s.name }))}
-        canRemove={!!pickFor && !pickFor.unnamed && !!rec.speakerLabels?.[pickFor.L]}
+        canRemove={!!pickFor && !pickFor.unnamed && !!rec.speakerLabels?.[pickFor.L] && /^[A-Z]$/.test(pickFor.L)}
         onPick={(name) => { const L = picking!; setPicking(null); p.onSetName(L, name); }}
-        onMerge={(_, name) => { const L = picking!; setPicking(null); p.onSetName(L, name); }}
+        onMerge={(target, name) => {
+          // Merging confirms both voices: the target's name was perhaps only a
+          // suggestion, and a name on two voices is accepted only when both are yours.
+          const L = picking!; setPicking(null);
+          p.onConfirmAll([{ letter: L, name }, { letter: target, name }]);
+        }}
         onRemove={() => { const L = picking!; setPicking(null); p.onRemoveName(L); }}
         onClose={() => setPicking(null)}
       />
