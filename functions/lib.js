@@ -163,7 +163,10 @@ function applyPatch(meta, body, ownerName, opts = {}) {
     const names = Object.entries(labels).map(([L, v]) => [L, (v.name || "").trim().toLowerCase()]).filter(([, n]) => n);
     const counts = {};
     for (const [, n] of names) counts[n] = (counts[n] || 0) + 1;
-    const dup = Object.entries(counts).find(([, c]) => c > 1);
+    // Two voices with one name, every one of them named by a person, is a
+    // merge (diarization split one person); only a model's duplicate is refused.
+    const dup = Object.entries(counts).find(([n, c]) => c > 1 &&
+      names.some(([L, m]) => m === n && (labels[L] || {}).by !== "user"));
     const mayShare = Object.keys(labels).length > (Array.isArray(meta.speakers) ? meta.speakers.length : 0);
     if (dup && !mayShare) throw new PatchError(409, `"${dup[0]}" would be assigned to two letters`);
     meta.speakerLabels = labels;

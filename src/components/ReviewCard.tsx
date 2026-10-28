@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { Recording, INBOX } from "../types";
-import { SOURCE_WORD, TRUST_COLOR, trustOf, duplicateNames } from "../attribution";
+import { SOURCE_WORD, TRUST_COLOR, trustOf, duplicateNames, flagOpen } from "../attribution";
 import type { Utterance } from "../transcription";
 import NamePicker from "./NamePicker";
 
@@ -74,7 +74,7 @@ export default function ReviewCard(p: Props) {
       const lab = rec.speakerLabels?.[L];
       const name = lab?.name ?? rec.speakerMap?.[L] ?? (/^[A-Z]$/.test(L) ? `Speaker ${L}` : L);
       const by = lab?.by ?? (!/^[A-Z]$/.test(L) ? "aai" : undefined);
-      const how = by === "user" ? "you" : lab?.evidence || (by ? SOURCE_WORD[by] : "");
+      const how = by === "user" ? (lab?.evidence ? `you · ${lab.evidence}` : "you") : lab?.evidence || (by ? SOURCE_WORD[by] : "");
       return { L, name, by, how, secs, clip: clipStart(us), unnamed: /^Speaker /.test(name) };
     }).sort((a, b) => b.secs - a.secs);
   }, [utterances, rec.speakerLabels, rec.speakerMap]);
@@ -97,7 +97,7 @@ export default function ReviewCard(p: Props) {
   const fmtSecs = (x: number) => (x < 60 ? `${Math.max(1, Math.round(x))} s` : `${Math.round(x / 60)} min`);
   // One voice filed under "self": the folder line says nothing the voice
   // line does not, so it is not shown.
-  const soloSelf = speakers.length === 1 && rec.folder === "self";
+  const soloSelf = speakers.length === 1 && rec.folder === "self" && speakers[0].by === "user";
   const here = Array.from(new Set(speakers.filter((s) => !s.unnamed).map((s) => s.name).concat(rec.speakers.filter((n) => !/^Speaker \d+$/.test(n)))));
   const pickFor = speakers.find((s) => s.L === picking);
   const suggested = rec.folder === INBOX && rec.folderSuggestion;
@@ -110,7 +110,7 @@ export default function ReviewCard(p: Props) {
           {{ green: "Confirmed", yellow: "Suggestions to confirm", red: "Something doesn't add up — have a listen", grey: rec.folder !== INBOX ? "Speakers not named yet" : "Nothing known yet" }[trust]}
         </Text>
       </View>
-      {rec.reviewFlag && trust === "red" ? <Text style={styles.flag}>{rec.reviewFlag.reason}</Text> : null}
+      {flagOpen(rec) ? <Text style={styles.flag}>{rec.reviewFlag!.reason}</Text> : null}
       {duplicateNames({ ...rec, speakerKeys: speakers.map((x) => x.L) }).map((n) => (
         <Text key={n} style={styles.flag}>Two voices are called {n}: listen to both and rename the wrong one.</Text>
       ))}
@@ -133,7 +133,7 @@ export default function ReviewCard(p: Props) {
 
       <View style={styles.sep} />
       </>}
-      {speakers.length === 0 ? <Text style={styles.muted}>No transcript yet.</Text> : null}
+      {speakers.length === 0 ? <Text style={styles.muted}>{rec.transcriptStatus === "done" ? "No speech found in this recording." : "No transcript yet."}</Text> : null}
       {speakers.map((s) => (
         <View key={s.L} style={styles.row}>
           {p.audioSource ? (
@@ -180,7 +180,7 @@ export default function ReviewCard(p: Props) {
         here={here}
         history={p.history}
         mergeInto={speakers.filter((s) => s.L !== picking && !s.unnamed).map((s) => ({ key: s.L, name: s.name }))}
-        canRemove={!!pickFor && !pickFor.unnamed}
+        canRemove={!!pickFor && !pickFor.unnamed && !!rec.speakerLabels?.[pickFor.L]}
         onPick={(name) => { const L = picking!; setPicking(null); p.onSetName(L, name); }}
         onMerge={(_, name) => { const L = picking!; setPicking(null); p.onSetName(L, name); }}
         onRemove={() => { const L = picking!; setPicking(null); p.onRemoveName(L); }}

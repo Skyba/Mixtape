@@ -43,13 +43,24 @@ export function speakerStatus(r: Recording): SpeakerStatus {
 export type Trust = "grey" | "yellow" | "green" | "red";
 /** The voices that count: those of the current transcript when known. */
 export function currentKeys(r: Recording): string[] {
-  return r.speakerKeys?.length ? r.speakerKeys : Object.keys(r.speakerLabels ?? {});
+  // An explicit empty list means "this transcript has no speech", not
+  // "unknown": stale labels must not stand in for it.
+  return Array.isArray(r.speakerKeys) ? r.speakerKeys : Object.keys(r.speakerLabels ?? {});
 }
 /** Every voice of the current transcript carries a name you gave or confirmed
  *  (merging a voice into someone is giving it that name). */
 export function speakersConfirmed(r: Recording): boolean {
   const keys = currentKeys(r);
-  return keys.length > 0 && keys.every((k) => r.speakerLabels?.[k]?.by === "user");
+  if (keys.length === 0) return Array.isArray(r.speakerKeys) && r.transcriptStatus === "done"; // no speech: nothing to name
+  return keys.every((k) => r.speakerLabels?.[k]?.by === "user");
+}
+/** A flag raised after your last naming is a new contradiction; one raised
+ *  before it was answered by that naming. */
+export function flagOpen(r: Recording): boolean {
+  if (!r.reviewFlag) return false;
+  if (!speakersConfirmed(r)) return true;
+  const lastMine = currentKeys(r).map((k) => r.speakerLabels?.[k]?.at || "").sort().pop() || "";
+  return r.reviewFlag.at > lastMine;
 }
 export function folderConfirmed(r: Recording): boolean {
   return r.folder !== INBOX;
@@ -89,9 +100,7 @@ export function duplicateNames(r: Recording): string[] {
 }
 export function trustOf(r: Recording): Trust {
   if (duplicateNames(r).length) return "red";
-  // Your naming every voice answers a flag even before the flag's removal
-  // has synced back.
-  if (r.reviewFlag && !speakersConfirmed(r)) return "red";
+  if (flagOpen(r)) return "red";
   if (speakersConfirmed(r) && folderConfirmed(r)) return "green";
   // Partly named by you is work in progress, not "nothing known".
   const partly = currentKeys(r).some((k) => r.speakerLabels?.[k]?.by === "user");

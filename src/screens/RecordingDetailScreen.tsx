@@ -154,7 +154,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     // Remember which voices this transcript has, so the library colours by
     // them (labels can outlive the run they were made for).
     const keys = u ? Array.from(new Set(u.map((x) => x.speaker))).sort() : null;
-    if (keys && JSON.stringify(keys) !== JSON.stringify(r.speakerKeys ?? null)) {
+    const current = !isLayoutV2() || (r.transcriptLocalRev ?? 0) === (r.transcriptRevision ?? 0);
+    if (keys && current && JSON.stringify(keys) !== JSON.stringify(r.speakerKeys ?? null)) {
       commitMeta(r, (cur) => ({ ...cur, speakerKeys: keys })).then((n) => setRec(n)).catch(() => {});
     }
     setLoadedRev(isLayoutV2() ? (r.transcriptLocalRev ?? 0) : (r.transcriptRevision ?? 0));
@@ -539,9 +540,15 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     delete labels[L];
     preview = touch({ ...preview, speakerLabels: labels, speakerMap: Object.fromEntries(Object.entries(labels).map(([k, l]) => [k, l.name])) }, `speakerLabels.${L}`);
     patch[`speakerLabels.${L}`] = null;
-    if (rec.speakerId === L || (lab && lab.name === (await getSettings()).ownerName)) {
+    const owner = ((await getSettings()).ownerName || "").trim().toLowerCase();
+    if (rec.speakerId === L || (lab && owner && lab.name.trim().toLowerCase() === owner)) {
       preview = touch({ ...preview, speakerId: undefined }, "speakerId");
       patch.speakerId = null;
+      const stillMe = Object.values(labels).some((l) => owner && l.name.trim().toLowerCase() === owner);
+      if (!stillMe && rec.meIncluded === "yes") {
+        preview = touch({ ...preview, meIncluded: undefined }, "meIncluded");
+        patch.meIncluded = null;
+      }
     }
     await recordEdit(preview, patch, shownRev);
     let next: Recording;
@@ -558,14 +565,21 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   /** Re-transcribe with a given number of voices: the names already known
    *  fill the first slots, the rest stay open. */
   async function rerunWith(n: number) {
+    // The people known so far become the hint list for the new run, in the
+    // slots' own order; set-aside voices are not people. This only sets the
+    // hint list: it never renames the voices of the current transcript.
+    const isPerson = (x: string) => !/^Speaker \d+$/.test(x) && !/^Other \(/.test(x);
     const known = Array.from(new Set([
-      ...Object.values(rec.speakerLabels ?? {}).filter((l) => l.by === "user").map((l) => l.name),
-      ...rec.speakers.filter((x) => !/^Speaker \d+$/.test(x)),
+      ...rec.speakers.filter(isPerson),
+      ...Object.values(rec.speakerLabels ?? {}).filter((l) => l.by === "user" && isPerson(l.name)).map((l) => l.name),
     ])).slice(0, n);
-    const names: (string | null)[] = [...known, ...Array(Math.max(0, n - known.length)).fill(null)];
-    await saveSpeakers(names);
-    const cur = (await readMeta(rec.id).catch(() => null)) ?? rec;
-    await doTranscribe(cur);
+    const speakers = [...known, ...Array.from({ length: Math.max(0, n - known.length) }, (_, i) => `Speaker ${known.length + i + 1}`)];
+    const preview = touch({ ...rec, speakers }, "speakers");
+    await recordEdit(preview, { speakers });
+    const next = await commitMeta(rec, (cur) => adopt(cur, preview, ["speakers"]));
+    setRec(next);
+    await sendEdits(next);
+    await doTranscribe(next);
   }
 
   /** Accepting the suggested folder files it there and clears the suggestion. */
@@ -676,7 +690,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         rec={rec}
         utterances={utterances}
         audioSource={clipSource}
-        editable={!revisionBehind && !!utterances}
+        editable={!revisionBehind && !!utterances && !pending}
         folderIcon={iconOf(rec.folder === "Inbox" && rec.folderSuggestion ? rec.folderSuggestion.folder : rec.folder, folderIcons)}
         history={speakerHist}
         onSetName={(L, name) => confirmSpeakers([{ letter: L, name }])}
@@ -697,7 +711,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
               <Text style={[styles.sheetTxt, { fontSize: 24, fontWeight: "700" }]}>{rerunN}</Text>
               <TouchableOpacity style={styles.act} onPress={() => setRerunN((n) => n + 1)}><Text style={styles.actTxt}>+</Text></TouchableOpacity>
             </View>
-            <Text style={styles.meta}>Transcribes the recording again with that many voices (about ${(((rec.audioDurationSec || rec.durationSeconds || 0) / 3600) * 0.12).toFixed(2)}). Names you confirmed are kept for the new run.</Text>
+            <Text style={styles.meta}>Transcribes the recording again with that many voices (about ${(((rec.audioDurationSec || rec.durationSeconds || 0) / 3600) * 0.12).toFixed(2)}). The new run gets new voices: the names you confirmed are passed on as hints, and you confirm the result once more.</Text>
             <TouchableOpacity style={[styles.act, styles.actPrimary, { marginTop: 14 }]} onPress={() => { setRerun(false); rerunWith(rerunN); }}>
               <Text style={styles.actTxt}>Re-transcribe with {rerunN}</Text>
             </TouchableOpacity>
@@ -744,6 +758,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
               canUseTranscript ? { t: "Save transcript (.txt)", f: () => shareFile(transcriptPath(rec)) } : null,
               canUseTranscript && isFirebaseConfigured && !rec.shareId ? { t: "Publish a public link", f: publish } : null,
               done && !pending && !rec.damaged ? { t: "Re-transcribe", f: () => doTranscribe() } : null,
+              { t: "Change folder", f: () => setShowPlacement(true) },
               { t: showDetails ? "Hide job details" : "Show job details", f: () => setShowDetails((v) => !v) },
               { t: "Delete recording", f: confirmDelete, danger: true },
             ].filter(Boolean).map((o: any) => (
