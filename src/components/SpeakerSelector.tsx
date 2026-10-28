@@ -116,7 +116,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
   },
-  slotNamed: { backgroundColor: "#3b82f6", borderColor: "#3b82f6" },
+  slotNamed: { backgroundColor: "#3b82f6", borderColor: "#3b82f6", borderStyle: "solid" },
   slotEmpty: {
     backgroundColor: "transparent",
     borderColor: "#3f444d",
