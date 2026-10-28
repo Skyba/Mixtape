@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { Recording, INBOX } from "../types";
-import { SOURCE_WORD, TRUST_COLOR, trustOf } from "../attribution";
+import { SOURCE_WORD, TRUST_COLOR, trustOf, duplicateNames } from "../attribution";
 import type { Utterance } from "../transcription";
 import NamePicker from "./NamePicker";
 
@@ -19,6 +19,8 @@ type Props = {
   editable: boolean;
   onSetName: (key: string, name: string) => void;
   onRemoveName: (key: string) => void;
+  /** Name short, unnamed voices "Other (X)" so they stop blocking green. */
+  onSetAside: (keys: string[]) => void;
   /** Every named voice on screen, as shown — including ones AssemblyAI
    *  named directly, which carry no stored label yet. */
   onConfirmAll: (named: { letter: string; name: string }[]) => void;
@@ -87,6 +89,15 @@ export default function ReviewCard(p: Props) {
   }
 
   const toConfirm = speakers.filter((s) => s.by !== "user" && !s.unnamed);
+  // A voice under 30 s that nobody named is usually a diarization split, a
+  // cough, a TV: offered as one tap to set aside, still nameable one by one.
+  const SHORT_S = 30;
+  const shorts = speakers.filter((s) => s.unnamed && s.secs < SHORT_S);
+  const shortSecs = Math.round(shorts.reduce((t, s) => t + s.secs, 0));
+  const fmtSecs = (x: number) => (x < 60 ? `${Math.max(1, Math.round(x))} s` : `${Math.round(x / 60)} min`);
+  // One voice filed under "self": the folder line says nothing the voice
+  // line does not, so it is not shown.
+  const soloSelf = speakers.length === 1 && rec.folder === "self";
   const here = Array.from(new Set(speakers.filter((s) => !s.unnamed).map((s) => s.name).concat(rec.speakers.filter((n) => !/^Speaker \d+$/.test(n)))));
   const pickFor = speakers.find((s) => s.L === picking);
   const suggested = rec.folder === INBOX && rec.folderSuggestion;
@@ -96,11 +107,15 @@ export default function ReviewCard(p: Props) {
       <View style={styles.head}>
         <View style={[styles.dot, { backgroundColor: TRUST_COLOR[trust] }]} />
         <Text style={styles.headTxt}>
-          {{ green: "Confirmed", yellow: "Suggestions to confirm", red: "Something doesn't add up — have a listen", grey: "Nothing known yet" }[trust]}
+          {{ green: "Confirmed", yellow: "Suggestions to confirm", red: "Something doesn't add up — have a listen", grey: rec.folder !== INBOX ? "Speakers not named yet" : "Nothing known yet" }[trust]}
         </Text>
       </View>
-      {rec.reviewFlag ? <Text style={styles.flag}>{rec.reviewFlag.reason}</Text> : null}
+      {rec.reviewFlag && trust === "red" ? <Text style={styles.flag}>{rec.reviewFlag.reason}</Text> : null}
+      {duplicateNames({ ...rec, speakerKeys: speakers.map((x) => x.L) }).map((n) => (
+        <Text key={n} style={styles.flag}>Two voices are called {n}: listen to both and rename the wrong one.</Text>
+      ))}
 
+      {soloSelf ? null : <>
       <View style={styles.row}>
         <Text style={styles.icon}>{p.folderIcon}</Text>
         <TouchableOpacity style={{ flex: 1 }} onPress={p.onChangeFolder}>
@@ -117,6 +132,7 @@ export default function ReviewCard(p: Props) {
       </View>
 
       <View style={styles.sep} />
+      </>}
       {speakers.length === 0 ? <Text style={styles.muted}>No transcript yet.</Text> : null}
       {speakers.map((s) => (
         <View key={s.L} style={styles.row}>
@@ -128,18 +144,23 @@ export default function ReviewCard(p: Props) {
           <TouchableOpacity style={{ flex: 1 }} disabled={!p.editable} onPress={() => setPicking(s.L)}>
             <Text style={[styles.name, s.by !== "user" && (s.unnamed ? styles.muted : styles.inferred)]} numberOfLines={1}>
               {s.name}
-              <Text style={styles.mins}>  {Math.round(s.secs / 60) || "<1"} min</Text>
+              <Text style={styles.mins}>  {fmtSecs(s.secs)}</Text>
             </Text>
             {s.how ? <Text style={styles.how} numberOfLines={1}>{s.how}</Text> : s.unnamed ? <Text style={styles.how}>tap to name or merge</Text> : null}
           </TouchableOpacity>
           {p.editable && s.by !== "user" && !s.unnamed ? (
-            <TouchableOpacity style={styles.ok} onPress={() => p.onSetName(s.L, s.name)}>
+            <TouchableOpacity style={styles.ok} onPress={() => p.onSetName(s.L, s.name)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.okTxt}>✓</Text>
             </TouchableOpacity>
           ) : s.by === "user" ? <Text style={styles.done}>✓</Text> : null}
         </View>
       ))}
 
+      {p.editable && shorts.length ? (
+        <TouchableOpacity style={styles.aside} onPress={() => p.onSetAside(shorts.map((x) => x.L))}>
+          <Text style={styles.asideTxt}>Set aside {shorts.length} short voice{shorts.length > 1 ? "s" : ""} ({fmtSecs(shortSecs)} in all)</Text>
+        </TouchableOpacity>
+      ) : null}
       {p.editable && speakers.length ? (
         <View style={styles.actions}>
           {toConfirm.length > 1 ? (
@@ -192,5 +213,7 @@ const styles = StyleSheet.create({
   primary: { flex: 1, backgroundColor: "#2f6fd0", borderRadius: 10, padding: 10, alignItems: "center" },
   primaryTxt: { color: "#fff", fontWeight: "700" },
   link: { paddingHorizontal: 6, paddingVertical: 8 },
+  aside: { backgroundColor: "#23262d", borderRadius: 10, padding: 10, alignItems: "center", marginTop: 8 },
+  asideTxt: { color: "#e8eaed", fontSize: 13 },
   linkTxt: { color: "#93c5fd", fontSize: 13 },
 });

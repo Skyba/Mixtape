@@ -71,10 +71,31 @@ export function hasSuggestion(r: Recording): boolean {
  *  - yellow: a suggestion is waiting for your ✓;
  *  - grey:   nothing known and nothing suggested.
  */
+/** The name a voice carries now: its label, or AssemblyAI's name as key. */
+function nameOfKey(r: Recording, k: string): string | null {
+  return r.speakerLabels?.[k]?.name ?? (/^[A-Z]$/.test(k) ? null : k);
+}
+/** Names given to two voices where at least one was not given by you
+ *  (a merge you made is fine): one of them is wrong. */
+export function duplicateNames(r: Recording): string[] {
+  const by: Record<string, string[]> = {};
+  for (const k of currentKeys(r)) {
+    const n = nameOfKey(r, k);
+    if (n && !/^Other \(/.test(n)) (by[n] ??= []).push(k);
+  }
+  return Object.entries(by)
+    .filter(([, ks]) => ks.length > 1 && ks.some((k) => r.speakerLabels?.[k]?.by !== "user"))
+    .map(([n]) => n);
+}
 export function trustOf(r: Recording): Trust {
-  if (r.reviewFlag) return "red";
+  if (duplicateNames(r).length) return "red";
+  // Your naming every voice answers a flag even before the flag's removal
+  // has synced back.
+  if (r.reviewFlag && !speakersConfirmed(r)) return "red";
   if (speakersConfirmed(r) && folderConfirmed(r)) return "green";
-  return hasSuggestion(r) ? "yellow" : "grey";
+  // Partly named by you is work in progress, not "nothing known".
+  const partly = currentKeys(r).some((k) => r.speakerLabels?.[k]?.by === "user");
+  return hasSuggestion(r) || partly || (speakersConfirmed(r) && !folderConfirmed(r)) ? "yellow" : "grey";
 }
 export const TRUST_COLOR: Record<Trust, string> = { grey: "#4b5058", yellow: "#facc15", green: "#4ade80", red: "#ef4444" };
 /** Where a speaker's name came from, in words. */

@@ -329,17 +329,30 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   /** One tap: every label a model or the voice set becomes the user's, and
    *  the review flag clears. Same outbox path as any label edit. */
-  async function confirmSpeakers(named?: { letter: string; name: string }[]) {
+  /**
+   * The one path for every naming tap: ✓ on a voice, a name picked or typed,
+   * a merge, "Confirm all", "Set aside". Each becomes your label. When that
+   * leaves every voice of the transcript named by you, a red flag is answered
+   * and cleared in the same edit.
+   */
+  async function confirmSpeakers(named?: { letter: string; name: string; evidence?: string }[]) {
+    if (revisionBehind) { Alert.alert("New transcript downloading", "Label speakers once it has arrived."); return; }
     const settings = await getSettings();
-    const list = named ?? confirmableLetters(rec).map((L) => ({ letter: L, name: rec.speakerLabels![L].name }));
+    const list: { letter: string; name: string; evidence?: string }[] = named ?? confirmableLetters(rec).map((L) => ({ letter: L, name: rec.speakerLabels![L].name }));
     let preview: Recording = rec;
-    for (const { letter, name } of list) preview = setLabel(preview, letter, name, "user", settings.ownerName);
-    if (rec.reviewFlag) preview = touch({ ...preview, reviewFlag: null }, "reviewFlag");
+    for (const { letter, name, evidence } of list) {
+      preview = setLabel(preview, letter, name, "user", settings.ownerName);
+      if (evidence) preview = { ...preview, speakerLabels: { ...preview.speakerLabels!, [letter]: { ...preview.speakerLabels![letter], evidence } } };
+    }
+    const voices = Array.from(new Set((utterances ?? []).map((u) => u.speaker)));
+    const allMine = voices.length > 0 && voices.every((k) => preview.speakerLabels?.[k]?.by === "user");
+    const clearFlag = !!rec.reviewFlag && allMine;
+    if (clearFlag) preview = touch({ ...preview, reviewFlag: null }, "reviewFlag");
     const patch: Record<string, unknown> = {};
     for (const { letter } of list) patch[`speakerLabels.${letter}`] = preview.speakerLabels?.[letter] ?? null;
     if (preview.speakerId !== rec.speakerId) patch.speakerId = preview.speakerId ?? null;
     if (preview.meIncluded !== rec.meIncluded) patch.meIncluded = preview.meIncluded;
-    if (rec.reviewFlag) patch.reviewFlag = null;
+    if (clearFlag) patch.reviewFlag = null;
     await enqueue(preview, patch, preview.fieldsUpdatedAt ?? {}, shownRev);
     const keys = changedKeys(rec, preview);
     try {
@@ -666,7 +679,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         editable={!revisionBehind && !!utterances}
         folderIcon={iconOf(rec.folder === "Inbox" && rec.folderSuggestion ? rec.folderSuggestion.folder : rec.folder, folderIcons)}
         history={speakerHist}
-        onSetName={remapSpeaker}
+        onSetName={(L, name) => confirmSpeakers([{ letter: L, name }])}
+        onSetAside={(keys) => confirmSpeakers(keys.map((L) => ({ letter: L, name: `Other (${L})`, evidence: "short voice, set aside" })))}
         onRemoveName={removeName}
         onConfirmAll={confirmSpeakers}
         onAcceptFolder={acceptFolder}
