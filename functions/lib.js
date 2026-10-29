@@ -28,14 +28,15 @@ function ownerAttribution(m) {
   const letter = m.speakerId;
   const lbl = letter && m.speakerLabels && m.speakerLabels[letter];
   if (!lbl) return none;
-  const LEVEL = { user: "verified", channel: "certain", "ai-review": "likely",
+  const LEVEL = { user: "verified", channel: "certain", "ai-review": "likely", auto: "likely",
                   voiceprint: "inferred", claude: "inferred", aai: "inferred", none: "inferred" };
-  const BY = { user: "user", channel: "channel", "ai-review": "ai-review",
+  const BY = { user: "user", channel: "channel", "ai-review": "ai-review", auto: "ai-review",
                voiceprint: "ai-review", claude: "claude", aai: "aai", none: "none" };
   const EVIDENCE = {
     user: "owner confirmed the letter by hand",
     channel: "owner on a dedicated hardware channel",
-    "ai-review": "Mac review pass, two signals",
+    "ai-review": "review pass, two signals",
+    auto: "owner's record-time names plus a voice match",
     voiceprint: "voiceprint nearest-match only, single signal",
     claude: "Claude inferred from transcript content",
     aai: "AssemblyAI identification; name spoken in transcript",
@@ -163,10 +164,12 @@ function applyPatch(meta, body, ownerName, opts = {}) {
     const names = Object.entries(labels).map(([L, v]) => [L, (v.name || "").trim().toLowerCase()]).filter(([, n]) => n);
     const counts = {};
     for (const [, n] of names) counts[n] = (counts[n] || 0) + 1;
-    // Two voices with one name, every one of them named by a person, is a
-    // merge (diarization split one person); only a model's duplicate is refused.
+    // Two voices with one name, every one of them named by a person (or
+    // settled by the review from a name they gave), is a merge: diarization
+    // split one person. So is the review's suggestion to fold a short voice
+    // into a named one. Only a model's duplicate is refused.
     const dup = Object.entries(counts).find(([n, c]) => c > 1 &&
-      names.some(([L, m]) => m === n && (labels[L] || {}).by !== "user"));
+      names.some(([L, m]) => m === n && !["user", "auto"].includes((labels[L] || {}).by) && !(labels[L] || {}).merge));
     const mayShare = Object.keys(labels).length > (Array.isArray(meta.speakers) ? meta.speakers.length : 0);
     if (dup && !mayShare) throw new PatchError(409, `"${dup[0]}" would be assigned to two letters`);
     meta.speakerLabels = labels;
@@ -195,7 +198,8 @@ function applyPatch(meta, body, ownerName, opts = {}) {
 function validLabel(e) {
   if (!e || typeof e !== "object") return false;
   if (typeof e.name !== "string") return false;
-  if (!["user", "ai-review", "channel", "voiceprint", "claude", "aai", "none"].includes(e.by)) return false;
+  if (!["user", "auto", "ai-review", "channel", "voiceprint", "claude", "aai", "none"].includes(e.by)) return false;
+  if (e.merge !== undefined && typeof e.merge !== "boolean") return false;
   if (e.evidence !== undefined && (typeof e.evidence !== "string" || e.evidence.length > 200)) return false;
   // Legacy labels carry no time of attribution: null is honest, a made-up one
   // is not. Anything present must parse.

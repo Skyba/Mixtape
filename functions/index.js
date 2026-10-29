@@ -24,6 +24,8 @@ const WRITE_SCOPES = ["write:meta"];
 const lib = require("./lib");
 const { ownerAttribution, canonStamp, validField, PatchError, applyPatch, AAI, AAI_RATE_PER_HOUR, LANG_CODES, LANG_NAMES, renderTranscript, acceptSpeakerMapping, inferSpeakerMap, inferTopic, speakerIdentification } = lib;
 const { makeCanonical } = require("./canonical");
+const { makeReview } = require("./review");
+const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const TRANSCRIBE_SECRETS = ["ASSEMBLYAI_KEY", "ANTHROPIC_KEY", "TRANSCRIBE_WEBHOOK_SECRET"];
 
@@ -1184,3 +1186,21 @@ async function legacySweep() {
   }
   return { reset, open };
 }
+
+// The review step after each transcription (review.js): voice match, content
+// check, merge suggestions, red on contradiction. Publishing sets reviewDue;
+// this runs it once per due marker, and the sweep retries what failed.
+let _review = null;
+const reviewer = () => _review || (_review = makeReview({ db: admin.firestore(), bucket: bkt(), env: process.env, canon: canon() }));
+// One review per instance: a two-hour recording decodes to ~440 MB.
+const REVIEW_OPTS = { region: "us-central1", memory: "4GiB", cpu: 2, concurrency: 1, timeoutSeconds: 540, secrets: ["ANTHROPIC_KEY"] };
+exports.reviewRecording = onDocumentWritten({ ...REVIEW_OPTS, document: "recordings/{uid}/items/{id}" }, async (event) => {
+  const before = event.data.before.exists ? event.data.before.data() : null;
+  const after = event.data.after.exists ? event.data.after.data() : null;
+  if (!after || !after.reviewDue || JSON.stringify(after.reviewDue) === JSON.stringify(before && before.reviewDue)) return;
+  console.log(JSON.stringify({ review: event.params.id, out: await reviewer().reviewOne(event.params.uid, event.params.id, after.reviewDue) }));
+});
+exports.reviewSweep = onSchedule({ ...REVIEW_OPTS, schedule: "every 30 minutes" }, async () => {
+  if ((await phase()) !== "canonical") return;
+  console.log(JSON.stringify({ reviewSweep: await reviewer().sweep() }));
+});

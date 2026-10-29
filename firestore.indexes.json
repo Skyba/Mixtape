@@ -31,6 +31,20 @@
     },
     {
       "collectionGroup": "items",
+      "fieldPath": "reviewDue",
+      "indexes": [
+        {
+          "queryScope": "COLLECTION_GROUP",
+          "order": "ASCENDING"
+        },
+        {
+          "queryScope": "COLLECTION",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "items",
       "fieldPath": "deletedAt",
       "indexes": [
         {

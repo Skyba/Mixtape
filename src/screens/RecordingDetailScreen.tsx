@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { setLabel, touch, adopt, changedKeys, confirmableLetters, SOURCE_WORD } from "../attribution";
+import { setLabel, touch, adopt, changedKeys, confirmableLetters, settled, SOURCE_WORD } from "../attribution";
 import ReviewCard from "../components/ReviewCard";
 import { fmtWhen, fmtLength } from "../when";
 import { placeLabel } from "../place";
@@ -353,7 +353,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       if (evidence) preview = { ...preview, speakerLabels: { ...preview.speakerLabels!, [letter]: { ...preview.speakerLabels![letter], evidence } } };
     }
     const voices = Array.from(new Set((utterances ?? []).map((u) => u.speaker)));
-    const allMine = voices.length > 0 && voices.every((k) => preview.speakerLabels?.[k]?.by === "user");
+    const allMine = voices.length > 0 && voices.every((k) => settled(preview.speakerLabels?.[k]));
     const clearFlag = !!rec.reviewFlag && allMine;
     if (clearFlag) preview = touch({ ...preview, reviewFlag: null }, "reviewFlag");
     const patch: Record<string, unknown> = {};
@@ -741,7 +741,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
                   >
                     {nameOf(u.speaker)}
                     {rec.speakerLabels?.[u.speaker] ? (
-                      rec.speakerLabels[u.speaker].by !== "user" ? <Text style={styles.uttSrc}> ({SOURCE_WORD[rec.speakerLabels[u.speaker].by]})</Text> : null
+                      !settled(rec.speakerLabels[u.speaker]) ? <Text style={styles.uttSrc}> ({SOURCE_WORD[rec.speakerLabels[u.speaker].by]})</Text> : null
                     ) : !/^[A-Z]$/.test(u.speaker) ? <Text style={styles.uttSrc}> (AssemblyAI)</Text> : null}
                     <Text style={styles.uttTime}>
                       {"  "}

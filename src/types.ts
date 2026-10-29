@@ -6,12 +6,14 @@ export type UploadStatus = "pending" | "uploaded" | "skipped";
  * "user" is any human — phone or Mac — "ai-review" is a dedicated review pass
  * (the Mac batch, voiceprint), "channel" is hardware separation.
  */
-export type LabelSource = "user" | "ai-review" | "channel" | "voiceprint" | "claude" | "aai" | "none";
+export type LabelSource = "user" | "auto" | "ai-review" | "channel" | "voiceprint" | "claude" | "aai" | "none";
 /** `at` is null for a pre-provenance label: no one knows when it was made. */
 export type SpeakerLabel = {
   name: string; by: LabelSource; at: string | null;
   /** Why the name was given, in words: "voice 72%", "AI: answered when called Basile". */
   evidence?: string;
+  /** The review suggests this short voice is a split of the named one. */
+  merge?: boolean;
 };
 /** The fields that sync both ways between the phone and the Mac. */
 export type SyncedField =

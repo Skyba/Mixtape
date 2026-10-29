@@ -3,6 +3,8 @@ import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { Recording, INBOX } from "../types";
 import { SOURCE_WORD, TRUST_COLOR, trustOf, duplicateNames, flagOpen } from "../attribution";
+
+const mine = (by?: string) => by === "user" || by === "auto";
 import type { Utterance } from "../transcription";
 import NamePicker from "./NamePicker";
 
@@ -67,7 +69,7 @@ export default function ReviewCard(p: Props) {
   useEffect(() => { if (!status.playing) setPlaying(null); }, [status.playing]);
 
   const speakers = useMemo(() => {
-    const by: Record<string, Utterance[]> = {};
+    const by: Record<string, Utterance[]> = Object.create(null);
     for (const u of utterances ?? []) (by[u.speaker] ??= []).push(u);
     return Object.entries(by).map(([L, us]) => {
       const secs = us.reduce((t, u) => t + ((u.end ?? u.start) - u.start) / 1000, 0);
@@ -88,7 +90,7 @@ export default function ReviewCard(p: Props) {
     stopAt.current = setTimeout(() => { player.pause(); setPlaying(null); }, CLIP_MS);
   }
 
-  const toConfirm = speakers.filter((s) => s.by !== "user" && !s.unnamed);
+  const toConfirm = speakers.filter((s) => !mine(s.by) && !s.unnamed);
   // A voice under 30 s that nobody named is usually a diarization split, a
   // cough, a TV: offered as one tap to set aside, still nameable one by one.
   const SHORT_S = 30;
@@ -97,7 +99,7 @@ export default function ReviewCard(p: Props) {
   const fmtSecs = (x: number) => (x < 60 ? `${Math.max(1, Math.round(x))} s` : `${Math.round(x / 60)} min`);
   // One voice filed under "self": the folder line says nothing the voice
   // line does not, so it is not shown.
-  const soloSelf = speakers.length === 1 && rec.folder === "self" && speakers[0].by === "user";
+  const soloSelf = speakers.length === 1 && rec.folder === "self" && mine(speakers[0].by);
   const here = Array.from(new Set(speakers.filter((s) => !s.unnamed).map((s) => s.name).concat(rec.speakers.filter((n) => !/^Speaker \d+$/.test(n)))));
   const pickFor = speakers.find((s) => s.L === picking);
   const suggested = rec.folder === INBOX && rec.folderSuggestion;
@@ -142,17 +144,17 @@ export default function ReviewCard(p: Props) {
             </TouchableOpacity>
           ) : null}
           <TouchableOpacity style={{ flex: 1 }} disabled={!p.editable} onPress={() => setPicking(s.L)}>
-            <Text style={[styles.name, s.by !== "user" && (s.unnamed ? styles.muted : styles.inferred)]} numberOfLines={1}>
+            <Text style={[styles.name, !mine(s.by) && (s.unnamed ? styles.muted : styles.inferred)]} numberOfLines={1}>
               {s.name}
               <Text style={styles.mins}>  {fmtSecs(s.secs)}</Text>
             </Text>
             {s.how ? <Text style={styles.how} numberOfLines={1}>{s.how}</Text> : s.unnamed ? <Text style={styles.how}>tap to name or merge</Text> : null}
           </TouchableOpacity>
-          {p.editable && s.by !== "user" && !s.unnamed ? (
+          {p.editable && !mine(s.by) && !s.unnamed ? (
             <TouchableOpacity style={styles.ok} onPress={() => p.onSetName(s.L, s.name)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
               <Text style={styles.okTxt}>✓</Text>
             </TouchableOpacity>
-          ) : s.by === "user" ? <Text style={styles.done}>✓</Text> : null}
+          ) : mine(s.by) ? <Text style={styles.done}>✓</Text> : null}
         </View>
       ))}
 

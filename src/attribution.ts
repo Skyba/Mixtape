@@ -47,19 +47,25 @@ export function currentKeys(r: Recording): string[] {
   // "unknown": stale labels must not stand in for it.
   return Array.isArray(r.speakerKeys) ? r.speakerKeys : Object.keys(r.speakerLabels ?? {});
 }
+/** A name that needs no tap: yours, or settled by the review because the
+ *  voice matches a name you gave (when recording, or before a re-run). */
+export function settled(l: SpeakerLabel | undefined): boolean {
+  return !!l && (l.by === "user" || l.by === "auto");
+}
 /** Every voice of the current transcript carries a name you gave or confirmed
  *  (merging a voice into someone is giving it that name). */
 export function speakersConfirmed(r: Recording): boolean {
   const keys = currentKeys(r);
   if (keys.length === 0) return Array.isArray(r.speakerKeys) && r.transcriptStatus === "done"; // no speech: nothing to name
-  return keys.every((k) => r.speakerLabels?.[k]?.by === "user");
+  return keys.every((k) => settled(r.speakerLabels?.[k]));
 }
 /** A flag raised after your last naming is a new contradiction; one raised
  *  before it was answered by that naming. */
 export function flagOpen(r: Recording): boolean {
   if (!r.reviewFlag) return false;
   if (!speakersConfirmed(r)) return true;
-  const lastMine = currentKeys(r).map((k) => r.speakerLabels?.[k]?.at || "").sort().pop() || "";
+  // Only your own naming answers a flag; the review's own labels do not.
+  const lastMine = currentKeys(r).filter((k) => r.speakerLabels?.[k]?.by === "user").map((k) => r.speakerLabels?.[k]?.at || "").sort().pop() || "";
   return r.reviewFlag.at > lastMine;
 }
 export function folderConfirmed(r: Recording): boolean {
@@ -71,7 +77,7 @@ export function hasSuggestion(r: Recording): boolean {
   const keys = currentKeys(r);
   const named = keys.some((k) => {
     const l = r.speakerLabels?.[k];
-    return l ? l.by !== "user" : !/^[A-Z]$/.test(k);
+    return l ? !settled(l) : !/^[A-Z]$/.test(k);
   });
   return named || (r.folder === INBOX && !!r.folderSuggestion);
 }
@@ -87,15 +93,16 @@ function nameOfKey(r: Recording, k: string): string | null {
   return r.speakerLabels?.[k]?.name ?? (/^[A-Z]$/.test(k) ? null : k);
 }
 /** Names given to two voices where at least one was not given by you
- *  (a merge you made is fine): one of them is wrong. */
+ *  (a merge you made is fine, a merge the review suggests is a suggestion):
+ *  one of them is wrong. */
 export function duplicateNames(r: Recording): string[] {
-  const by: Record<string, string[]> = {};
+  const by: Record<string, string[]> = Object.create(null);
   for (const k of currentKeys(r)) {
     const n = nameOfKey(r, k);
     if (n && !/^Other \(/.test(n)) (by[n] ??= []).push(k);
   }
   return Object.entries(by)
-    .filter(([, ks]) => ks.length > 1 && ks.some((k) => r.speakerLabels?.[k]?.by !== "user"))
+    .filter(([, ks]) => ks.length > 1 && ks.some((k) => !settled(r.speakerLabels?.[k]) && !r.speakerLabels?.[k]?.merge))
     .map(([n]) => n);
 }
 export function trustOf(r: Recording): Trust {
@@ -103,13 +110,13 @@ export function trustOf(r: Recording): Trust {
   if (flagOpen(r)) return "red";
   if (speakersConfirmed(r) && folderConfirmed(r)) return "green";
   // Partly named by you is work in progress, not "nothing known".
-  const partly = currentKeys(r).some((k) => r.speakerLabels?.[k]?.by === "user");
+  const partly = currentKeys(r).some((k) => settled(r.speakerLabels?.[k]));
   return hasSuggestion(r) || partly || (speakersConfirmed(r) && !folderConfirmed(r)) ? "yellow" : "grey";
 }
 export const TRUST_COLOR: Record<Trust, string> = { grey: "#4b5058", yellow: "#facc15", green: "#4ade80", red: "#ef4444" };
 /** Where a speaker's name came from, in words. */
 export const SOURCE_WORD: Record<string, string> = {
-  user: "you", "ai-review": "AI review", channel: "channel", voiceprint: "voice", claude: "AI guess", aai: "AssemblyAI", none: "old label",
+  user: "you", auto: "your names + voice", "ai-review": "AI review", channel: "channel", voiceprint: "voice", claude: "AI guess", aai: "AssemblyAI", none: "old label",
 };
 
 /** Labels a person could confirm in one tap (anything a model or the voice set). */

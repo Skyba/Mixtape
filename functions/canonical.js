@@ -337,6 +337,13 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
         // Which voices this transcript has: the phone colours by these, not
         // by labels left from an earlier run.
         speakerKeys: Array.from(new Set(utterances.map((u) => u.speaker))).sort(),
+        // The review step (review.js) runs on every new transcript. On a
+        // re-run it needs the names the owner had settled, by the old
+        // voices, to find them again among the new ones.
+        reviewDue: { rev, at: t },
+        // Newest first: a name the last run did not settle is still found
+        // in the one before.
+        priorLabels: firstRun ? null : priorLabelsAfter(cur),
         rerunQueued: changedMeanwhile && !at.rerunForEdit ? { afterRev: rev, reason: "language or speakers changed while the job ran" } : null,
         speakerMap: Object.keys(speakerMap).length ? speakerMap : null, speakerLabels, speakerId: keepOwner ? cur.speakerId : null,
         fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), ...labelStamps, ...(keepOwner ? {} : { speakerId: transcribedAt }),
@@ -562,6 +569,20 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
   };
 }
 
+function priorLabelsAfter(cur) {
+  const keep = Object.fromEntries(Object.entries(cur.speakerLabels || {}).filter(([, l]) => l && (l.by === "user" || l.by === "auto")));
+  const older = [].concat(cur.priorLabels || []).filter((p) => p && p.rev !== cur.current.rev);
+  const list = Object.keys(keep).length ? [{ rev: cur.current.rev, labels: keep }, ...older] : older;
+  // An older transcript is kept only while it holds a name no newer one has.
+  const covered = new Set();
+  const kept = list.filter((p) => {
+    const names = Object.values(p.labels || {}).map((l) => l.name);
+    const adds = names.some((n) => !covered.has(n));
+    names.forEach((n) => covered.add(n));
+    return adds;
+  }).slice(0, 5);
+  return kept.length ? kept : null;
+}
 function decodedPath(u) {
   try { return decodeURIComponent(new URL(u).pathname); } catch { return String(u); }
 }
@@ -601,4 +622,4 @@ function crc32cBase64(buf) {
   return b.toString("base64");
 }
 
-module.exports = { makeCanonical, ID_RE, CanonError, crc32cBase64, PHASES };
+module.exports = { makeCanonical, ID_RE, CanonError, crc32cBase64, PHASES, priorLabelsAfter };

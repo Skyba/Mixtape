@@ -10,7 +10,8 @@
     "express": "^4.21.0",
     "ffmpeg-static": "^5.2.0",
     "firebase-admin": "^12.6.0",
-    "firebase-functions": "^5.1.0"
+    "firebase-functions": "^5.1.0",
+    "onnxruntime-node": "^1.31.1"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^4.0.1"
