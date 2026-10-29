@@ -33,14 +33,20 @@ async function model(bucket) {
 async function decode(file) {
   const tmp = path.join(os.tmpdir(), `v-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   await file.download({ destination: tmp });
+  const raw = tmp + ".s16";
   try {
-    const pcm = await new Promise((resolve, reject) => {
-      execFile(ffmpegPath, ["-loglevel", "error", "-i", tmp, "-ac", "1", "-ar", String(SR), "-f", "f32le", "pipe:1"],
-        { encoding: "buffer", maxBuffer: 1024 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(out)));
+    // To a file, 16-bit: a long recording is too big for a pipe buffer.
+    await new Promise((resolve, reject) => {
+      execFile(ffmpegPath, ["-loglevel", "error", "-y", "-i", tmp, "-ac", "1", "-ar", String(SR), "-f", "s16le", raw], (e) => (e ? reject(e) : resolve()));
     });
-    return new Float32Array(pcm.buffer, pcm.byteOffset, pcm.length / 4);
+    const pcm = await fs.promises.readFile(raw);
+    const s16 = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.length >> 1);
+    const out = new Float32Array(s16.length);
+    for (let i = 0; i < s16.length; i++) out[i] = s16[i] / 32768;
+    return out;
   } finally {
     fs.promises.unlink(tmp).catch(() => {});
+    fs.promises.unlink(raw).catch(() => {});
   }
 }
 
