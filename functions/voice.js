@@ -29,25 +29,41 @@ async function model(bucket) {
   return session;
 }
 
-/** A storage object decoded to 16 kHz mono float samples. */
+/** A storage object decoded to 16 kHz mono 16-bit samples in a temp file.
+ * Only the stretches asked for are read into memory: a five-hour recording
+ * decoded whole does not fit the function. close() removes the file. */
 async function decode(file) {
   const tmp = path.join(os.tmpdir(), `v-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  await file.download({ destination: tmp });
   const raw = tmp + ".s16";
+  await file.download({ destination: tmp });
   try {
-    // To a file, 16-bit: a long recording is too big for a pipe buffer.
     await new Promise((resolve, reject) => {
       execFile(ffmpegPath, ["-loglevel", "error", "-y", "-i", tmp, "-ac", "1", "-ar", String(SR), "-f", "s16le", raw], (e) => (e ? reject(e) : resolve()));
     });
-    const pcm = await fs.promises.readFile(raw);
-    const s16 = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.length >> 1);
-    const out = new Float32Array(s16.length);
-    for (let i = 0; i < s16.length; i++) out[i] = s16[i] / 32768;
-    return out;
+  } catch (e) {
+    fs.promises.unlink(raw).catch(() => {});
+    throw e;
   } finally {
     fs.promises.unlink(tmp).catch(() => {});
-    fs.promises.unlink(raw).catch(() => {});
   }
+  const fd = fs.openSync(raw, "r");
+  const length = fs.fstatSync(fd).size >> 1;
+  return {
+    length,
+    subarray(from, to) {
+      from = Math.max(0, Math.min(from, length));
+      to = Math.max(from, Math.min(to, length));
+      const buf = Buffer.alloc((to - from) * 2);
+      fs.readSync(fd, buf, 0, buf.length, from * 2);
+      const out = new Float32Array(to - from);
+      for (let i = 0; i < out.length; i++) out[i] = buf.readInt16LE(i * 2) / 32768;
+      return out;
+    },
+    close() {
+      try { fs.closeSync(fd); } catch {}
+      fs.promises.unlink(raw).catch(() => {});
+    },
+  };
 }
 
 function normalize(v) {

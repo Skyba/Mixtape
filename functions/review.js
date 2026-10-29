@@ -263,7 +263,8 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
       const gen = String(f.metadata.generation);
       let c = enrolled.get(f.name);
       if (!c || c.generation !== gen) {
-        c = { generation: gen, emb: await voice.embed(bucket, (await voice.decode(f)).subarray(0, 120 * 16000)) };
+        const audio = await voice.decode(f);
+        try { c = { generation: gen, emb: await voice.embed(bucket, audio.subarray(0, 120 * 16000)) }; } finally { audio.close(); }
         enrolled.set(f.name, c);
       }
       refs[name] = c.emb;
@@ -335,6 +336,14 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
 
     let wav = null;
     const wavP = async () => wav || (wav = await voice.decode(canon.blob(uid, id, "audio.m4a")));
+    try {
+      return await decideFor(uid, id, doc, rev, utterances, ownerName, profile, keys, seconds, wavP);
+    } finally {
+      if (wav) wav.close();
+    }
+  }
+
+  async function decideFor(uid, id, doc, rev, utterances, ownerName, profile, keys, seconds, wavP) {
     const mine = await voicesFor(uid, id, doc, rev, wavP);
     const emb = (mine && mine.embeddings) || {};
 
