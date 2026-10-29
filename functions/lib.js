@@ -212,7 +212,7 @@ function validLabel(e) {
 // edit made on the phone since, and vice versa. A folder change moves the
 
 const AAI_RATE_PER_HOUR = 0.12; // matches the app's estimate
-const LANG_CODES = { English: "en", French: "fr", Spanish: "es", Arabic: "ar" };
+const LANG_CODES = { English: "en", French: "fr", Spanish: "es", Arabic: "ar", German: "de" };
 const LANG_NAMES = Object.fromEntries(
   Object.entries(LANG_CODES).map(([name, code]) => [code, name])
 );
@@ -228,6 +228,8 @@ function mmss(ms) {
 // Same resolution + rendering the app uses, so cloud .txt is byte-identical.
 function nameForSpeaker(letter, speakers, speakerMap) {
   if (speakerMap && speakerMap[letter]) return speakerMap[letter];
+  // Left unnamed by the owner: never fall back to AssemblyAI's name key.
+  if (speakerMap && letter in speakerMap && !/^[A-Z]$/.test(letter)) return "Unnamed voice";
   // Letter order is arbitrary, so the slot entered first is not the voice
   // labelled A. Handing slots out by position named the wrong people with
   // total confidence. An unmapped letter stays anonymous.
@@ -422,9 +424,14 @@ function aaiRequestBody(meta, signedAudioUrl) {
   const body = { audio_url: signedAudioUrl, speaker_labels: true };
   const speakers = Array.isArray(meta.speakers) ? meta.speakers : [];
   if (speakers.length) {
+    // Every slot named: the owner knows who was there, and that count is
+    // the count (one more was allowed before, and diarization reliably spent
+    // it on a cough or a split voice). Unnamed slots keep one spare: an extra
+    // voice is fixable in the app, a merged one is not.
+    const exact = speakers.every((s) => !/^Speaker \d+$/.test(s));
     body.speaker_options = {
       min_speakers_expected: Math.max(1, speakers.length),
-      max_speakers_expected: Math.max(2, speakers.length + 1),
+      max_speakers_expected: exact ? speakers.length : Math.max(2, speakers.length + 1),
     };
   }
   const su = speakerIdentification(meta);

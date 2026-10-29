@@ -79,7 +79,7 @@ import type { RootStackParamList } from "../../App";
 type Props = NativeStackScreenProps<RootStackParamList, "Detail">;
 
 // Mirrors the Record screen. "Auto" detects instead of pinning.
-const DETAIL_LANGUAGES = ["Auto", "English", "French", "Arabic", "Spanish"];
+const DETAIL_LANGUAGES = ["Auto", "English", "French", "Spanish", "German", "Arabic"];
 
 function tstamp(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -122,7 +122,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const folderIcons = useFolderIcons();
   const [rerun, setRerun] = useState(false);
   const [rerunN, setRerunN] = useState(2);
-  const [showPlacement, setShowPlacement] = useState(rec.folder === "Inbox" && !rec.folderSuggestion);
+  const [showPlacement, setShowPlacement] = useState(false);
   const [menu, setMenu] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   // What the review card's clips play: the local file, else the cloud copy.
@@ -142,7 +142,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const canUseTranscript = done && !isRemote && !!transcript;
   // A speaker's name everywhere on this screen: its label first (whoever set
   // it), then the legacy map, then the key itself.
-  const nameOf = (L: string) => rec.speakerLabels?.[L]?.name ?? nameForSpeaker(L, rec.speakers, rec.speakerMap);
+  const nameOf = (L: string) => rec.speakerLabels?.[L]?.name || nameForSpeaker(L, rec.speakers, rec.speakerMap);
 
   // A transcript finishing or an edit landing from the Mac while this screen
   // is open: re-read the sidecar and its files.
@@ -678,8 +678,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
             <TouchableOpacity style={[styles.act, !canUseTranscript && styles.actOff]} disabled={!canUseTranscript} onPress={copyTranscript}>
               <Text style={styles.actTxt}>Copy text</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.act} onPress={() => shareFile(audioPath(rec))}>
-              <Text style={styles.actTxt}>Share audio</Text>
+            <TouchableOpacity style={[styles.act, !canUseTranscript && styles.actOff]} disabled={!canUseTranscript} onPress={() => shareFile(transcriptPath(rec))}>
+              <Text style={styles.actTxt}>Share text</Text>
             </TouchableOpacity>
             {!done && !pending ? (
               <TouchableOpacity style={[styles.act, styles.actPrimary]} disabled={!!rec.damaged} onPress={() => doTranscribe()}>
@@ -701,11 +701,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         folderIcon={iconOf(rec.folder === "Inbox" && rec.folderSuggestion ? rec.folderSuggestion.folder : rec.folder, folderIcons)}
         history={speakerHist}
         onSetName={(L, name) => confirmSpeakers([{ letter: L, name }])}
-        onSetAside={(keys) => confirmSpeakers(keys.map((L) => ({ letter: L, name: `Other (${L})`, evidence: "short voice, set aside" })))}
         onRemoveName={removeName}
         onConfirmAll={confirmSpeakers}
         onAcceptFolder={acceptFolder}
-        onChangeFolder={() => setShowPlacement((v) => !v)}
+        onChangeFolder={() => setShowPlacement(true)}
         onRerun={() => { setRerunN(new Set((utterances ?? []).map((u) => u.speaker)).size || rec.speakers.length || 2); setRerun(true); }}
       />
 
@@ -762,7 +761,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         <TouchableOpacity style={styles.sheetBack} activeOpacity={1} onPress={() => setMenu(false)}>
           <View style={[styles.sheet, { paddingBottom: 16 + insets.bottom }]}>
             {[
-              canUseTranscript ? { t: "Save transcript (.txt)", f: () => shareFile(transcriptPath(rec)) } : null,
+              { t: "Share audio (.m4a)", f: () => shareFile(audioPath(rec)) },
               canUseTranscript && isFirebaseConfigured && !rec.shareId ? { t: "Publish a public link", f: publish } : null,
               done && !pending && !rec.damaged ? { t: "Re-transcribe", f: () => doTranscribe() } : null,
               { t: "Change folder", f: () => setShowPlacement(true) },
@@ -777,16 +776,21 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         </TouchableOpacity>
       </Modal>
 
-      {showPlacement ? (
-        <PlacementPicker
-          value={{
-            folder: rec.folder,
-            private: !!rec.private,
-            tags: rec.tags ?? [],
-          }}
-          onChange={savePlacement}
-        />
-      ) : null}
+      <Modal visible={showPlacement} transparent animationType="fade" onRequestClose={() => setShowPlacement(false)}>
+        <TouchableOpacity style={styles.sheetBack} activeOpacity={1} onPress={() => setShowPlacement(false)}>
+          <TouchableOpacity activeOpacity={1} style={[styles.sheet, { padding: 16, paddingBottom: 16 + insets.bottom }]}>
+            <Text style={[styles.sheetTxt, { fontWeight: "700", marginBottom: 8 }]}>File in</Text>
+            <PlacementPicker
+              value={{
+                folder: rec.folder,
+                private: !!rec.private,
+                tags: rec.tags ?? [],
+              }}
+              onChange={async (v) => { const moved = v.folder !== rec.folder; await savePlacement(v); if (moved) setShowPlacement(false); }}
+            />
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
       <Text style={styles.sectionLabel}>Language</Text>
       <View style={styles.langRow}>
         {DETAIL_LANGUAGES.map((l) => (

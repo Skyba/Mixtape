@@ -49,12 +49,11 @@ function parseJson(text) {
 
 /** Key -> {name, quote}: only keys the content proves, by a quote that is a
  * self-introduction by that voice or an address it answers. */
-async function askNames(ask, utterances, named, owner) {
-  if (!named.length) return {};
+async function askNames(ask, utterances, named, owner, known = []) {
   const { back, lines, anon } = anonymise(utterances);
   const prompt =
     `A conversation transcript is labelled with anonymous speaker letters (${Object.values(anon).join(", ")}). ` +
-    `The participants are: ${named.join(", ")}` +
+    (named.length ? `The participants are: ${named.join(", ")}` : `Nobody listed the participants.` + (known.length ? ` People who often appear in these recordings: ${known.join(", ")}; others may be present too` : "")) +
     (owner.name ? `. The recording device belongs to ${owner.name}${owner.bio ? `: ${owner.bio}` : ""}` : "") +
     ".\n\nFor each letter whose identity the content SUPPORTS, give the name and a SHORT quote (at most 15 words, " +
     "copied exactly) of the line that proves it: someone addressing them by name and them answering, or 'I am X'. " +
@@ -66,7 +65,9 @@ async function askNames(ask, utterances, named, owner) {
   const texts = utterances.map((u) => norm(u.text));
   const clean = {};
   for (const [L, v] of Object.entries(out)) {
-    if (!v || typeof v !== "object" || !named.includes(v.name) || !back[L]) continue;
+    // With participants listed, only those; without, anyone the quote proves.
+    if (!v || typeof v !== "object" || typeof v.name !== "string" || !v.name.trim() || v.name.length > 40 || !back[L]) continue;
+    if (named.length && !named.includes(v.name)) continue;
     const quote = String(v.quote || "").trim();
     const q = norm(quote).slice(0, 50);
     const idx = q ? texts.findIndex((t) => t.includes(q)) : -1;
@@ -139,7 +140,8 @@ function decide({ doc, keys, seconds, voiceBy, fresh, carried = [], ownerCheck =
   // Settled names: never changed, only checked.
   for (const k of keys) {
     const l = labels[k];
-    if (!settled(l)) continue;
+    // A voice the owner chose to leave unnamed is their answer too.
+    if (!settled(l) || !l.name) continue;
     const v = voiceBy[k], f = fresh[k], clash = voiceClash[k];
     if (v && lc(v.name) !== lc(l.name)) conflicts.push(`${l.name}: the voice sounds like ${v.name} (${pct(v.score)})`);
     else if (clash && clash.some((n) => lc(n) !== lc(l.name))) conflicts.push(`${l.name}: the voice sounds like both ${clash.join(" and ")}`);
@@ -165,6 +167,8 @@ function decide({ doc, keys, seconds, voiceBy, fresh, carried = [], ownerCheck =
       out[k] = { name: votes[0], by: "ai-review", evidence: ev.join(" · ") };
     } else if (v && votes.length === 1) {
       out[k] = { name: v.name, by: "voiceprint", evidence: voiceWord(v) };
+    } else if (f && votes.length === 1) {
+      out[k] = { name: f.name, by: "claude", evidence: `AI: “${f.quote.slice(0, 60)}”` };
     } else if (votes.length) {
       disputed[k] = { server, transcript: f && f.name, voice: v && v.name };
     }
@@ -260,6 +264,7 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
       const m = f.name.match(/_voiceprint\/(enroll|people\/(.+))\.m4a$/);
       if (!m) continue;
       const name = m[2] ? decodeURIComponent(m[2]) : ownerName;
+      if (!name) continue;
       const gen = String(f.metadata.generation);
       let c = enrolled.get(f.name);
       if (!c || c.generation !== gen) {
@@ -285,6 +290,19 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
     const out = { rev, embeddings: await voice.voiceEmbeddings(bucket, await wavP(), utt) };
     await f.save(JSON.stringify(out), { contentType: "application/json", resumable: false });
     return out;
+  }
+
+  // The names the owner has given most, across their recordings.
+  async function usualNames(uid) {
+    const snap = await db.collection("recordings").doc(uid).collection("items").where("deletedAt", "==", null).get();
+    const n = new Map();
+    for (const s of snap.docs) {
+      for (const l of Object.values(s.data().speakerLabels || {})) {
+        if (!settled(l) || !l.name || /^Other \(/.test(l.name)) continue;
+        n.set(l.name, (n.get(l.name) || 0) + 1);
+      }
+    }
+    return [...n.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k).slice(0, 15);
   }
 
   async function claim(uid, id, due) {
@@ -327,9 +345,10 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
     // inherited values everywhere below; no real speaker is called that.
     const utterances = JSON.parse((await canon.blob(uid, id, doc.current.aai.name).download())[0]).filter((u) => !(u.speaker in Object.prototype));
     if (!utterances.length) return { labels: {}, flag: null, folder: null };
-    const ownerName = ((doc.owner && doc.owner.name) || env.MIXTAPE_OWNER || "Basile").trim();
     const prof = await db.collection("ownerProfiles").doc(uid).get();
-    const profile = prof.exists ? prof.data().profile || "" : "";
+    const pd = prof.exists ? prof.data() : {};
+    const profile = pd.profile || "";
+    const ownerName = ((doc.owner && doc.owner.name) || pd.name || "").trim();
     const keys = (doc.speakerKeys || [...new Set(utterances.map((u) => u.speaker))].sort()).filter((k) => !(k in Object.prototype));
     const seconds = Object.create(null);
     for (const u of utterances) seconds[u.speaker] = (seconds[u.speaker] || 0) + (u.end - u.start) / 1000;
@@ -356,7 +375,8 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
     const byName = new Map();
     for (const prior of [].concat(doc.priorLabels || [])) {
       if (!prior || prior.rev === rev) continue;
-      const fresh = Object.entries(prior.labels || {}).filter(([, l]) => settled(l) && !byName.has(l.name));
+      // A voice left unnamed is nobody's reference.
+      const fresh = Object.entries(prior.labels || {}).filter(([, l]) => settled(l) && l.name && !byName.has(l.name));
       if (!fresh.length) continue;
       const old = await voicesFor(uid, id, doc, prior.rev, wavP);
       const got = new Map();
@@ -371,7 +391,10 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
 
     const listed = (doc.speakers || []).filter((s) => s && !isPlaceholder(s));
     const named = [...new Set([...listed, ...carried])];
-    const fresh = named.length ? await askNames(ask, utterances, named, { name: ownerName, bio: doc.owner && doc.owner.bio }) : {};
+    // Nobody listed: still read the conversation for people introducing
+    // themselves or answering to their name, among the usual people or not.
+    const known = named.length ? [] : [...new Set([...Object.keys(refs), ...(await usualNames(uid))])].slice(0, 20);
+    const fresh = await askNames(ask, utterances, named, { name: ownerName, bio: doc.owner && doc.owner.bio }, known);
     const ownerVoice = Object.entries(voiceBy).find(([, v]) => lc(v.name) === lc(ownerName));
     const ownerLabel = ownerVoice && (doc.speakerLabels || {})[ownerVoice[0]];
     const ownerCheck = ownerVoice && keys.length > 1 && !(ownerLabel && ownerLabel.by === "user") ? await askOwner(ask, utterances, ownerName, profile, doc.speakers || []) : null;

@@ -12,6 +12,7 @@ const LANG_CODES: Record<string, string> = {
   French: "fr",
   Spanish: "es",
   Arabic: "ar",
+  German: "de",
 };
 
 /** Reverse of LANG_CODES, for showing what was actually detected. */
@@ -128,6 +129,8 @@ export function nameForSpeaker(
   speakerMap?: Record<string, string>
 ): string {
   if (speakerMap?.[letter]) return speakerMap[letter];
+  // Left unnamed by the owner: never fall back to AssemblyAI's name key.
+  if (speakerMap && letter in speakerMap) return /^[A-Z]$/.test(letter) ? `Speaker ${letter}` : "Unnamed voice";
   // AssemblyAI's identification already keys utterances by name.
   if (!/^[A-Z]$/.test(letter)) return letter;
   // Letter order is arbitrary, so the speakers list says nothing about which

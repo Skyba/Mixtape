@@ -139,3 +139,14 @@ test("a weaker answer never downgrades an earlier review's label for the same na
   const r = run({ doc: doc({ speakerLabels: { A: { name: "Basile", by: "ai-review" } } }), keys: ["A", "B"], seconds: { A: 600, B: 600 }, voiceBy: { A: V("Basile") } });
   assert.deepStrictEqual(r.labels, {});
 });
+
+test("the conversation alone naming a voice is shown as a suggestion", () => {
+  const r = run({ doc: doc(), keys: ["A", "B"], seconds: { A: 600, B: 600 }, fresh: { B: { name: "Michael", quote: "Michael, what do you think? Well I" } } });
+  assert.deepStrictEqual([r.labels.B.name, r.labels.B.by], ["Michael", "claude"]);
+});
+
+test("a voice the owner left unnamed is not contradicted by a voice match", () => {
+  const r = run({ doc: doc({ speakerLabels: { A: { name: "", by: "user" } } }), keys: ["A"], seconds: { A: 600 }, voiceBy: { A: V("Erica") } });
+  assert.strictEqual(r.flag, null);
+  assert.deepStrictEqual(r.labels, {});
+});

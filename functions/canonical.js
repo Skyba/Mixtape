@@ -211,7 +211,14 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       version: "v4", action: "read", expires: Date.now() + 6 * 60 * 60 * 1000,
       queryParams: { generation: claimed.sourceAudioGeneration },
     });
-    const body = lib.aaiRequestBody(doc, signed);
+    // Who the owner is lives in the cloud profile (tools/push-owner-profile.js);
+    // a phone that stamped its own wins for that recording.
+    let owner = doc.owner;
+    if (!owner || !owner.name) {
+      const p = await db.collection("ownerProfiles").doc(uid).get();
+      if (p.exists && p.data().name) owner = { name: p.data().name, bio: p.data().bio || "" };
+    }
+    const body = lib.aaiRequestBody({ ...doc, owner }, signed);
     body.webhook_url = `https://${env.GCLOUD_PROJECT}.web.app/hooks/transcription?job=${claimed.lockId}&id=${encodeURIComponent(id)}&uid=${uid}`;
     body.webhook_auth_header_name = "x-mixtape-secret";
     body.webhook_auth_header_value = env.TRANSCRIBE_WEBHOOK_SECRET;

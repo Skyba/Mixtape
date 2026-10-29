@@ -145,7 +145,7 @@ type Nav = NativeStackNavigationProp<RootStackParamList>;
 const DURATION_PRESETS = [0.5, 1, 2, 3, 5, 10];
 // "Auto" is first and is the default: a forgotten language setting used to
 // force the wrong one onto the whole recording.
-const LANGUAGES = ["Auto", "English", "French", "Arabic", "Spanish"];
+const LANGUAGES = ["Auto", "English", "French", "Spanish", "German", "Arabic"];
 
 function fmt(t: number) {
   const h = Math.floor(t / 3600);

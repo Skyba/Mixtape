@@ -30,6 +30,14 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Who the owner is (name, a line for AssemblyAI, the profile the review
+    // reads). Written from the owner's notes with admin rights; the phone
+    // only shows it.
+    match /ownerProfiles/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
     // Canonical recording documents: the owner listens, every write goes
     // through a callable. Webhook payloads are server-only.
     match /recordings/{uid}/items/{id} {

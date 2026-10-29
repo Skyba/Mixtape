@@ -24,6 +24,7 @@ import { callFunction, currentUid, db, ensureSignedIn, isFirebaseConfigured, isS
 import { audioPath, listRecordings, writeMeta, normalizeRecording, revisionDir, updateMeta, deleteRecording } from "./recordings";
 import { mergeNewest } from "./attribution";
 import { logEvent } from "./log";
+import { getSettings, saveSettings } from "./storage";
 import type { Recording } from "./types";
 
 export type Phase = "legacy" | "frozen" | "sealed" | "rolling-back" | "canonical";
@@ -168,6 +169,7 @@ let applying: Promise<void> = Promise.resolve();
  */
 export function startListener(): void {
   if (unsub || !isFirebaseConfigured || !isSignedIn()) return;
+  syncOwnerProfile().catch((e) => logEvent(`owner profile failed ${String(e?.message ?? e)}`));
   const q = query(collection(db(), "recordings", currentUid(), "items"), where("deletedAt", "==", null));
   unsub = onSnapshot(q, (snap) => {
     applying = applying.then(() => applySnapshot(snap)).catch((e) => logEvent(`listener error ${String(e?.message ?? e)}`));
@@ -312,4 +314,14 @@ function hexToBase64(hex: string): string {
     out += chars[(n >> 18) & 63] + chars[(n >> 12) & 63] + (b === undefined ? "=" : chars[(n >> 6) & 63]) + (c === undefined ? "=" : chars[n & 63]);
   }
   return out;
+}
+
+/** Who the owner is comes from the cloud profile, kept with their notes and
+ *  pushed by tools/push-owner-profile.js; the phone keeps a copy for naming. */
+export async function syncOwnerProfile(): Promise<void> {
+  const snap = await getDoc(doc(db(), "ownerProfiles", currentUid()));
+  if (!snap.exists()) return;
+  const { name, bio } = snap.data() as { name?: string; bio?: string };
+  const s = await getSettings();
+  if (name && (name !== s.ownerName || (bio ?? "") !== s.ownerBio)) await saveSettings({ ...s, ownerName: name, ownerBio: bio ?? "" });
 }

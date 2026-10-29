@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { GestureResponderEvent, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { Recording, INBOX } from "../types";
 import { SOURCE_WORD, TRUST_COLOR, trustOf, duplicateNames, flagOpen } from "../attribution";
@@ -21,10 +21,9 @@ type Props = {
   editable: boolean;
   onSetName: (key: string, name: string) => void;
   onRemoveName: (key: string) => void;
-  /** Name short, unnamed voices "Other (X)" so they stop blocking green. */
-  onSetAside: (keys: string[]) => void;
-  /** Every named voice on screen, as shown — including ones AssemblyAI
-   *  named directly, which carry no stored label yet. */
+  /** Every voice on screen as shown — named ones (including those AssemblyAI
+   *  named directly, which carry no stored label yet) and, with an empty
+   *  name, the ones you leave unnamed. */
   onConfirmAll: (named: { letter: string; name: string }[]) => void;
   onAcceptFolder: (folder: string) => void;
   onChangeFolder: () => void;
@@ -57,6 +56,8 @@ function clipStart(us: Utterance[]): number {
  * says how it was inferred; tapping it opens the name picker (any name, a new
  * one, merge into another voice, remove).
  */
+const unnamedCount = (ss: { left: boolean }[]) => ss.filter((x) => x.left).length;
+
 export default function ReviewCard(p: Props) {
   const { rec, utterances } = p;
   const trust = trustOf(rec);
@@ -74,28 +75,40 @@ export default function ReviewCard(p: Props) {
     return Object.entries(by).map(([L, us]) => {
       const secs = us.reduce((t, u) => t + ((u.end ?? u.start) - u.start) / 1000, 0);
       const lab = rec.speakerLabels?.[L];
-      const name = lab?.name ?? rec.speakerMap?.[L] ?? (/^[A-Z]$/.test(L) ? `Speaker ${L}` : L);
+      // An empty name you gave means "leave this voice unnamed": settled.
+      const left = lab?.by === "user" && !lab.name;
+      const name = left ? `Voice ${L}` : lab?.name || rec.speakerMap?.[L] || (/^[A-Z]$/.test(L) ? `Speaker ${L}` : L);
       const by = lab?.by ?? (!/^[A-Z]$/.test(L) ? "aai" : undefined);
-      const how = by === "user" ? (lab?.evidence ? `you · ${lab.evidence}` : "you") : lab?.evidence || (by ? SOURCE_WORD[by] : "");
-      return { L, name, by, how, secs, clip: clipStart(us), unnamed: /^Speaker /.test(name) };
+      const how = left ? "left unnamed by you"
+        : by === "user" ? (lab?.evidence ? `named by you · ${lab.evidence}` : "named by you")
+        : by === "auto" ? `matched · ${lab?.evidence || "your names + voice"}`
+        : `suggested · ${lab?.evidence || (by ? SOURCE_WORD[by] : "")}`;
+      return { L, name, by, how, secs, us, clip: clipStart(us), left, unnamed: !left && /^Speaker /.test(name) };
     }).sort((a, b) => b.secs - a.secs);
   }, [utterances, rec.speakerLabels, rec.speakerMap]);
+  const total = useMemo(() => Math.max(1, ...(utterances ?? []).map((u) => u.end ?? u.start)), [utterances]);
+  const [laneW, setLaneW] = useState(0);
 
-  function play(L: string, startMs: number) {
-    if (playing === L) { player.pause(); setPlaying(null); return; }
+  function play(L: string, startMs: number, ms = CLIP_MS, toggle = true) {
+    if (toggle && playing === L) { player.pause(); setPlaying(null); return; }
     if (stopAt.current) clearTimeout(stopAt.current);
     player.seekTo(startMs / 1000);
     player.play();
     setPlaying(L);
-    stopAt.current = setTimeout(() => { player.pause(); setPlaying(null); }, CLIP_MS);
+    stopAt.current = setTimeout(() => { player.pause(); setPlaying(null); }, ms);
+  }
+  /** A tap on a voice's lane plays that voice's turn nearest the tap. */
+  function playAt(s: { L: string; us: Utterance[] }, e: GestureResponderEvent) {
+    if (!laneW) return;
+    const t = (e.nativeEvent.locationX / laneW) * total;
+    // The turn under the finger, else the nearest one.
+    const gap = (x: Utterance) => (t < x.start ? x.start - t : t > (x.end ?? x.start) ? t - (x.end ?? x.start) : 0);
+    const u = s.us.reduce((best, x) => (gap(x) < gap(best) ? x : best), s.us[0]);
+    play(s.L, u.start, Math.max(1500, Math.min(20000, (u.end ?? u.start) - u.start)), false);
   }
 
   const toConfirm = speakers.filter((s) => !mine(s.by) && !s.unnamed);
-  // A voice under 30 s that nobody named is usually a diarization split, a
-  // cough, a TV: offered as one tap to set aside, still nameable one by one.
-  const SHORT_S = 30;
-  const shorts = speakers.filter((s) => s.unnamed && s.secs < SHORT_S);
-  const shortSecs = Math.round(shorts.reduce((t, s) => t + s.secs, 0));
+  const unnamed = speakers.filter((s) => s.unnamed);
   const fmtSecs = (x: number) => (x < 60 ? `${Math.max(1, Math.round(x))} s` : `${Math.round(x / 60)} min`);
   // One voice filed under "self": the folder line says nothing the voice
   // line does not, so it is not shown.
@@ -105,11 +118,11 @@ export default function ReviewCard(p: Props) {
   const suggested = rec.folder === INBOX && rec.folderSuggestion;
 
   return (
-    <View style={[styles.card, { borderColor: TRUST_COLOR[trust] }]}>
+    <View style={[styles.card, { borderColor: TRUST_COLOR[trust] }, trust === "green" && styles.glow]}>
       <View style={styles.head}>
         <View style={[styles.dot, { backgroundColor: TRUST_COLOR[trust] }]} />
         <Text style={styles.headTxt}>
-          {{ green: "Confirmed", yellow: "Suggestions to confirm", red: "Something doesn't add up — have a listen", grey: rec.folder !== INBOX ? "Speakers not named yet" : "Nothing known yet" }[trust]}
+          {{ green: unnamedCount(speakers) ? `Confirmed · ${unnamedCount(speakers)} left unnamed` : "Confirmed", yellow: "Suggestions to confirm", red: "Something doesn't add up — have a listen", grey: rec.folder !== INBOX ? "Speakers not named yet" : "Nothing known yet" }[trust]}
         </Text>
       </View>
       {flagOpen(rec) ? <Text style={styles.flag}>{rec.reviewFlag!.reason}</Text> : null}
@@ -127,49 +140,66 @@ export default function ReviewCard(p: Props) {
           {suggested ? <Text style={styles.how}>suggested · {suggested.why}</Text> : null}
         </TouchableOpacity>
         {suggested ? (
-          <TouchableOpacity style={styles.ok} onPress={() => p.onAcceptFolder(suggested.folder)}>
-            <Text style={styles.okTxt}>✓</Text>
+          <TouchableOpacity style={styles.unchecked} onPress={() => p.onAcceptFolder(suggested.folder)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Text style={styles.uncheckedTxt}>✓</Text>
           </TouchableOpacity>
-        ) : null}
+        ) : rec.folder !== INBOX ? <View style={styles.checked}><Text style={styles.checkedTxt}>✓</Text></View> : null}
       </View>
 
       <View style={styles.sep} />
       </>}
       {speakers.length === 0 ? <Text style={styles.muted}>{rec.transcriptStatus === "done" ? "No speech found in this recording." : "No transcript yet."}</Text> : null}
       {speakers.map((s) => (
-        <View key={s.L} style={styles.row}>
-          {p.audioSource ? (
-            <TouchableOpacity style={styles.play} onPress={() => play(s.L, s.clip)}>
-              <Text style={styles.playTxt}>{playing === s.L ? "■" : "▶"}</Text>
+        <View key={s.L} style={styles.voice}>
+          <View style={styles.row}>
+            {p.audioSource ? (
+              <TouchableOpacity style={styles.play} onPress={() => play(s.L, s.clip)}>
+                <Text style={styles.playTxt}>{playing === s.L ? "■" : "▶"}</Text>
+              </TouchableOpacity>
+            ) : null}
+            <TouchableOpacity style={{ flex: 1 }} disabled={!p.editable} onPress={() => setPicking(s.L)}>
+              <Text style={[styles.name, !mine(s.by) && (s.unnamed ? styles.muted : styles.inferred), s.left && styles.muted]} numberOfLines={1}>
+                {s.name}
+                <Text style={styles.mins}>  {fmtSecs(s.secs)}</Text>
+              </Text>
+              <Text style={styles.how} numberOfLines={1}>{s.unnamed ? "not named · tap to name or merge" : s.how}</Text>
             </TouchableOpacity>
-          ) : null}
-          <TouchableOpacity style={{ flex: 1 }} disabled={!p.editable} onPress={() => setPicking(s.L)}>
-            <Text style={[styles.name, !mine(s.by) && (s.unnamed ? styles.muted : styles.inferred)]} numberOfLines={1}>
-              {s.name}
-              <Text style={styles.mins}>  {fmtSecs(s.secs)}</Text>
-            </Text>
-            {s.how ? <Text style={styles.how} numberOfLines={1}>{s.how}</Text> : s.unnamed ? <Text style={styles.how}>tap to name or merge</Text> : null}
+            {mine(s.by) ? (
+              <View style={styles.checked}><Text style={styles.checkedTxt}>✓</Text></View>
+            ) : p.editable && !s.unnamed ? (
+              <TouchableOpacity style={styles.unchecked} onPress={() => p.onSetName(s.L, s.name)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Text style={styles.uncheckedTxt}>✓</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+          {/* When this voice speaks across the recording; tap to hear it there. */}
+          <TouchableOpacity activeOpacity={0.7} disabled={!p.audioSource} onPress={(e) => playAt(s, e)}
+            style={[styles.lane, p.audioSource ? { marginLeft: 44 } : null]} onLayout={(e) => setLaneW(e.nativeEvent.layout.width)}>
+            {s.us.map((u, i) => (
+              <View key={i} pointerEvents="none" style={[styles.seg, {
+                left: `${(u.start / total) * 100}%`,
+                width: `${Math.max(0.4, (((u.end ?? u.start) - u.start) / total) * 100)}%`,
+                backgroundColor: mine(s.by) && !s.left ? "#4ade80" : s.unnamed || s.left ? "#6b7280" : "#facc15",
+              }]} />
+            ))}
+            {playing === s.L ? <View pointerEvents="none" style={[styles.cursor, { left: `${Math.min(100, (status.currentTime * 1000 / total) * 100)}%` }]} /> : null}
           </TouchableOpacity>
-          {p.editable && !mine(s.by) && !s.unnamed ? (
-            <TouchableOpacity style={styles.ok} onPress={() => p.onSetName(s.L, s.name)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={styles.okTxt}>✓</Text>
-            </TouchableOpacity>
-          ) : mine(s.by) ? <Text style={styles.done}>✓</Text> : null}
         </View>
       ))}
 
-      {p.editable && shorts.length ? (
-        <TouchableOpacity style={styles.aside} onPress={() => p.onSetAside(shorts.map((x) => x.L))}>
-          <Text style={styles.asideTxt}>Set aside {shorts.length} short voice{shorts.length > 1 ? "s" : ""} ({fmtSecs(shortSecs)} in all)</Text>
+      {p.editable && (toConfirm.length || unnamed.length) ? (
+        <TouchableOpacity style={styles.primary}
+          onPress={() => p.onConfirmAll([...toConfirm.map((x) => ({ letter: x.L, name: x.name })), ...unnamed.map((x) => ({ letter: x.L, name: "" }))])}>
+          <Text style={styles.primaryTxt}>
+            {unnamed.length
+              ? `✓ Confirm${toConfirm.length ? " the names" : ""} — leave ${unnamed.length} voice${unnamed.length > 1 ? "s" : ""} unnamed`
+              : toConfirm.length > 1 ? "✓ Confirm all" : "✓ Confirm"}
+          </Text>
         </TouchableOpacity>
       ) : null}
       {p.editable && speakers.length ? (
         <View style={styles.actions}>
-          {toConfirm.length > 1 ? (
-            <TouchableOpacity style={styles.primary} onPress={() => p.onConfirmAll(toConfirm.map((x) => ({ letter: x.L, name: x.name })))}>
-              <Text style={styles.primaryTxt}>Confirm all</Text>
-            </TouchableOpacity>
-          ) : <View style={{ flex: 1 }} />}
+          <View style={{ flex: 1 }} />
           <TouchableOpacity style={styles.link} onPress={p.onRerun}>
             <Text style={styles.linkTxt}>Wrong number of voices?</Text>
           </TouchableOpacity>
@@ -181,8 +211,10 @@ export default function ReviewCard(p: Props) {
         title={pickFor ? `Who is ${pickFor.unnamed ? pickFor.name.replace("Speaker ", "voice ") : `“${pickFor.name}”`}?` : ""}
         here={here}
         history={p.history}
-        mergeInto={speakers.filter((s) => s.L !== picking && !s.unnamed).map((s) => ({ key: s.L, name: s.name }))}
+        mergeInto={speakers.filter((s) => s.L !== picking && !s.unnamed && !s.left).map((s) => ({ key: s.L, name: s.name }))}
         canRemove={!!pickFor && !pickFor.unnamed && !!rec.speakerLabels?.[pickFor.L] && /^[A-Z]$/.test(pickFor.L)}
+        canLeaveUnnamed={!!pickFor && !pickFor.left}
+        onLeaveUnnamed={() => { const L = picking!; setPicking(null); p.onConfirmAll([{ letter: L, name: "" }]); }}
         onPick={(name) => { const L = picking!; setPicking(null); p.onSetName(L, name); }}
         onMerge={(target, name) => {
           // Merging confirms both voices: the target's name was perhaps only a
@@ -199,6 +231,15 @@ export default function ReviewCard(p: Props) {
 
 const styles = StyleSheet.create({
   card: { backgroundColor: "#15181d", borderRadius: 12, borderWidth: 1.5, padding: 12, marginTop: 12 },
+  glow: { boxShadow: "0 0 18px 3px rgba(74, 222, 128, 0.45), inset 0 0 12px rgba(74, 222, 128, 0.12)" },
+  voice: { paddingVertical: 3 },
+  lane: { height: 10, borderRadius: 5, backgroundColor: "#23262d", overflow: "hidden", marginTop: 2, marginBottom: 4 },
+  seg: { position: "absolute", top: 0, bottom: 0, borderRadius: 1, opacity: 0.85 },
+  cursor: { position: "absolute", top: -2, bottom: -2, width: 2, backgroundColor: "#fff" },
+  checked: { width: 30, height: 30, borderRadius: 15, backgroundColor: "#4ade80", alignItems: "center", justifyContent: "center", marginRight: 6 },
+  checkedTxt: { color: "#0f1115", fontWeight: "900", fontSize: 15 },
+  unchecked: { width: 30, height: 30, borderRadius: 15, borderWidth: 2, borderColor: "#6b7280", alignItems: "center", justifyContent: "center", marginRight: 6 },
+  uncheckedTxt: { color: "#6b7280", fontWeight: "700", fontSize: 14 },
   head: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
   dot: { width: 10, height: 10, borderRadius: 5 },
   headTxt: { color: "#e8eaed", fontSize: 14, fontWeight: "700" },
@@ -212,15 +253,10 @@ const styles = StyleSheet.create({
   how: { color: "#7c828a", fontSize: 12, marginTop: 1 },
   inferred: { color: "#facc15" },
   muted: { color: "#9aa0a6" },
-  ok: { backgroundColor: "#16331f", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
-  okTxt: { color: "#4ade80", fontWeight: "700" },
-  done: { color: "#4ade80", fontWeight: "700", paddingHorizontal: 12 },
   sep: { height: 1, backgroundColor: "#23262d", marginVertical: 6 },
   actions: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
-  primary: { flex: 1, backgroundColor: "#2f6fd0", borderRadius: 10, padding: 10, alignItems: "center" },
+  primary: { backgroundColor: "#2f6fd0", borderRadius: 10, padding: 11, alignItems: "center", marginTop: 10 },
   primaryTxt: { color: "#fff", fontWeight: "700" },
   link: { paddingHorizontal: 6, paddingVertical: 8 },
-  aside: { backgroundColor: "#23262d", borderRadius: 10, padding: 10, alignItems: "center", marginTop: 8 },
-  asideTxt: { color: "#e8eaed", fontSize: 13 },
   linkTxt: { color: "#93c5fd", fontSize: 13 },
 });

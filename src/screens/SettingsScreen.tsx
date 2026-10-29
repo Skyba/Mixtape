@@ -220,7 +220,9 @@ export default function SettingsScreen() {
   }
 
   async function save() {
-    await saveSettings(s);
+    // Who you are comes from the cloud profile: keep what sync stored since.
+    const cur = await getSettings();
+    await saveSettings({ ...s, ownerName: cur.ownerName, ownerBio: cur.ownerBio });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   }
@@ -271,26 +273,11 @@ export default function SettingsScreen() {
 
       <Text style={styles.label}>Who you are</Text>
       <Text style={styles.hint}>
-        Given to AssemblyAI's speaker identification so it can pick you out.
-        It only helps when the conversation gives identity away — otherwise
-        speakers stay "Speaker 2" rather than being guessed at.
+        Kept in the cloud with your notes, and used by transcription and the
+        speaker review. Nothing to fill in here.
       </Text>
-      <TextInput
-        style={styles.input}
-        value={s.ownerName}
-        onChangeText={(v) => setS({ ...s, ownerName: v })}
-        placeholder="your name, as you'd label it (e.g. Basile)"
-        placeholderTextColor="#6b7280"
-        autoCapitalize="words"
-      />
-      <TextInput
-        style={[styles.input, { height: 78, textAlignVertical: "top" }]}
-        value={s.ownerBio}
-        onChangeText={(v) => setS({ ...s, ownerBio: v })}
-        placeholder="a line or two about you: what you work on, the languages you speak, the role you usually play in these conversations"
-        placeholderTextColor="#6b7280"
-        multiline
-      />
+      <Text style={styles.input}>{s.ownerName || "not set yet"}</Text>
+      {s.ownerBio ? <Text style={[styles.hint, { marginTop: 4 }]}>{s.ownerBio}</Text> : null}
 
       <TouchableOpacity
         style={[styles.updateBtn, { marginTop: 10 }]}

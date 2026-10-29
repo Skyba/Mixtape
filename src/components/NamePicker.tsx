@@ -12,6 +12,9 @@ type Props = {
   mergeInto?: { key: string; name: string }[];
   /** Show "Remove name" (the voice or slot has a name now). */
   canRemove?: boolean;
+  /** Show "Leave unnamed": you don't know who this is, and that's settled. */
+  canLeaveUnnamed?: boolean;
+  onLeaveUnnamed?: () => void;
   onPick: (name: string) => void;
   onMerge?: (key: string, name: string) => void;
   onRemove?: () => void;
@@ -68,6 +71,7 @@ export default function NamePicker(p: Props) {
                 ))}
               </>
             ) : null}
+            {!typed && p.canLeaveUnnamed ? <Item text="Don't know — leave unnamed" onPress={() => p.onLeaveUnnamed?.()} /> : null}
             {!typed && p.canRemove ? <Item text="Remove name" danger onPress={() => p.onRemove?.()} /> : null}
           </ScrollView>
         </TouchableOpacity>
