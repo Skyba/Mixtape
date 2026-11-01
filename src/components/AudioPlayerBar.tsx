@@ -74,42 +74,41 @@ export default function AudioPlayerBar({ player, levels }: { player: AudioPlayer
   const frac = duration > 0 ? Math.min(1, position / duration) : 0;
   const fracOf = (x: number) => Math.max(0, Math.min(1, x / trackW));
 
+  // One compact row: play, then the loudness bars with the progress drawn
+  // over them (played bars in blue, a playhead line), then the times.
   return (
     <View style={styles.bar}>
       <TouchableOpacity
         style={styles.btn}
         onPress={() => (status.playing ? player.pause() : player.play())}
       >
-        <Text style={styles.btnTxt}>{status.playing ? "⏸" : "▶"}</Text>
+        <Text style={styles.btnTxt}>{status.playing ? "❚❚" : "▶"}</Text>
       </TouchableOpacity>
-      <View style={styles.right}>
-        <View
-          onLayout={(e) => setTrackW(e.nativeEvent.layout.width)}
-          onStartShouldSetResponder={() => true}
-          onMoveShouldSetResponder={() => true}
-          onResponderTerminationRequest={() => false}
-          onResponderGrant={(e) => drag(e.nativeEvent.locationX)}
-          onResponderMove={(e) => drag(e.nativeEvent.locationX)}
-          onResponderRelease={(e) => drag(e.nativeEvent.locationX, true)}
-        >
-          {bars ? (
-            <View style={styles.wave} pointerEvents="none">
-              {bars.map((h, i) => (
-                <View key={i} style={[styles.waveBar, { height: `${Math.max(4, h * 100)}%`, backgroundColor: i / BARS < frac ? "#3b82f6" : "#4b5563" }]} />
-              ))}
-            </View>
-          ) : null}
-          <View style={styles.track} pointerEvents="none">
-            <View style={styles.trackLine} />
-            <View style={[styles.fill, { width: `${frac * 100}%` }]} />
-            <View style={[styles.knob, { left: `${frac * 100}%` }]} />
-          </View>
+      <View
+        style={styles.scrub}
+        onLayout={(e) => setTrackW(e.nativeEvent.layout.width)}
+        onStartShouldSetResponder={() => true}
+        onMoveShouldSetResponder={() => true}
+        onResponderTerminationRequest={() => false}
+        onResponderGrant={(e) => drag(e.nativeEvent.locationX)}
+        onResponderMove={(e) => drag(e.nativeEvent.locationX)}
+        onResponderRelease={(e) => drag(e.nativeEvent.locationX, true)}
+      >
+        <View style={styles.wave} pointerEvents="none">
+          {bars
+            ? bars.map((h, i) => (
+                <View key={i} style={[styles.waveBar, { height: `${Math.max(8, h * 100)}%`, backgroundColor: i / BARS < frac ? "#60a5fa" : "#3a404b" }]} />
+              ))
+            : null}
         </View>
-        <View style={styles.times}>
-          <Text style={styles.time}>{mmss(position)}</Text>
-          <Text style={styles.time}>{mmss(duration)}</Text>
-        </View>
+        <View pointerEvents="none" style={styles.baseline} />
+        <View pointerEvents="none" style={[styles.played, { width: `${frac * 100}%` }]} />
+        <View pointerEvents="none" style={[styles.head, { left: `${frac * 100}%` }]} />
       </View>
+      <Text style={styles.time}>
+        {mmss(position)}
+        <Text style={styles.timeDim}>{"\n"}{mmss(duration)}</Text>
+      </Text>
     </View>
   );
 }
@@ -118,55 +117,29 @@ const styles = StyleSheet.create({
   bar: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 10,
     backgroundColor: "#15171c",
-    borderRadius: 12,
-    padding: 12,
-    marginTop: 4,
-    marginBottom: 8,
+    borderRadius: 14,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    marginTop: 2,
+    marginBottom: 6,
   },
   btn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: "#3b82f6",
     alignItems: "center",
     justifyContent: "center",
   },
-  btnTxt: { color: "#fff", fontSize: 18 },
-  right: { flex: 1 },
-  wave: { height: 36, flexDirection: "row", alignItems: "center", gap: 1 },
+  btnTxt: { color: "#fff", fontSize: 13, fontWeight: "700" },
+  scrub: { flex: 1, height: 40, justifyContent: "center" },
+  wave: { position: "absolute", left: 0, right: 0, top: 4, bottom: 4, flexDirection: "row", alignItems: "center", gap: 1 },
   waveBar: { flex: 1, borderRadius: 1 },
-  track: {
-    height: 30,
-    justifyContent: "center",
-  },
-  trackLine: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: 12,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#2a2e36",
-  },
-  fill: {
-    position: "absolute",
-    left: 0,
-    top: 12,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#3b82f6",
-  },
-  knob: {
-    position: "absolute",
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    marginLeft: -12,
-    top: 3,
-    backgroundColor: "#fff",
-  },
-  times: { flexDirection: "row", justifyContent: "space-between", marginTop: 2 },
-  time: { color: "#9aa0a6", fontSize: 12 },
+  baseline: { position: "absolute", left: 0, right: 0, top: 19, height: 2, borderRadius: 1, backgroundColor: "#2a2e36" },
+  played: { position: "absolute", left: 0, top: 19, height: 2, borderRadius: 1, backgroundColor: "#3b82f6" },
+  head: { position: "absolute", top: 0, bottom: 0, width: 3, marginLeft: -1.5, borderRadius: 2, backgroundColor: "#fff" },
+  time: { color: "#e8eaed", fontSize: 12, fontWeight: "600", textAlign: "right", minWidth: 38, fontVariant: ["tabular-nums"] },
+  timeDim: { color: "#7c828a", fontWeight: "400" },
 });
