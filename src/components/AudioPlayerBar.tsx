@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AppState,
   StyleSheet,
@@ -24,6 +24,15 @@ export default function AudioPlayerBar({ player, levels }: { player: AudioPlayer
   const status = useAudioPlayerStatus(player);
   const [trackW, setTrackW] = useState(1);
   const [scrub, setScrub] = useState<number | null>(null); // fraction while dragging
+  const lastSeek = useRef(0);
+  // Seeks while dragging too (a few times a second), so the line across the
+  // voices and the transcript move with the finger, not only on release.
+  function drag(x: number, final = false) {
+    const f = fracOf(x);
+    setScrub(final ? null : f);
+    const now = Date.now();
+    if (final || now - lastSeek.current > 150) { lastSeek.current = now; player.seekTo(f * duration); }
+  }
 
   // NOTE: deliberately no setAudioModeAsync here. The audio mode is GLOBAL, and
   // setting it without shouldPlayInBackground reset that flag to false — which
@@ -79,12 +88,9 @@ export default function AudioPlayerBar({ player, levels }: { player: AudioPlayer
           onStartShouldSetResponder={() => true}
           onMoveShouldSetResponder={() => true}
           onResponderTerminationRequest={() => false}
-          onResponderGrant={(e) => setScrub(fracOf(e.nativeEvent.locationX))}
-          onResponderMove={(e) => setScrub(fracOf(e.nativeEvent.locationX))}
-          onResponderRelease={(e) => {
-            player.seekTo(fracOf(e.nativeEvent.locationX) * duration);
-            setScrub(null);
-          }}
+          onResponderGrant={(e) => drag(e.nativeEvent.locationX)}
+          onResponderMove={(e) => drag(e.nativeEvent.locationX)}
+          onResponderRelease={(e) => drag(e.nativeEvent.locationX, true)}
         >
           {bars ? (
             <View style={styles.wave} pointerEvents="none">
@@ -132,33 +138,33 @@ const styles = StyleSheet.create({
   wave: { height: 36, flexDirection: "row", alignItems: "center", gap: 1 },
   waveBar: { flex: 1, borderRadius: 1 },
   track: {
-    height: 22,
+    height: 30,
     justifyContent: "center",
   },
   trackLine: {
     position: "absolute",
     left: 0,
     right: 0,
-    top: 8,
-    height: 5,
+    top: 12,
+    height: 6,
     borderRadius: 3,
     backgroundColor: "#2a2e36",
   },
   fill: {
     position: "absolute",
     left: 0,
-    top: 8,
-    height: 5,
+    top: 12,
+    height: 6,
     borderRadius: 3,
     backgroundColor: "#3b82f6",
   },
   knob: {
     position: "absolute",
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    marginLeft: -7,
-    top: 4,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    marginLeft: -12,
+    top: 3,
     backgroundColor: "#fff",
   },
   times: { flexDirection: "row", justifyContent: "space-between", marginTop: 2 },

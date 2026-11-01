@@ -673,6 +673,14 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   }
 
   return (
+    <View style={{ flex: 1, backgroundColor: "#0f1115" }}>
+    {/* The play bar stays on screen: it is the slider for the voice lanes and
+        the transcript as well as the audio. */}
+    {!isRemote ? (
+      <View style={{ paddingHorizontal: 16, paddingTop: 4 }}>
+        <AudioPlayerBar player={player} levels={rec.levels?.v} />
+      </View>
+    ) : null}
     <ScrollView style={styles.container}>
       {copied ? <Text style={styles.copiedBanner}>Copied ✓</Text> : null}
       <Text style={styles.title}>{rec.topic || rec.base}</Text>
@@ -766,7 +774,6 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         </TouchableOpacity>
       ) : (
         <>
-          <AudioPlayerBar player={player} levels={rec.levels?.v} />
           <View style={styles.actRow}>
             <TouchableOpacity style={[styles.act, !canUseTranscript && styles.actOff]} disabled={!canUseTranscript} onPress={copyTranscript}>
               <Text style={styles.actTxt}>Copy text</Text>
@@ -947,10 +954,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
                 style={[styles.aiBtn, presetKey === b.key && styles.aiBtnOn]}
                 disabled={summarizing}
                 onPress={() => {
+                  // Fills the prompt in; you edit it and press Run.
                   setPresetKey(b.key);
-                  if (b.key === "custom") return setCustomOpen((v) => !v);
-                  setCustomOpen(false);
-                  runSummary(PROMPT_PRESETS.find((x) => x.key === b.key)!.text!);
+                  setSummaryPrompt(b.key === "custom" ? "" : PROMPT_PRESETS.find((x) => x.key === b.key)!.text!);
+                  setCustomOpen(true);
                 }}
               >
                 <Text style={styles.aiIcon}>{b.icon}</Text>
@@ -965,15 +972,15 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
                 value={summaryPrompt}
                 onChangeText={setSummaryPrompt}
                 placeholder="What do you want from this transcript?"
+                autoFocus={presetKey === "custom"}
                 placeholderTextColor="#6b7280"
                 multiline
               />
               <TouchableOpacity style={styles.summarizeBtn} onPress={() => runSummary(summaryPrompt)} disabled={summarizing || !summaryPrompt.trim()}>
-                <Text style={styles.btnTxt}>Run</Text>
+                {summarizing ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnTxt}>Run</Text>}
               </TouchableOpacity>
             </>
           ) : null}
-          {summarizing ? <ActivityIndicator color="#fff" style={{ marginTop: 12 }} /> : null}
           {summary ? (
             <View style={styles.summaryBox}>
               <ScrollView style={styles.summaryScroll} nestedScrollEnabled>
@@ -1021,6 +1028,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
       <View style={{ height: 40 + insets.bottom }} />
     </ScrollView>
+    </View>
   );
 }
 

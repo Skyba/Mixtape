@@ -15,10 +15,11 @@ admin.initializeApp({ projectId: "recorder-bv001", storageBucket: "recorder-bv00
 (async () => {
   const bucket = admin.storage().bucket();
   const snap = await admin.firestore().collection("recordings").doc(uid).collection("items").where("deletedAt", "==", null).get();
-  for (const s of snap.docs) {
-    const d = s.data();
-    const gen = d.audio && d.audio.generation;
-    if (!gen || (d.levels && d.levels.gen === gen)) continue;
+  // Newest first, four at a time: the recent ones are the ones being opened.
+  const todo = snap.docs.filter((s) => { const d = s.data(); return d.audio && d.audio.generation && !(d.levels && d.levels.gen === d.audio.generation); })
+    .sort((a, b) => String(b.data().recordedAt).localeCompare(String(a.data().recordedAt)));
+  const one = async (s) => {
+    const d = s.data(), gen = d.audio.generation;
     let wav;
     try {
       wav = await voice.decode(bucket.file(`rec2/${uid}/${s.id}/audio.m4a`));
@@ -29,5 +30,7 @@ admin.initializeApp({ projectId: "recorder-bv001", storageBucket: "recorder-bv00
     } finally {
       if (wav) wav.close();
     }
-  }
+  };
+  const queue = [...todo];
+  await Promise.all(Array.from({ length: 4 }, async () => { while (queue.length) await one(queue.shift()); }));
 })();
