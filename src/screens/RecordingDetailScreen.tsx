@@ -143,6 +143,15 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   // A speaker's name everywhere on this screen: its label first (whoever set
   // it), then the legacy map, then the key itself.
   const nameOf = (L: string) => rec.speakerLabels?.[L]?.name || nameForSpeaker(L, rec.speakers, rec.speakerMap);
+  // What leaves the phone (copy, share, public link) carries the names as they
+  // stand now: confirmed labels over the map the stored .txt was rendered with,
+  // which lags every confirmation until a re-render.
+  function liveMap(): Record<string, string> | undefined {
+    const map: Record<string, string> = { ...(rec.speakerMap ?? {}) };
+    for (const [k, l] of Object.entries(rec.speakerLabels ?? {})) if (l && settled(l)) map[k] = l.name;
+    return Object.keys(map).length ? map : undefined;
+  }
+  const liveText = () => (utterances?.length ? renderTranscript(utterances, rec.speakers, liveMap()) : transcript);
 
   // A transcript finishing or an edit landing from the Mac while this screen
   // is open: re-read the sidecar and its files.
@@ -207,8 +216,15 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   async function copyTranscript() {
     if (!canUseTranscript || !transcript) return;
-    await Clipboard.setStringAsync(transcript);
+    await Clipboard.setStringAsync(liveText() ?? transcript);
     flashCopied();
+  }
+
+  async function shareText() {
+    const name = (rec.topic || rec.base).replace(/[^\p{L}\p{N} _-]+/gu, "").trim() || rec.base;
+    const uri = `${FileSystem.cacheDirectory}${name}.txt`;
+    await FileSystem.writeAsStringAsync(uri, liveText() ?? "");
+    await shareFile(uri);
   }
 
   function flashCopied() {
@@ -248,7 +264,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     }
     setShareBusy(true);
     try {
-      const { shareId, url } = await publishShare(rec, utterances ?? []);
+      const { shareId, url } = await publishShare({ ...rec, speakerMap: liveMap() }, utterances ?? []);
       const preview = touch({ ...rec, shareId }, "shareId");
       await recordEdit(preview, { shareId });
       const next = await commitMeta(rec, (cur) => adopt(cur, preview, ["shareId"]));
@@ -678,7 +694,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
             <TouchableOpacity style={[styles.act, !canUseTranscript && styles.actOff]} disabled={!canUseTranscript} onPress={copyTranscript}>
               <Text style={styles.actTxt}>Copy text</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[styles.act, !canUseTranscript && styles.actOff]} disabled={!canUseTranscript} onPress={() => shareFile(transcriptPath(rec))}>
+            <TouchableOpacity style={[styles.act, !canUseTranscript && styles.actOff]} disabled={!canUseTranscript} onPress={shareText}>
               <Text style={styles.actTxt}>Share text</Text>
             </TouchableOpacity>
             {!done && !pending ? (
