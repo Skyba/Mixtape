@@ -1730,6 +1730,11 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
           }
         >
           <Text style={styles.viewTxt}>View recording →</Text>
+          <Text style={[styles.status, { marginTop: 4 }]}>
+            {`${lastRec.speakers.length ? `${lastRec.speakers.length} speaker${lastRec.speakers.length > 1 ? "s" : ""}` : "Speakers auto-detected"} · ${
+              lastRec.language && lastRec.language !== "Auto" ? lastRec.language : "language auto"
+            } — wrong? Change it there`}
+          </Text>
         </TouchableOpacity>
       ) : null}
     </ScrollView>

@@ -6,7 +6,7 @@ import { placeLabel } from "../place";
 import { Modal } from "react-native";
 import { downloadUrlForPath } from "../firebase";
 import { iconOf, useFolderIcons } from "../folderIcons";
-import { enqueue, replayOutbox } from "../outbox";
+import { enqueue, replayOutbox, outboxStatus } from "../outbox";
 import {
   ActivityIndicator,
   Alert,
@@ -117,6 +117,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const [summary, setSummary] = useState<string>(route.params.rec.summary ?? "");
   const [summarizing, setSummarizing] = useState(false);
   const [utterances, setUtterances] = useState<Utterance[] | null>(null);
+  // Speakers being changed while a transcription runs: kept here until restart.
+  const [respeak, setRespeak] = useState<(string | null)[] | null>(null);
   const [copied, setCopied] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const folderIcons = useFolderIcons();
@@ -419,6 +421,29 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setBusy("");
   }
 
+  /** The count was wrong: save it, make sure the server has it, then start
+   *  over. A re-run supersedes the job in flight. */
+  async function restartWithSpeakers(names: (string | null)[]) {
+    setRespeak(null);
+    await saveSpeakers(names);
+    await replayOutbox().catch(() => {});
+    const q = await outboxStatus();
+    if (q.pending || q.stuck) {
+      // Restarting now would re-run with the old count. Once the edit lands,
+      // the server re-runs on its own after the current job.
+      Alert.alert("Not sent yet", "The new speaker count is saved on the phone and will re-run the transcription once it reaches the cloud.");
+      return;
+    }
+    const now = (await readMeta(rec.id).catch(() => null)) ?? rec;
+    try {
+      setRec(await transcribeExisting(now, await getSettings()));
+    } catch (e: any) {
+      // Audio still uploading: the job has not started and will pick the new
+      // count up when it does.
+      if (!/no audio/i.test(String(e?.message ?? e))) Alert.alert("Restart failed", String(e?.message ?? e));
+    }
+  }
+
   async function changeFolder(folder: string, p?: Placement, clearSuggestion = !!rec.folderSuggestion) {
     if (folder === rec.folder) return;
     setBusy("Moving…");
@@ -478,7 +503,12 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     const next = await commitMeta(rec, (cur) => adopt(cur, preview, ["language"]));
     setRec(next);
     await sendEdits(next);
-    if (rec.transcriptStatus === "done") {
+    if (pending) {
+      Alert.alert("Language changed", `Restart the transcription in ${language === "Auto" ? "auto-detect" : language}?`, [
+        { text: "Let it finish", style: "cancel" },
+        { text: "Restart now", onPress: () => doTranscribe(next) },
+      ]);
+    } else if (rec.transcriptStatus === "done") {
       Alert.alert(
         "Language changed",
         `The transcript was made in ${rec.language || "auto"}. Run it again in ${
@@ -639,6 +669,39 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         <Text style={[styles.meta, { color: pending ? "#fbbf24" : "#9aa0a6" }]}>
           {[done ? "" : pending ? "Transcribing…" : "No transcript", rec.uploadStatus === "uploaded" ? "" : `upload ${rec.uploadStatus}`].filter(Boolean).join(" · ")}
         </Text>
+      ) : null}
+
+      {pending ? (
+        <View style={styles.metaCard}>
+          <Text style={styles.meta}>
+            {"Transcribing for "}
+            {rec.speakers.length
+              ? `${rec.speakers.length} speaker${rec.speakers.length > 1 ? "s" : ""}${
+                  rec.speakers.some((n) => !/^Speaker \d+$/.test(n))
+                    ? ": " + rec.speakers.map((n) => (/^Speaker \d+$/.test(n) ? "?" : n)).join(", ")
+                    : ""
+                }`
+              : "an unknown number of speakers"}
+            {` · ${rec.language && rec.language !== "Auto" ? rec.language : "language auto-detect"}`}
+          </Text>
+          {respeak ? (
+            <>
+              <SpeakerSelector count={respeak.length} names={respeak} history={speakerHist} onChange={(_, n) => setRespeak(n)} />
+              <View style={styles.actRow}>
+                <TouchableOpacity style={styles.act} onPress={() => setRespeak(null)}>
+                  <Text style={styles.actTxt}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.act, styles.actPrimary]} onPress={() => restartWithSpeakers(respeak)}>
+                  <Text style={styles.actTxt}>Restart with {respeak.length || "auto"}</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          ) : (
+            <TouchableOpacity onPress={() => setRespeak(toNames(rec.speakers))}>
+              <Text style={[styles.meta, { color: "#60a5fa" }]}>Wrong? Change speakers and restart</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       ) : null}
 
       {showDetails && (rec.aaiTranscriptId || rec.estCostUsd != null) && (
