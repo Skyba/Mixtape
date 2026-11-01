@@ -23,6 +23,8 @@ import * as Sharing from "expo-sharing";
 import * as FileSystem from "expo-file-system/legacy";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import AudioPlayerBar from "../components/AudioPlayerBar";
+import TranscriptBox, { TranscriptBoxHandle } from "../components/TranscriptBox";
+import { useAudioPlayer } from "expo-audio";
 import SpeakerSelector from "../components/SpeakerSelector";
 import SpeakerRemap from "../components/SpeakerRemap";
 import SpeakerTimeline from "../components/SpeakerTimeline";
@@ -79,6 +81,12 @@ import type { RootStackParamList } from "../../App";
 type Props = NativeStackScreenProps<RootStackParamList, "Detail">;
 
 // Mirrors the Record screen. "Auto" detects instead of pinning.
+const AI_BUTTONS = [
+  { key: "summary", icon: "📝", label: "Summary" },
+  { key: "actions", icon: "✅", label: "Action items" },
+  { key: "highlights", icon: "✨", label: "Highlights & quotes" },
+  { key: "custom", icon: "✏️", label: "Custom" },
+];
 const DETAIL_LANGUAGES = ["Auto", "English", "French", "Spanish", "German", "Arabic"];
 
 function tstamp(ms: number): string {
@@ -113,7 +121,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const [busy, setBusy] = useState("");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
   const [summaryPrompt, setSummaryPrompt] = useState(DEFAULT_SUMMARY_PROMPT);
-  const [presetKey, setPresetKey] = useState("summary");
+  const [presetKey, setPresetKey] = useState(route.params.rec.summary ? "summary" : "");
   const [summary, setSummary] = useState<string>(route.params.rec.summary ?? "");
   const [summarizing, setSummarizing] = useState(false);
   const [utterances, setUtterances] = useState<Utterance[] | null>(null);
@@ -136,6 +144,12 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       try { setClipSource(await downloadUrlForPath(remoteCanonicalPath(rec.id, "audio.m4a"))); } catch { setClipSource(null); }
     })();
   }, [rec.id, isRemote]);
+  // One player for the play bar, the voice lanes and the transcript, so all
+  // three show the same position.
+  const player = useAudioPlayer(clipSource, { updateInterval: 200 });
+  const transcriptBox = useRef<TranscriptBoxHandle>(null);
+  const [langSheet, setLangSheet] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
   const insets = useSafeAreaInsets();
 
   const done = rec.transcriptStatus === "done";
@@ -234,7 +248,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setTimeout(() => setCopied(false), 1500);
   }
 
-  async function runSummary() {
+  async function runSummary(prompt: string) {
     if (!transcript) return;
     const settings = await getSettings();
     if (!settings.anthropicKey) {
@@ -243,7 +257,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     }
     setSummarizing(true);
     try {
-      const out = await summarize(transcript, summaryPrompt, settings);
+      const out = await summarize(liveText() ?? transcript, prompt, settings);
       setSummary(out);
       const next = await commitMeta(rec, (cur) => ({ ...cur, summary: out }));
       setRec(next);
@@ -752,7 +766,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         </TouchableOpacity>
       ) : (
         <>
-          <AudioPlayerBar uri={audioPath(rec)} />
+          <AudioPlayerBar player={player} levels={rec.levels?.v} />
           <View style={styles.actRow}>
             <TouchableOpacity style={[styles.act, !canUseTranscript && styles.actOff]} disabled={!canUseTranscript} onPress={copyTranscript}>
               <Text style={styles.actTxt}>Copy text</Text>
@@ -775,7 +789,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       <ReviewCard
         rec={rec}
         utterances={utterances}
-        audioSource={clipSource}
+        player={player}
+        audioReady={!!clipSource}
+        onSeek={(ms) => transcriptBox.current?.showAt(ms)}
         editable={!revisionBehind && !!utterances && !pending}
         folderIcon={iconOf(rec.folder === "Inbox" && rec.folderSuggestion ? rec.folderSuggestion.folder : rec.folder, folderIcons)}
         history={speakerHist}
@@ -807,11 +823,13 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       {canUseTranscript ? (
         <>
           <Text style={styles.sectionLabel}>Transcript</Text>
-          <ScrollView style={styles.transcriptBox} nestedScrollEnabled>
-            {utterances && utterances.length > 0 ? (
-              utterances.map((u, i) => (
-                <View key={i} style={styles.uttRow}>
-                  <Text
+          {utterances && utterances.length > 0 ? (
+            <TranscriptBox
+              ref={transcriptBox}
+              utterances={utterances}
+              player={player}
+              head={(u) => (
+                <Text
                     style={[
                       styles.uttSpeaker,
                       { color: colorForLetter(u.speaker) },
@@ -826,13 +844,13 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
                       {tstamp(u.start)}
                     </Text>
                   </Text>
-                  <Text style={styles.uttText}>{u.text}</Text>
-                </View>
-              ))
-            ) : (
+              )}
+            />
+          ) : (
+            <ScrollView style={styles.transcriptBox} nestedScrollEnabled>
               <Text style={styles.transcriptTxt}>{transcript}</Text>
-            )}
-          </ScrollView>
+            </ScrollView>
+          )}
         </>
       ) : null}
 
@@ -844,6 +862,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
               canUseTranscript && isFirebaseConfigured && !rec.shareId ? { t: "Publish a public link", f: publish } : null,
               done && !pending && !rec.damaged ? { t: "Re-transcribe", f: () => doTranscribe() } : null,
               { t: "Change folder", f: () => setShowPlacement(true) },
+              { t: `Language: ${rec.language || "Auto"} — change…`, f: () => setLangSheet(true) },
               { t: showDetails ? "Hide job details" : "Show job details", f: () => setShowDetails((v) => !v) },
               { t: "Delete recording", f: confirmDelete, danger: true },
             ].filter(Boolean).map((o: any) => (
@@ -870,13 +889,17 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
           </TouchableOpacity>
         </TouchableOpacity>
       </Modal>
-      <Text style={styles.sectionLabel}>Language</Text>
+      <Modal visible={langSheet} transparent animationType="fade" onRequestClose={() => setLangSheet(false)}>
+        <TouchableOpacity style={styles.sheetBack} activeOpacity={1} onPress={() => setLangSheet(false)}>
+          <TouchableOpacity activeOpacity={1} style={[styles.sheet, { padding: 16, paddingBottom: 16 + insets.bottom }]}>
+            <Text style={[styles.sheetTxt, { fontWeight: "700" }]}>Language</Text>
+            <Text style={[styles.meta, { marginBottom: 8 }]}>Only needed when auto-detect got it wrong: it transcribes again in the language you pick.</Text>
       <View style={styles.langRow}>
         {DETAIL_LANGUAGES.map((l) => (
           <TouchableOpacity
             key={l}
             style={[styles.langChip, l === rec.language && styles.langChipOn]}
-            onPress={() => changeLanguage(l)}
+            onPress={() => { setLangSheet(false); changeLanguage(l); }}
           >
             <Text
               style={[
@@ -889,6 +912,9 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
           </TouchableOpacity>
         ))}
       </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
       {!done && !pending ? (
         <SpeakerSelector
@@ -914,45 +940,40 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       {canUseTranscript ? (
         <>
           <Text style={styles.sectionLabel}>AI Summary</Text>
-          <Select
-            value={presetKey}
-            options={PROMPT_PRESETS.map((p) => ({
-              label: p.label,
-              value: p.key,
-            }))}
-            onChange={(key) => {
-              setPresetKey(key);
-              if (key === "custom") setSummaryPrompt("");
-              else {
-                const p = PROMPT_PRESETS.find((x) => x.key === key);
-                if (p && p.text) setSummaryPrompt(p.text);
-              }
-            }}
-          />
-          <TextInput
-            style={[styles.promptInput, { marginTop: 10 }]}
-            value={summaryPrompt}
-            onChangeText={(v) => {
-              setSummaryPrompt(v);
-              setPresetKey("custom");
-            }}
-            placeholder="Prompt to run on the transcript…"
-            placeholderTextColor="#6b7280"
-            multiline
-          />
-          <TouchableOpacity
-            style={styles.summarizeBtn}
-            onPress={runSummary}
-            disabled={summarizing}
-          >
-            {summarizing ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.btnTxt}>
-                {summary ? "Re-run prompt" : "Summarize"}
-              </Text>
-            )}
-          </TouchableOpacity>
+          <View style={styles.aiRow}>
+            {AI_BUTTONS.map((b) => (
+              <TouchableOpacity
+                key={b.key}
+                style={[styles.aiBtn, presetKey === b.key && styles.aiBtnOn]}
+                disabled={summarizing}
+                onPress={() => {
+                  setPresetKey(b.key);
+                  if (b.key === "custom") return setCustomOpen((v) => !v);
+                  setCustomOpen(false);
+                  runSummary(PROMPT_PRESETS.find((x) => x.key === b.key)!.text!);
+                }}
+              >
+                <Text style={styles.aiIcon}>{b.icon}</Text>
+                <Text style={styles.aiTxt}>{b.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {customOpen ? (
+            <>
+              <TextInput
+                style={[styles.promptInput, { marginTop: 10 }]}
+                value={summaryPrompt}
+                onChangeText={setSummaryPrompt}
+                placeholder="What do you want from this transcript?"
+                placeholderTextColor="#6b7280"
+                multiline
+              />
+              <TouchableOpacity style={styles.summarizeBtn} onPress={() => runSummary(summaryPrompt)} disabled={summarizing || !summaryPrompt.trim()}>
+                <Text style={styles.btnTxt}>Run</Text>
+              </TouchableOpacity>
+            </>
+          ) : null}
+          {summarizing ? <ActivityIndicator color="#fff" style={{ marginTop: 12 }} /> : null}
           {summary ? (
             <View style={styles.summaryBox}>
               <ScrollView style={styles.summaryScroll} nestedScrollEnabled>
@@ -1137,6 +1158,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginTop: 10,
   },
+  aiRow: { flexDirection: "row", gap: 8, marginTop: 8 },
+  aiBtn: { flex: 1, backgroundColor: "#1a1d23", borderRadius: 12, paddingVertical: 10, paddingHorizontal: 4, alignItems: "center", gap: 4, borderWidth: 1, borderColor: "#2a2e36" },
+  aiBtnOn: { borderColor: "#3b82f6" },
+  aiIcon: { fontSize: 20 },
+  aiTxt: { color: "#cdd1d6", fontSize: 11, textAlign: "center" },
   summaryBox: {
     backgroundColor: "#16331f",
     borderRadius: 12,

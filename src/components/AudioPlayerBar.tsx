@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AppState,
   StyleSheet,
@@ -6,7 +6,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import { AudioPlayer, useAudioPlayerStatus } from "expo-audio";
 
 function mmss(sec: number): string {
   if (!isFinite(sec) || sec < 0) sec = 0;
@@ -15,9 +15,12 @@ function mmss(sec: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-/** Minimal audio player: play/pause + tap/drag scrub bar + time labels. */
-export default function AudioPlayerBar({ uri }: { uri: string }) {
-  const player = useAudioPlayer(uri, { updateInterval: 250 });
+const LEVEL_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
+const BARS = 90;
+
+/** Play/pause + loudness overview + tap/drag scrub bar. The player is the
+ *  screen's, shared with the voice lanes and the transcript. */
+export default function AudioPlayerBar({ player, levels }: { player: AudioPlayer; levels?: string }) {
   const status = useAudioPlayerStatus(player);
   const [trackW, setTrackW] = useState(1);
   const [scrub, setScrub] = useState<number | null>(null); // fraction while dragging
@@ -45,6 +48,18 @@ export default function AudioPlayerBar({ uri }: { uri: string }) {
     if (status.didJustFinish) player.seekTo(0);
   }, [status.didJustFinish]);
 
+  // The cloud's buckets folded to what fits: the loudest of each group, so a
+  // short burst of noise still shows.
+  const bars = useMemo(() => {
+    if (!levels) return null;
+    const v = Array.from(levels, (c) => Math.max(0, LEVEL_CHARS.indexOf(c)));
+    const raw = Array.from({ length: BARS }, (_, i) => Math.max(...v.slice(Math.floor((i * v.length) / BARS), Math.max(Math.floor((i * v.length) / BARS) + 1, Math.floor(((i + 1) * v.length) / BARS)))));
+    // Speech sits in a narrow band of dB: stretch this recording's own range
+    // so quiet and loud stretches actually differ.
+    const lo = Math.min(...raw), hi = Math.max(...raw);
+    return raw.map((x) => (hi > lo ? (x - lo) / (hi - lo) : 0.5));
+  }, [levels]);
+
   const duration = status.duration || 0;
   const position = scrub != null ? scrub * duration : status.currentTime || 0;
   const frac = duration > 0 ? Math.min(1, position / duration) : 0;
@@ -60,10 +75,10 @@ export default function AudioPlayerBar({ uri }: { uri: string }) {
       </TouchableOpacity>
       <View style={styles.right}>
         <View
-          style={styles.track}
           onLayout={(e) => setTrackW(e.nativeEvent.layout.width)}
           onStartShouldSetResponder={() => true}
           onMoveShouldSetResponder={() => true}
+          onResponderTerminationRequest={() => false}
           onResponderGrant={(e) => setScrub(fracOf(e.nativeEvent.locationX))}
           onResponderMove={(e) => setScrub(fracOf(e.nativeEvent.locationX))}
           onResponderRelease={(e) => {
@@ -71,9 +86,18 @@ export default function AudioPlayerBar({ uri }: { uri: string }) {
             setScrub(null);
           }}
         >
-          <View style={styles.trackLine} />
-          <View style={[styles.fill, { width: `${frac * 100}%` }]} />
-          <View style={[styles.knob, { left: `${frac * 100}%` }]} />
+          {bars ? (
+            <View style={styles.wave} pointerEvents="none">
+              {bars.map((h, i) => (
+                <View key={i} style={[styles.waveBar, { height: `${Math.max(4, h * 100)}%`, backgroundColor: i / BARS < frac ? "#3b82f6" : "#4b5563" }]} />
+              ))}
+            </View>
+          ) : null}
+          <View style={styles.track} pointerEvents="none">
+            <View style={styles.trackLine} />
+            <View style={[styles.fill, { width: `${frac * 100}%` }]} />
+            <View style={[styles.knob, { left: `${frac * 100}%` }]} />
+          </View>
         </View>
         <View style={styles.times}>
           <Text style={styles.time}>{mmss(position)}</Text>
@@ -105,6 +129,8 @@ const styles = StyleSheet.create({
   },
   btnTxt: { color: "#fff", fontSize: 18 },
   right: { flex: 1 },
+  wave: { height: 36, flexDirection: "row", alignItems: "center", gap: 1 },
+  waveBar: { flex: 1, borderRadius: 1 },
   track: {
     height: 22,
     justifyContent: "center",

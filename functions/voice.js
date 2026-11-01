@@ -125,4 +125,24 @@ function match(voices, refs) {
   return { scores, matches };
 }
 
-module.exports = { MODEL_OBJECT, decode, embed, voiceEmbeddings, match, dot, normalize };
+// The loudness overview the phone draws above its play bar: N buckets, each
+// the RMS level from -60 to 0 dBFS as one character of a 64-letter alphabet.
+const LEVEL_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
+function levels(wav, n = 400) {
+  let out = "";
+  for (let b = 0; b < n; b++) {
+    const from = Math.floor((b * wav.length) / n), to = Math.floor(((b + 1) * wav.length) / n);
+    let sum = 0, cnt = 0;
+    // A five-hour bucket is 720k samples: read it in slices.
+    for (let i = from; i < to; i += SR * 10) {
+      const x = wav.subarray(i, Math.min(to, i + SR * 10));
+      for (let j = 0; j < x.length; j++) sum += x[j] * x[j];
+      cnt += x.length;
+    }
+    const db = cnt ? 10 * Math.log10(sum / cnt + 1e-10) : -60;
+    out += LEVEL_CHARS[Math.max(0, Math.min(63, Math.round(((db + 60) / 60) * 63)))];
+  }
+  return out;
+}
+
+module.exports = { MODEL_OBJECT, decode, embed, voiceEmbeddings, match, dot, normalize, levels };

@@ -356,7 +356,10 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
     let wav = null;
     const wavP = async () => wav || (wav = await voice.decode(canon.blob(uid, id, "audio.m4a")));
     try {
-      return await decideFor(uid, id, doc, rev, utterances, ownerName, profile, keys, seconds, wavP);
+      const result = await decideFor(uid, id, doc, rev, utterances, ownerName, profile, keys, seconds, wavP);
+      const gen = doc.audio && doc.audio.generation;
+      if (gen && (!doc.levels || doc.levels.gen !== gen)) result.levels = { gen, v: voice.levels(await wavP()) };
+      return result;
     } finally {
       if (wav) wav.close();
     }
@@ -459,6 +462,7 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
         stamps.speakerId = t;
         if (!cur.meIncluded) { upd.meIncluded = "yes"; stamps.meIncluded = t; }
       }
+      if (result.levels) upd.levels = result.levels;
       upd.fieldsUpdatedAt = stamps;
       upd.updatedAt = t;
       tx.update(ref, upd);

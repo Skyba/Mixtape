@@ -85,6 +85,8 @@ export type Recording = {
    * cleared (null) when a person confirms the speakers. Drives the red row.
    */
   reviewFlag?: { reason: string; at: string } | null;
+  /** Loudness overview from the cloud: one character per bucket, 0 (silent) to _ (loud). */
+  levels?: { gen: string; v: string } | null;
   /** A folder the Mac classifier proposes for an Inbox recording; yellow
    *  until accepted (which sets folder and clears this). */
   folderSuggestion?: { folder: string; why: string; at: string } | null;

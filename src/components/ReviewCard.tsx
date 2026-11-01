@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GestureResponderEvent, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import { AudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { Recording, INBOX } from "../types";
 import { SOURCE_WORD, TRUST_COLOR, trustOf, duplicateNames, flagOpen } from "../attribution";
 
@@ -9,12 +9,18 @@ import type { Utterance } from "../transcription";
 import NamePicker from "./NamePicker";
 
 const CLIP_MS = 6000;
+const fmtClock = (ms: number) => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 
 type Props = {
   rec: Recording;
   utterances: Utterance[] | null;
-  /** Local file or a signed URL; null hides the play buttons. */
-  audioSource: string | null;
+  /** The screen's player, shared with the play bar and the transcript; null
+   *  hides the play buttons. */
+  player: AudioPlayer;
+  /** There is audio to play (the local file or the cloud copy). */
+  audioReady: boolean;
+  /** The position was dragged to this time: the transcript follows. */
+  onSeek: (ms: number) => void;
   folderIcon: string;
   /** Everyone named before, most recent first. */
   history: string[];
@@ -62,12 +68,14 @@ export default function ReviewCard(p: Props) {
   const { rec, utterances } = p;
   const trust = trustOf(rec);
   const [picking, setPicking] = useState<string | null>(null);
-  const player = useAudioPlayer(p.audioSource ?? undefined);
+  const player = p.player;
   const status = useAudioPlayerStatus(player);
   const [playing, setPlaying] = useState<string | null>(null);
   const stopAt = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (stopAt.current) clearTimeout(stopAt.current); }, []);
-  useEffect(() => { if (!status.playing) setPlaying(null); }, [status.playing]);
+  // Paused from anywhere (the play bar included): a clip's stop timer must not
+  // fire later into playback someone else started.
+  useEffect(() => { if (!status.playing) { setPlaying(null); if (stopAt.current) clearTimeout(stopAt.current); } }, [status.playing]);
 
   const speakers = useMemo(() => {
     const by: Record<string, Utterance[]> = Object.create(null);
@@ -88,6 +96,23 @@ export default function ReviewCard(p: Props) {
   }, [utterances, rec.speakerLabels, rec.speakerMap]);
   const total = useMemo(() => Math.max(1, ...(utterances ?? []).map((u) => u.end ?? u.start)), [utterances]);
   const [laneW, setLaneW] = useState(0);
+  const [laneX, setLaneX] = useState(0);
+  // Dragging across the lanes moves one position line through every voice,
+  // the play bar and the transcript; a tap without a drag plays that turn.
+  const [scrubMs, setScrubMs] = useState<number | null>(null);
+  const drag = useRef({ x0: 0, y0: 0, moved: false, lastSeek: 0 });
+  const msAt = (x: number) => Math.max(0, Math.min(1, x / Math.max(1, laneW))) * total;
+  function scrubTo(x: number, final: boolean) {
+    const ms = msAt(x);
+    setScrubMs(final ? null : ms);
+    const now = Date.now();
+    if (final || now - drag.current.lastSeek > 120) {
+      drag.current.lastSeek = now;
+      player.seekTo(ms / 1000);
+      p.onSeek(ms);
+    }
+  }
+  const lineMs = scrubMs ?? (status.currentTime > 0 || status.playing ? status.currentTime * 1000 : null);
 
   function play(L: string, startMs: number, ms = CLIP_MS, toggle = true) {
     if (toggle && playing === L) { player.pause(); setPlaying(null); return; }
@@ -149,10 +174,11 @@ export default function ReviewCard(p: Props) {
       <View style={styles.sep} />
       </>}
       {speakers.length === 0 ? <Text style={styles.muted}>{rec.transcriptStatus === "done" ? "No speech found in this recording." : "No transcript yet."}</Text> : null}
+      <View>
       {speakers.map((s) => (
         <View key={s.L} style={styles.voice}>
           <View style={styles.row}>
-            {p.audioSource ? (
+            {p.audioReady ? (
               <TouchableOpacity style={styles.play} onPress={() => play(s.L, s.clip)}>
                 <Text style={styles.playTxt}>{playing === s.L ? "■" : "▶"}</Text>
               </TouchableOpacity>
@@ -173,8 +199,22 @@ export default function ReviewCard(p: Props) {
             ) : null}
           </View>
           {/* When this voice speaks across the recording; tap to hear it there. */}
-          <TouchableOpacity activeOpacity={0.7} disabled={!p.audioSource} onPress={(e) => playAt(s, e)}
-            style={[styles.lane, p.audioSource ? { marginLeft: 44 } : null]} onLayout={(e) => setLaneW(e.nativeEvent.layout.width)}>
+          <View
+            style={[styles.lane, p.audioReady ? { marginLeft: 44 } : null]}
+            onLayout={(e) => { setLaneW(e.nativeEvent.layout.width); setLaneX(e.nativeEvent.layout.x); }}
+            onStartShouldSetResponder={() => p.audioReady}
+            onMoveShouldSetResponder={() => p.audioReady}
+            // Until it is a horizontal drag, the page may still take it as a scroll.
+            onResponderTerminationRequest={() => !drag.current.moved}
+            onResponderTerminate={() => { drag.current.moved = false; setScrubMs(null); }}
+            onResponderGrant={(e) => { drag.current.x0 = e.nativeEvent.locationX; drag.current.y0 = e.nativeEvent.pageY; drag.current.moved = false; }}
+            onResponderMove={(e) => {
+              const dx = Math.abs(e.nativeEvent.locationX - drag.current.x0), dy = Math.abs(e.nativeEvent.pageY - drag.current.y0);
+              if (!drag.current.moved && (dx < 6 || dy > dx)) return;
+              if (!drag.current.moved) { drag.current.moved = true; if (stopAt.current) clearTimeout(stopAt.current); player.pause(); setPlaying(null); }
+              scrubTo(e.nativeEvent.locationX, false);
+            }}
+            onResponderRelease={(e) => (drag.current.moved ? scrubTo(e.nativeEvent.locationX, true) : playAt(s, e))}>
             {s.us.map((u, i) => (
               <View key={i} pointerEvents="none" style={[styles.seg, {
                 left: `${(u.start / total) * 100}%`,
@@ -182,10 +222,15 @@ export default function ReviewCard(p: Props) {
                 backgroundColor: mine(s.by) && !s.left ? "#4ade80" : s.unnamed || s.left ? "#6b7280" : "#facc15",
               }]} />
             ))}
-            {playing === s.L ? <View pointerEvents="none" style={[styles.cursor, { left: `${Math.min(100, (status.currentTime * 1000 / total) * 100)}%` }]} /> : null}
-          </TouchableOpacity>
+          </View>
         </View>
       ))}
+      {p.audioReady && lineMs != null && laneW > 0 && speakers.length ? (
+        <View pointerEvents="none" style={[styles.line, { left: laneX + (Math.min(lineMs, total) / total) * laneW }]}>
+          <Text style={styles.lineTxt}>{fmtClock(lineMs)}</Text>
+        </View>
+      ) : null}
+      </View>
 
       {p.editable && (toConfirm.length || unnamed.length) ? (
         <TouchableOpacity style={styles.primary}
@@ -235,7 +280,8 @@ const styles = StyleSheet.create({
   voice: { paddingVertical: 3 },
   lane: { height: 10, borderRadius: 5, backgroundColor: "#23262d", overflow: "hidden", marginTop: 2, marginBottom: 4 },
   seg: { position: "absolute", top: 0, bottom: 0, borderRadius: 1, opacity: 0.85 },
-  cursor: { position: "absolute", top: -2, bottom: -2, width: 2, backgroundColor: "#fff" },
+  line: { position: "absolute", top: 0, bottom: 0, width: 2, marginLeft: -1, backgroundColor: "rgba(255,255,255,0.85)" },
+  lineTxt: { position: "absolute", top: -14, left: -16, width: 34, textAlign: "center", color: "#fff", fontSize: 10, fontWeight: "700" },
   checked: { width: 30, height: 30, borderRadius: 15, backgroundColor: "#4ade80", alignItems: "center", justifyContent: "center", marginRight: 6 },
   checkedTxt: { color: "#0f1115", fontWeight: "900", fontSize: 15 },
   unchecked: { width: 30, height: 30, borderRadius: 15, borderWidth: 2, borderColor: "#6b7280", alignItems: "center", justifyContent: "center", marginRight: 6 },

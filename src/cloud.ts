@@ -121,6 +121,7 @@ function serverOwned(d: any): Partial<Recording> {
     remoteCreated: true,
     ...(d.audio ? { uploadStatus: "uploaded" as const } : {}),
     ...(Array.isArray(d.speakerKeys) ? { speakerKeys: d.speakerKeys } : {}),
+    ...(d.levels ? { levels: d.levels } : {}),
   };
 }
 
