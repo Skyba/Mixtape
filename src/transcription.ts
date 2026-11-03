@@ -32,17 +32,15 @@ export const AUTO_LANGUAGE = {
 };
 
 /**
- * How many speakers to tell AssemblyAI to expect. The count you set is used as
- * a FLOOR, not just a ceiling: left to itself the model can return a single
- * label for a two-person conversation (one 13-minute block, both voices in it),
- * and a cap alone doesn't prevent that. The ceiling is one above the count so
- * an unexpected extra voice gets its own label instead of being merged into
- * someone else — an extra label is fixable in the app, a merge isn't.
+ * The count given when recording is both floor and ceiling. A floor because
+ * left to itself the model can return one label for a two-person
+ * conversation; a ceiling because a spare voice was reliably spent on a
+ * cough or one person split in two.
  */
 export function speakerOptions(count: number) {
   return {
     min_speakers_expected: Math.max(1, count),
-    max_speakers_expected: Math.max(2, count + 1),
+    max_speakers_expected: Math.max(1, count),
   };
 }
 

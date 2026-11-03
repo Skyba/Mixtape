@@ -892,14 +892,12 @@ async function legacyStart({ name, uid, folder, base, meta, m4a }) {
         expires: Date.now() + 6 * 60 * 60 * 1000,
       });
       const body = { audio_url: signed, speaker_labels: true };
-      // The speaker count is a FLOOR, not just a ceiling: left to itself the
-      // model can return one label for a two-person conversation. The ceiling
-      // is one above, so an unexpected extra voice gets its own label rather
-      // than being merged into someone else. Mirrors src/transcription.ts.
+      // The count the owner gave is the count, floor and ceiling: a spare
+      // was reliably spent on a cough or a split voice. Mirrors src/transcription.ts.
       if (meta.speakers.length) {
         body.speaker_options = {
           min_speakers_expected: Math.max(1, meta.speakers.length),
-          max_speakers_expected: Math.max(2, meta.speakers.length + 1),
+          max_speakers_expected: Math.max(1, meta.speakers.length),
         };
       }
       const su = speakerIdentification(meta);

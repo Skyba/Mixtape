@@ -424,14 +424,12 @@ function aaiRequestBody(meta, signedAudioUrl) {
   const body = { audio_url: signedAudioUrl, speaker_labels: true };
   const speakers = Array.isArray(meta.speakers) ? meta.speakers : [];
   if (speakers.length) {
-    // Every slot named: the owner knows who was there, and that count is
-    // the count (one more was allowed before, and diarization reliably spent
-    // it on a cough or a split voice). Unnamed slots keep one spare: an extra
-    // voice is fixable in the app, a merged one is not.
-    const exact = speakers.every((s) => !/^Speaker \d+$/.test(s));
+    // The count the owner gave is the count. One spare was allowed before,
+    // named slots or not, and diarization reliably spent it on a cough or a
+    // split voice (3 set, 4 found, the 4th with 26 s).
     body.speaker_options = {
       min_speakers_expected: Math.max(1, speakers.length),
-      max_speakers_expected: exact ? speakers.length : Math.max(2, speakers.length + 1),
+      max_speakers_expected: Math.max(1, speakers.length),
     };
   }
   const su = speakerIdentification(meta);
