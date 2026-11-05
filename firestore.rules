@@ -33,6 +33,13 @@ service cloud.firestore {
     // Who the owner is (name, a line for AssemblyAI, the profile the review
     // reads). Written from the owner's notes with admin rights; the phone
     // only shows it.
+    // Ids and display names of the owner's first-degree people, pushed from
+    // the CRM on the Mac by tools/push-people.js; the name picker reads them.
+    match /ownerPeople/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
     match /ownerProfiles/{uid} {
       allow read: if request.auth != null && request.auth.uid == uid;
       allow write: if false;

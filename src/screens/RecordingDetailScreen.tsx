@@ -56,7 +56,7 @@ import {
   shareUrl,
 } from "../firebase";
 import { transcribeExisting } from "../recordingFlow";
-import { isCanonical, deleteRemote, onCloudChange } from "../cloud";
+import { isCanonical, deleteRemote, onCloudChange, getPeople, Person } from "../cloud";
 import { readMeta, commitMeta } from "../recordings";
 import { remoteCanonicalPath } from "../firebase";
 import { pushMeta, recordEdit, sendEdits } from "../outbox";
@@ -120,6 +120,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const [transcript, setTranscript] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
   const [speakerHist, setSpeakerHist] = useState<string[]>([]);
+  const [people, setPeople] = useState<Person[]>([]);
+  useEffect(() => { getPeople().then(setPeople); }, []);
   const [summaryPrompt, setSummaryPrompt] = useState(DEFAULT_SUMMARY_PROMPT);
   const [presetKey, setPresetKey] = useState(route.params.rec.summary ? "summary" : "");
   const [summary, setSummary] = useState<string>(route.params.rec.summary ?? "");
@@ -370,7 +372,12 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
    * leaves every voice of the transcript named by you, a red flag is answered
    * and cleared in the same edit.
    */
-  async function confirmSpeakers(named?: { letter: string; name: string; evidence?: string }[]) {
+  // A name typed or suggested links to the CRM only when exactly one person has it.
+  const personFor = (name: string) => {
+    const hits = people.filter((x) => x.name.toLowerCase() === name.trim().toLowerCase());
+    return hits.length === 1 ? hits[0].id : undefined;
+  };
+  async function confirmSpeakers(named?: { letter: string; name: string; evidence?: string; personId?: string }[]) {
     if (revisionBehind) { Alert.alert("New transcript downloading", "Label speakers once it has arrived."); return; }
     const now = (await readMeta(rec.id).catch(() => null)) ?? rec;
     if (now.transcriptStatus === "pending" || now.transcriptStatus === "processing") {
@@ -378,10 +385,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       return;
     }
     const settings = await getSettings();
-    const list: { letter: string; name: string; evidence?: string }[] = named ?? confirmableLetters(rec).map((L) => ({ letter: L, name: rec.speakerLabels![L].name }));
+    const list: { letter: string; name: string; evidence?: string; personId?: string }[] = named ?? confirmableLetters(rec).map((L) => ({ letter: L, name: rec.speakerLabels![L].name }));
     let preview: Recording = rec;
-    for (const { letter, name, evidence } of list) {
-      preview = setLabel(preview, letter, name, "user", settings.ownerName);
+    for (const { letter, name, evidence, personId } of list) {
+      preview = setLabel(preview, letter, name, "user", settings.ownerName, personId ?? (name ? personFor(name) : undefined));
       if (evidence) preview = { ...preview, speakerLabels: { ...preview.speakerLabels!, [letter]: { ...preview.speakerLabels![letter], evidence } } };
     }
     const voices = Array.from(new Set((utterances ?? []).map((u) => u.speaker)));
@@ -802,7 +809,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
         editable={!revisionBehind && !!utterances && !pending}
         folderIcon={iconOf(rec.folder === "Inbox" && rec.folderSuggestion ? rec.folderSuggestion.folder : rec.folder, folderIcons)}
         history={speakerHist}
-        onSetName={(L, name) => confirmSpeakers([{ letter: L, name }])}
+        people={people}
+        onSetName={(L, name, personId) => confirmSpeakers([{ letter: L, name, personId }])}
         onRemoveName={removeName}
         onConfirmAll={confirmSpeakers}
         onAcceptFolder={acceptFolder}

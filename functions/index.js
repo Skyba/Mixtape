@@ -104,6 +104,7 @@ async function authKey(req, res, next) {
   if (!doc.exists) return res.status(401).json({ error: "invalid key" });
   req.uid = doc.data().ownerUid;
   req.scopes = doc.data().scopes || [];
+  req.hidePrivate = doc.data().hidePrivate === true;
   doc.ref.update({ lastUsedAt: new Date().toISOString() }).catch(() => {});
   next();
 }
@@ -200,15 +201,29 @@ const isCanonError = (e) => e && e.code && typeof e.code === "string" && e.extra
 
 const router = express.Router();
 router.use(authKey);
+// A key made for someone else (hidePrivate on its document, set by
+// tools/create-reader-key.js) never reaches a recording marked private, nor
+// the phone's logs. Checked live, so marking a recording private cuts it off
+// at once. Only the canonical id addressing gets through.
+router.use(async (req, res, next) => {
+  // Express routes ignore case and a trailing slash; this check must too.
+  const route = req.path.toLowerCase().replace(/\/+$/, "");
+  if (!req.hidePrivate || route === "/recordings") return next();
+  if (route === "/logs" || typeof req.query.id !== "string" || !req.query.id) return res.status(403).json({ error: "not available to this key" });
+  const s = await canon().docRef(req.uid, req.query.id).get();
+  if (!s.exists || s.data().private === true) return res.status(404).json({ error: "not found" });
+  next();
+});
 
 router.get("/recordings", async (req, res) => {
   const since = req.query.since ? Date.parse(String(req.query.since)) : 0;
   if ((await phase()) === "canonical") {
-    const docs = await canon().list(req.uid, { since });
+    const docs = (await canon().list(req.uid, { since })).filter((d) => !(req.hidePrivate && d.private === true));
     const out = docs.map((d) => ({ ...listRow(canon().project(d), d.folder, d.base), transcript_rev: d.current ? d.current.rev : null }));
     out.sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
     return res.json({ recordings: out });
   }
+  if (req.hidePrivate) return res.status(503).json({ error: "not available" });
   const [files] = await bkt().getFiles({ prefix: `recordings/${req.uid}/` });
   const out = [];
   for (const f of files) {

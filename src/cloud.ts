@@ -82,6 +82,9 @@ export const isCanonical = async () => (await readPhase()) === "canonical";
 /** Last known answer without a network round trip (false until read once). */
 export const isCanonicalSync = () => cachedPhase?.phase === "canonical" || seenCanonical === true;
 
+const PEOPLE_KEY = "crmPeople";
+export type Person = { id: string; name: string };
+
 /** Screens subscribe to learn that sidecars changed under them. */
 const listeners = new Set<() => void>();
 export function onCloudChange(cb: () => void): () => void {
@@ -171,6 +174,7 @@ let applying: Promise<void> = Promise.resolve();
 export function startListener(): void {
   if (unsub || !isFirebaseConfigured || !isSignedIn()) return;
   syncOwnerProfile().catch((e) => logEvent(`owner profile failed ${String(e?.message ?? e)}`));
+  syncPeople().catch((e) => logEvent(`people failed ${String(e?.message ?? e)}`));
   const q = query(collection(db(), "recordings", currentUid(), "items"), where("deletedAt", "==", null));
   unsub = onSnapshot(q, (snap) => {
     applying = applying.then(() => applySnapshot(snap)).catch((e) => logEvent(`listener error ${String(e?.message ?? e)}`));
@@ -319,6 +323,15 @@ function hexToBase64(hex: string): string {
 
 /** Who the owner is comes from the cloud profile, kept with their notes and
  *  pushed by tools/push-owner-profile.js; the phone keeps a copy for naming. */
+export async function syncPeople(): Promise<void> {
+  const snap = await getDoc(doc(db(), "ownerPeople", currentUid()));
+  if (snap.exists()) await AsyncStorage.setItem(PEOPLE_KEY, JSON.stringify((snap.data() as any).people ?? []));
+}
+/** First-degree people from the CRM, as last synced. */
+export async function getPeople(): Promise<Person[]> {
+  try { return JSON.parse((await AsyncStorage.getItem(PEOPLE_KEY)) ?? "[]"); } catch { return []; }
+}
+
 export async function syncOwnerProfile(): Promise<void> {
   const snap = await getDoc(doc(db(), "ownerProfiles", currentUid()));
   if (!snap.exists()) return;

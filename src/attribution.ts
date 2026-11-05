@@ -161,7 +161,8 @@ export function setLabel(
   letter: string,
   name: string,
   by: LabelSource,
-  ownerName?: string
+  ownerName?: string,
+  personId?: string
 ): Recording {
   // A legacy map with no labels is carried forward as labels of unknown
   // provenance, never wiped and never promoted to "user".
@@ -169,7 +170,7 @@ export function setLabel(
   if (!r.speakerLabels && r.speakerMap) {
     for (const [l, n] of Object.entries(r.speakerMap)) labels[l] = { name: n, by: "none", at: null };
   }
-  labels[letter] = { name, by, at: new Date().toISOString() };
+  labels[letter] = { name, by, at: new Date().toISOString(), ...(personId ? { personId } : {}) };
   let next: Recording = { ...r, speakerLabels: labels, speakerMap: labelsToMap(labels) };
   const owner = (ownerName ?? "").trim().toLowerCase();
   const isOwner = !!owner && name.trim().toLowerCase() === owner;

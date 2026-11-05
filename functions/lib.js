@@ -200,6 +200,7 @@ function validLabel(e) {
   if (typeof e.name !== "string") return false;
   if (!["user", "auto", "ai-review", "channel", "voiceprint", "claude", "aai", "none"].includes(e.by)) return false;
   if (e.merge !== undefined && typeof e.merge !== "boolean") return false;
+  if (e.personId !== undefined && !/^p\d+$/.test(String(e.personId))) return false;
   if (e.evidence !== undefined && (typeof e.evidence !== "string" || e.evidence.length > 200)) return false;
   // Legacy labels carry no time of attribution: null is honest, a made-up one
   // is not. Anything present must parse.

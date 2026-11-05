@@ -25,7 +25,8 @@ type Props = {
   /** Everyone named before, most recent first. */
   history: string[];
   editable: boolean;
-  onSetName: (key: string, name: string) => void;
+  onSetName: (key: string, name: string, personId?: string) => void;
+  people: { id: string; name: string }[];
   onRemoveName: (key: string) => void;
   /** Every voice on screen as shown — named ones (including those AssemblyAI
    *  named directly, which carry no stored label yet) and, with an empty
@@ -187,6 +188,7 @@ export default function ReviewCard(p: Props) {
               <Text style={[styles.name, !mine(s.by) && (s.unnamed ? styles.muted : styles.inferred), s.left && styles.muted]} numberOfLines={1}>
                 {s.name}
                 <Text style={styles.mins}>  {fmtSecs(s.secs)}</Text>
+                {rec.speakerLabels?.[s.L]?.personId ? <Text style={styles.chip}>  {rec.speakerLabels[s.L].personId}</Text> : null}
               </Text>
               <Text style={styles.how} numberOfLines={1}>{s.unnamed ? "not named · tap to name or merge" : s.how}</Text>
             </TouchableOpacity>
@@ -260,7 +262,8 @@ export default function ReviewCard(p: Props) {
         canRemove={!!pickFor && !pickFor.unnamed && !!rec.speakerLabels?.[pickFor.L] && /^[A-Z]$/.test(pickFor.L)}
         canLeaveUnnamed={!!pickFor && !pickFor.left}
         onLeaveUnnamed={() => { const L = picking!; setPicking(null); p.onConfirmAll([{ letter: L, name: "" }]); }}
-        onPick={(name) => { const L = picking!; setPicking(null); p.onSetName(L, name); }}
+        people={p.people}
+        onPick={(name, id) => { const L = picking!; setPicking(null); p.onSetName(L, name, id); }}
         onMerge={(target, name) => {
           // Merging confirms both voices: the target's name was perhaps only a
           // suggestion, and a name on two voices is accepted only when both are yours.
@@ -297,6 +300,7 @@ const styles = StyleSheet.create({
   name: { color: "#fff", fontSize: 15 },
   mins: { color: "#7c828a", fontSize: 12 },
   how: { color: "#7c828a", fontSize: 12, marginTop: 1 },
+  chip: { color: "#93c5fd", fontSize: 11 },
   inferred: { color: "#facc15" },
   muted: { color: "#9aa0a6" },
   sep: { height: 1, backgroundColor: "#23262d", marginVertical: 6 },

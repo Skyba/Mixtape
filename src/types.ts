@@ -14,6 +14,8 @@ export type SpeakerLabel = {
   evidence?: string;
   /** The review suggests this short voice is a split of the named one. */
   merge?: boolean;
+  /** The person in the CRM (pNNNN). */
+  personId?: string;
 };
 /** The fields that sync both ways between the phone and the Mac. */
 export type SyncedField =

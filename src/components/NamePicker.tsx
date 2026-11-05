@@ -15,7 +15,9 @@ type Props = {
   /** Show "Leave unnamed": you don't know who this is, and that's settled. */
   canLeaveUnnamed?: boolean;
   onLeaveUnnamed?: () => void;
-  onPick: (name: string) => void;
+  onPick: (name: string, personId?: string) => void;
+  /** First-degree people from the CRM: found by typing, chosen with their id. */
+  people?: { id: string; name: string }[];
   onMerge?: (key: string, name: string) => void;
   onRemove?: () => void;
   onClose: () => void;
@@ -37,6 +39,7 @@ export default function NamePicker(p: Props) {
     const pool = p.history.filter((h) => !seen.has(h.toLowerCase()));
     return typed ? pool.filter((h) => h.toLowerCase().includes(typed.toLowerCase())) : pool.slice(0, RECENT);
   }, [p.history, p.here, typed]);
+  const crm = useMemo(() => (typed ? (p.people ?? []).filter((x) => x.name.toLowerCase().includes(typed.toLowerCase())).slice(0, 8) : []), [p.people, typed]);
   const exists = [...p.here, ...p.history].some((x) => x.toLowerCase() === typed.toLowerCase());
 
   return (
@@ -61,6 +64,8 @@ export default function NamePicker(p: Props) {
             {(typed ? p.here.filter((h) => h.toLowerCase().includes(typed.toLowerCase())) : p.here).map((h) => (
               <Item key={`h-${h}`} text={h} onPress={() => p.onPick(h)} />
             ))}
+            {crm.length ? <Text style={styles.group}>CRM</Text> : null}
+            {crm.map((x) => <Item key={x.id} text={x.name} chip={x.id} onPress={() => p.onPick(x.name, x.id)} />)}
             {rest.length ? <Text style={styles.group}>{typed ? "OTHERS" : "RECENT"}</Text> : null}
             {rest.map((h) => <Item key={`r-${h}`} text={h} onPress={() => p.onPick(h)} />)}
             {!typed && p.mergeInto?.length ? (
@@ -80,10 +85,10 @@ export default function NamePicker(p: Props) {
   );
 }
 
-function Item({ text, onPress, strong, danger }: { text: string; onPress: () => void; strong?: boolean; danger?: boolean }) {
+function Item({ text, onPress, strong, danger, chip }: { text: string; onPress: () => void; strong?: boolean; danger?: boolean; chip?: string }) {
   return (
     <TouchableOpacity style={styles.item} onPress={onPress}>
-      <Text style={[styles.itemTxt, strong && { fontWeight: "700", color: "#93c5fd" }, danger && { color: "#f87171" }]}>{text}</Text>
+      <Text style={[styles.itemTxt, strong && { fontWeight: "700", color: "#93c5fd" }, danger && { color: "#f87171" }]}>{text}{chip ? <Text style={{ color: "#7c828a", fontSize: 12 }}>{`  ${chip}`}</Text> : null}</Text>
     </TouchableOpacity>
   );
 }
