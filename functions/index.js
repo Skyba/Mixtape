@@ -597,7 +597,10 @@ exports.mergeAudio = onCall(
     const canonDest = typeof dest === "string" && new RegExp(`^rec2/${uid}/${canon().ID_RE.source.slice(1, -1)}/audio\\.m4a$`).test(dest);
     if (ph !== "legacy" && ph !== "canonical") throw new HttpsError("unavailable", "migration in progress");
     if (ph === "legacy" && !legacyDest) throw new HttpsError("permission-denied", "dest must be your own recording .m4a");
-    if (ph === "canonical" && !canonDest) throw new HttpsError("permission-denied", "dest must be rec2/<uid>/<id>/audio.m4a");
+    // The live speaker passes merge what is recorded so far into a scratch file
+    // under _live, which is not a recording's audio in either phase.
+    const liveDest = typeof dest === "string" && new RegExp(`^recordings/${uid}/_live/[A-Za-z0-9:._-]+/merged\\.m4a$`).test(dest);
+    if (ph === "canonical" && !canonDest && !liveDest) throw new HttpsError("permission-denied", "dest must be rec2/<uid>/<id>/audio.m4a");
     const release = ph === "legacy" ? await admit("merge", dest) : () => {};
     if (!release) throw new HttpsError("unavailable", "migration in progress");
     try { return await mergeAdmitted({ uid, segments, dest, ph, canonDest }); } finally { await release(); }
@@ -653,11 +656,19 @@ async function mergeAdmitted({ uid, segments, dest, ph, canonDest }) {
       });
       // ffmpeg may have run for minutes; the freeze may have begun meanwhile.
       if ((await phase()) !== ph) throw new HttpsError("unavailable", "migration phase changed; merge not written");
-      await bucket.upload(out, {
-        destination: dest,
-        metadata: { contentType: "audio/mp4" },
-        ...(canonDest ? { preconditionOpts: { ifGenerationMatch: 0 } } : {}),
-      });
+      try {
+        await bucket.upload(out, {
+          destination: dest,
+          metadata: { contentType: "audio/mp4" },
+          ...(canonDest ? { preconditionOpts: { ifGenerationMatch: 0 } } : {}),
+        });
+      } catch (e) {
+        // A retry after the audio already landed: done, as long as what is
+        // there is this take and not a stub.
+        if (!canonDest || e.code !== 412) throw e;
+        const [md] = await bucket.file(dest).getMetadata();
+        if (Number(md.size) < 0.9 * (await fsp.stat(out)).size) throw e;
+      }
       if (canonDest) {
         const m = dest.match(/^rec2\/[^/]+\/([^/]+)\/audio\.m4a$/);
         const r = await canon().audioFinalized(uid, m[1]);

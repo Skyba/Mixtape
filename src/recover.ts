@@ -165,7 +165,11 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
   }
 
   const saved = new Set<number>();
+  // Segments of a saved take still waiting on its merge are that take's audio,
+  // not lost audio: importing them makes a second copy of the recording.
+  const merging = new Set<string>();
   for (const r of await listRecordings()) {
+    for (const u of r.mergePending?.segments ?? []) merging.add(u);
     try {
       const i = await FileSystem.getInfoAsync(audioPath(r));
       if (i.exists && i.size) saved.add(i.size);
@@ -183,7 +187,8 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
   );
   for (const f of keptSingles) f.damaged = !(await isPlayable(f.uri, f.size));
 
-  return [...keptSingles, ...grouped.map(({ parts, ...g }) => g)].sort(
+  const lost = grouped.filter((g) => !g.segments?.some((u) => merging.has(u)));
+  return [...keptSingles, ...lost.map(({ parts, ...g }) => g)].sort(
     (a, b) => b.modTime - a.modTime
   );
 }

@@ -386,7 +386,7 @@ export default function RecordScreen() {
           silenceWarnedRef.current = true;
           notify(
             "Nothing is being recorded",
-            "Another app has the microphone — a call, usually. Android gives this app silence rather than an error, so the recording is running but empty."
+            "Android has cut the microphone: another app has it, or Mixtape went to the background in a live session. Open Mixtape and keep it on screen. The recording is running but empty until then."
           ).catch(() => {});
         }
       }),

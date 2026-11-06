@@ -789,8 +789,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
               <Text style={styles.actTxt}>Share text</Text>
             </TouchableOpacity>
             {!done && !pending ? (
-              <TouchableOpacity style={[styles.act, styles.actPrimary]} disabled={!!rec.damaged} onPress={() => doTranscribe()}>
-                <Text style={styles.actTxt}>Transcribe</Text>
+              <TouchableOpacity style={[styles.act, styles.actPrimary]} disabled={!!rec.damaged || !!rec.mergePending} onPress={() => doTranscribe()}>
+                <Text style={styles.actTxt}>{rec.mergePending ? "Finishing audio…" : "Transcribe"}</Text>
               </TouchableOpacity>
             ) : null}
             <TouchableOpacity style={styles.act} onPress={() => setMenu(true)}>
