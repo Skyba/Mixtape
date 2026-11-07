@@ -46,8 +46,9 @@ export function speakerOptions(count: number) {
 
 /**
  * AssemblyAI's speaker identification: it maps letters to the names we give it
- * by reading the conversation — no voice enrollment. Descriptions sharpen it,
- * so the phone's owner carries a bio when one is set.
+ * by reading the conversation — no voice enrollment. The owner's free-text
+ * bio is never sent: it names other people ("partner Erica"), and AssemblyAI
+ * took those names as candidates. Mirrors functions/lib.js.
  */
 export function speakerIdentification(
   speakers: string[],
@@ -61,8 +62,8 @@ export function speakerIdentification(
       speaker_identification: {
         speaker_type: "name",
         speakers: named.map((name) =>
-          owner && name.trim().toLowerCase() === owner && settings.ownerBio.trim()
-            ? { name, description: settings.ownerBio.trim() }
+          owner && name.trim().toLowerCase() === owner
+            ? { name, description: "Owns the phone this was recorded on; usually one of the speakers." }
             : { name }
         ),
       },

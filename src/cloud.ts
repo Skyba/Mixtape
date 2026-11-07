@@ -16,7 +16,7 @@
  * Nothing here writes meta.json, transcripts or utterances to the bucket.
  */
 import {
-  collection, doc, getDoc, getDocFromServer, onSnapshot, query, where, type Unsubscribe,
+  collection, doc, getDoc, getDocFromServer, onSnapshot, query, runTransaction, where, type Unsubscribe,
 } from "firebase/firestore";
 import * as FileSystem from "expo-file-system/legacy";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -93,10 +93,43 @@ export function onCloudChange(cb: () => void): () => void {
 }
 const notifyChange = () => { for (const cb of listeners) { try { cb(); } catch {} } };
 
+/**
+ * A callable whose timeout counts only time the JS was running. The SDK's own
+ * timer is a plain setTimeout: with the phone locked the JS is suspended, and
+ * on resume a 30-second timer set three minutes earlier fires at once, as
+ * deadline-exceeded, while the request itself may be about to succeed (the
+ * Nov 6 "merge" failure was createRecording's timer, not mergeAudio). Gaps
+ * between ticks far longer than a tick are suspended time and are not counted.
+ */
+const TICK_MS = 1000;
+/** True for callAwake's own timeout (the request's fate is unknown). */
+export const isAwakeTimeout = (e: any) => !!e && e.awakeTimeout === true;
+export async function callAwake<T = any>(name: string, data: unknown, awakeMs = 30000): Promise<T> {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    let awake = 0;
+    let last = Date.now();
+    timer = setInterval(() => {
+      const now = Date.now();
+      awake += Math.min(now - last, 2 * TICK_MS);
+      last = now;
+      if (awake >= awakeMs) reject(Object.assign(new Error(`${name} timed out after ${Math.round(awakeMs / 1000)} s awake`), { code: "functions/deadline-exceeded", awakeTimeout: true }));
+    }, TICK_MS);
+  });
+  try {
+    // The SDK's timer only as a backstop, far beyond any awake budget.
+    return await Promise.race([callFunction<T>(name, data, 24 * 60 * 60 * 1000), deadline]);
+  } finally {
+    if (timer) clearInterval(timer);
+  }
+}
+
 /** What the server knows about a recording, in the phone's shape. */
 export function fromDoc(d: any): Partial<Recording> {
+  // "stuck": the submit's answer was lost and the sweep could not settle it.
+  // Shown as a failure the owner can act on, not "Transcribing…" forever.
   const statusMap: Record<string, Recording["transcriptStatus"]> = {
-    none: "none", pending: "pending", processing: "processing", stuck: "processing", done: "done", failed: "error",
+    none: "none", pending: "pending", processing: "processing", stuck: "error", done: "done", failed: "error",
   };
   const out: any = {
     ...d,
@@ -136,7 +169,15 @@ export async function createRemote(r: Recording, opId: string): Promise<void> {
     recordedAt: r.recordedAt, durationSeconds: r.durationSeconds, language: r.language, owner: r.owner ?? null,
     shareId: r.shareId ?? null, fieldsUpdatedAt: r.fieldsUpdatedAt ?? {},
   };
-  await callFunction("createRecording", fields);
+  // Same opId every time: a create that landed but whose answer was lost
+  // replays as a no-op, so a timeout is retried here once, not reported.
+  try {
+    await callAwake("createRecording", fields);
+  } catch (e) {
+    if (!isAwakeTimeout(e)) throw e;
+    logEvent(`createRecording ${r.id}: timed out awake, retrying with the same opId`);
+    await callAwake("createRecording", fields);
+  }
 }
 
 /**
@@ -154,7 +195,7 @@ export async function uploadAudioOnce(r: Recording): Promise<"uploaded" | "adopt
     return "uploaded";
   } catch (e: any) {
     if (!/\b403\b/.test(String(e?.message ?? e))) throw e;
-    const { audio } = await callFunction<{ audio: { generation: string; size: number; crc32c: string; md5: string | null } | null }>("audioDescriptor", { id: r.id });
+    const { audio } = await callAwake<{ audio: { generation: string; size: number; crc32c: string; md5: string | null } | null }>("audioDescriptor", { id: r.id });
     if (!audio) throw e; // denied for another reason (phase, auth): retry later
     const localMd5 = info.md5 ? hexToBase64(info.md5) : null;
     if (audio.md5 && localMd5 && audio.md5 === localMd5 && audio.size === (info.size ?? -1)) return "adopted";
@@ -240,7 +281,8 @@ async function doPull(): Promise<number> {
   const all = await listRecordings();
   let n = 0;
   for (const r of all) {
-    if (r.transcriptStatus !== "done" || !r.transcriptRevision) continue;
+    // Any status: a failed or running re-run leaves the published one current.
+    if (!r.transcriptRevision) continue;
     if (r.transcriptLocalRev === r.transcriptRevision) continue;
     try {
       const s = await getDoc(doc(db(), "recordings", currentUid(), "items", r.id));
@@ -301,11 +343,28 @@ export async function flushUploads(canUpload: boolean): Promise<number> {
  */
 export async function retranscribeRemote(id: string): Promise<void> {
   const r = await updateMeta(id, (c) => ({ ...c, pendingOp: c.pendingOp ?? `re:${id}:${Date.now()}` }));
-  await callFunction("retranscribe", { id, opId: r.rec.pendingOp }, 60000);
+  await callAwake("retranscribe", { id, opId: r.rec.pendingOp }, 60000);
   await updateMeta(id, (c) => ({ ...c, pendingOp: undefined }));
 }
 export async function deleteRemote(id: string): Promise<void> {
-  await callFunction("deleteRecording", { id, opId: `del:${id}` });
+  await callAwake("deleteRecording", { id, opId: `del:${id}` });
+}
+
+/**
+ * A public share shows the names as they stand now: a correction on the phone
+ * updates the share's map. Only onto a share of the same transcript revision
+ * (or one published from the phone, which records none): another revision's
+ * keys are other voices.
+ */
+export async function updateShareNames(shareId: string, rev: number, speakerMap: Record<string, string> | undefined): Promise<void> {
+  const ref = doc(db(), "shares", shareId);
+  await runTransaction(db(), async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists()) return;
+    const at = (s.data() as any).transcriptRev;
+    if (at != null && Number(at) !== rev) return;
+    tx.update(ref, { speakerMap: speakerMap ?? null });
+  });
 }
 
 function hexToBase64(hex: string): string {
