@@ -329,8 +329,9 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
       if (!d || !d.reviewDue) return null;
       // Deleted, or never transcribed: nothing to review, ever.
       if (d.deletedAt || !d.current) { tx.update(ref, { reviewDue: null, reviewClaim: null }); return null; }
-      // A re-run in flight: its publish sets a new marker.
-      if (d.status !== "done") return null;
+      // A re-run in flight: its publish sets a new marker. A re-run that
+      // failed sets none, and the published transcript is still current.
+      if (d.status !== "done" && d.status !== "failed") return null;
       if (due && JSON.stringify(d.reviewDue) !== JSON.stringify(due)) return null;
       if (d.reviewClaim && Date.now() - Date.parse(d.reviewClaim.at) < CLAIM_MS) return null;
       // The attempt counts when it starts: a review killed by the function

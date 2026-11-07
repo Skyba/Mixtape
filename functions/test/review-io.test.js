@@ -144,3 +144,9 @@ test("a published share gets the names the review settled", async () => {
   await makeReview({ db, bucket, env: {}, canon, runner: decided() }).reviewOne(UID, ID);
   assert.deepEqual((await share.get()).data().speakerMap, { A: "Basile", B: "Erica" });
 });
+
+test("a failed re-run does not block the review of the transcript still current", async () => {
+  await seed({ status: "failed" });
+  const out = await makeReview({ db, bucket, env: {}, canon, runner: decided() }).reviewOne(UID, ID);
+  assert.equal(out.rev, 2);
+});
