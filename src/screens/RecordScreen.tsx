@@ -1204,6 +1204,8 @@ export default function RecordScreen() {
         folder,
         language,
         settings,
+        private: isPrivate,
+        tags,
         place: placeRef.current,
         note,
         inputName: extRef.current?.name,

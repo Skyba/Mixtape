@@ -29,6 +29,7 @@ import SpeakerSelector from "../components/SpeakerSelector";
 import SpeakerRemap from "../components/SpeakerRemap";
 import SpeakerTimeline from "../components/SpeakerTimeline";
 import PlacementPicker, { Placement } from "../components/PlacementPicker";
+import { alwaysPrivate } from "../placement";
 import Select from "../components/Select";
 import { colorForLetter } from "../colors";
 import {
@@ -467,6 +468,8 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
 
   async function changeFolder(folder: string, p?: Placement, clearSuggestion = !!rec.folderSuggestion) {
     if (folder === rec.folder) return;
+    // Privacy only ever goes up: an always-private folder locks what moves in.
+    if (alwaysPrivate(folder) && !rec.private) p = { folder, private: true, tags: p?.tags ?? [] };
     setBusy("Moving…");
     const from = rec;
     if (await isCanonical()) {

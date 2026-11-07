@@ -24,6 +24,7 @@ import {
 import { canUploadNow } from "./network";
 import { mergeNewest } from "./attribution";
 import { moveToFolder } from "./recordings";
+import { alwaysPrivate } from "./placement";
 import {
   isFirebaseConfigured,
   isSignedIn,
@@ -247,7 +248,7 @@ export async function processStop(args: StopArgs): Promise<Recording> {
       language: args.language,
       transcriptStatus: "none",
       uploadStatus: "pending",
-      private: args.private,
+      private: !!args.private || alwaysPrivate(args.folder),
       tags: args.tags,
       place: args.place,
       note: args.note?.trim() || undefined,
@@ -479,7 +480,7 @@ export async function processStopLive(args: LiveStopArgs): Promise<Recording> {
       // accurate diarized speakers from the merged file.
       transcriptStatus: hasTranscript ? "done" : "none",
       uploadStatus: "pending",
-      private: args.private,
+      private: !!args.private || alwaysPrivate(args.folder),
       tags: args.tags,
       place: args.place,
       note: args.note?.trim() || undefined,

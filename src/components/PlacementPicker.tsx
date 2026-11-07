@@ -105,7 +105,7 @@ export default function PlacementPicker({
 
   function pickFolder(name: string) {
     // Tags belong to a folder's vocabulary, so they don't survive the move.
-    onChange({ folder: name, private: value.private, tags: [] });
+    onChange({ folder: name, private: value.private || alwaysPrivate(name), tags: [] });
     rememberFolder(name);
     setHistory((h) => [name, ...h.filter((x) => x !== name)]);
   }
