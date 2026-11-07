@@ -641,19 +641,10 @@ async function mergeAdmitted({ uid, segments, dest, ph, canonDest }) {
         await bucket.file(seg).download({ destination: f });
         local[i] = f;
       });
-      const listFile = path.join(work, "list.txt");
-      await fsp.writeFile(
-        listFile,
-        local.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join("\n")
-      );
       const out = path.join(work, "merged.m4a");
-      await new Promise((resolve, reject) => {
-        execFile(
-          ffmpegPath,
-          ["-y", "-f", "concat", "-safe", "0", "-i", listFile, "-c", "copy", out],
-          (err, _so, se) => (err ? reject(new Error(se || err.message)) : resolve())
-        );
-      });
+      // Refuses a merge that dropped a segment: nothing short ever reaches
+      // dest, which for a recording is create-only and permanent.
+      await lib.concatAudio(ffmpegPath, local, out);
       // ffmpeg may have run for minutes; the freeze may have begun meanwhile.
       if ((await phase()) !== ph) throw new HttpsError("unavailable", "migration phase changed; merge not written");
       try {

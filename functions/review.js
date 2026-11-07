@@ -27,6 +27,9 @@ const SHORT_SECONDS = 30;
 const MERGE_MIN = 0.5;
 const CLAIM_MS = 10 * 60 * 1000;
 const MAX_FAILURES = 3;
+// Sonnet 5.5 thinks by default and thinking counts against max_tokens: 1500
+// was routinely spent before any answer, so a review read "no evidence".
+const ASK_TOKENS = 16000;
 const VERSION = 1;
 
 const isPlaceholder = (s) => /^Speaker \d+$/.test(s || "");
@@ -61,7 +64,7 @@ async function askNames(ask, utterances, named, owner, known = []) {
     "Never assign the same name to two letters unless there are more letters than participants. " +
     "If nothing in the text supports a letter, leave it out.\n\n" +
     'Output ONLY JSON, nothing else: {"A": {"name": "...", "quote": "..."}, ...}\n\nTranscript:\n' + lines;
-  const out = parseJson(await ask(prompt, 1500)) || {};
+  const out = parseJson(await ask(prompt, ASK_TOKENS)) || {};
   const texts = utterances.map((u) => norm(u.text));
   const clean = {};
   for (const [L, v] of Object.entries(out)) {
@@ -97,7 +100,7 @@ async function askOwner(ask, utterances, ownerName, profile, speakers) {
     "If the content does not let you tell, answer unclear — a wrong answer is much worse than unclear.\n\n" +
     'Output ONLY JSON: {"label": "A" | null, "confidence": "high" | "medium" | "low", "quote": "<=20 words copied exactly", "reason": "one sentence"}' +
     "\n\nTranscript:\n" + lines;
-  const out = parseJson(await ask(prompt, 1500)) || {};
+  const out = parseJson(await ask(prompt, ASK_TOKENS)) || {};
   const quote = String(out.quote || "").trim();
   if (!out.label || !back[out.label] || out.confidence !== "high") return null;
   if (quote.length < 8 || !norm(lines).includes(norm(quote).slice(0, 50))) return null;
@@ -109,7 +112,7 @@ async function askFolder(ask, utterances, names, folders) {
   const list = Object.entries(folders).map(([f, titles]) => `- ${f}${titles.length ? `: e.g. ${titles.join("; ")}` : ""}`).join("\n");
   const prompt = `Folders, with recent recordings in each:\n${list}\n\nWhich ONE folder does this recording belong in? If no folder clearly fits, answer null.\n` +
     'Output ONLY JSON: {"folder": "<one of the folders>" | null, "why": "<= 8 words"}\n\nTranscript:\n' + text;
-  const out = parseJson(await ask(prompt, 600)) || {};
+  const out = parseJson(await ask(prompt, 4000)) || {};
   return out.folder && folders[out.folder] ? { folder: out.folder, why: String(out.why || "").slice(0, 120) } : null;
 }
 
@@ -156,6 +159,13 @@ function decide({ doc, keys, seconds, voiceBy, fresh, carried = [], ownerCheck =
     // A label from an earlier review is not a separate signal.
     const server = ["aai", "claude"].includes(cur.by) ? cur.name : (!/^[A-Z]$/.test(k) && listed.includes(k) ? k : null);
     const v = voiceBy[k], f = fresh[k];
+    // With names listed, a voice that sounds like someone else is not a name
+    // for it: two dissimilar voices pass the margin easily, so the match does
+    // not prove identity. It is a contradiction to look at.
+    if (v && listed.length && !there.has(lc(v.name)) && lc(v.name) !== owner) {
+      conflicts.push(`${k}: the voice sounds like ${v.name}, who is not among the names you gave`);
+      continue;
+    }
     const votes = [server, f && f.name, v && v.name].filter(Boolean);
     const agree = new Set(votes.map(lc)).size === 1;
     if (v && agree && there.has(lc(v.name))) {
@@ -252,6 +262,12 @@ function decide({ doc, keys, seconds, voiceBy, fresh, carried = [], ownerCheck =
   return { labels: { ...out }, flag: conflicts.length ? conflicts.join("; ").slice(0, 480) : null, disputed: { ...disputed } };
 }
 
+// Failed attempts on the revision now under review; an older revision's
+// failures do not keep a new transcript from being reviewed.
+function failuresFor(d) {
+  return d.reviewFailedRev != null && d.current && d.reviewFailedRev !== d.current.rev ? 0 : d.reviewFailures || 0;
+}
+
 function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
   const iso = () => (now ? now() : new Date()).toISOString();
   const ask = (prompt, max) => lib.anthropic(env.ANTHROPIC_KEY, max, prompt, MODEL, fetchImpl || fetch);
@@ -317,8 +333,12 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
       if (d.status !== "done") return null;
       if (due && JSON.stringify(d.reviewDue) !== JSON.stringify(due)) return null;
       if (d.reviewClaim && Date.now() - Date.parse(d.reviewClaim.at) < CLAIM_MS) return null;
-      tx.update(ref, { reviewClaim: { at: iso(), rev: d.current.rev } });
-      return d;
+      // The attempt counts when it starts: a review killed by the function
+      // timeout never reaches a catch, and was retried every sweep forever.
+      // Counted per revision, so a new transcript gets its own tries.
+      const reviewFailures = failuresFor(d) + 1;
+      tx.update(ref, { reviewClaim: { at: iso(), rev: d.current.rev }, reviewFailures, reviewFailedRev: d.current.rev });
+      return { ...d, reviewFailures };
     });
   }
 
@@ -333,7 +353,6 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
     } catch (e) {
       await canon.docRef(uid, id).update({
         reviewClaim: null,
-        reviewFailures: (doc.reviewFailures || 0) + 1,
         reviewError: String((e && e.message) || e).slice(0, 300),
       }).catch(() => {});
       throw e;
@@ -370,23 +389,37 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
     const emb = (mine && mine.embeddings) || {};
 
     const voiceBy = Object.create(null), voiceClash = Object.create(null);
-    const refs = await samples(uid, ownerName);
-    for (const [k, m] of Object.entries(voice.match(emb, refs).matches)) voiceBy[k] = { ...m, from: "sample" };
+    const enrolledRefs = await samples(uid, ownerName);
     // A re-run: the voices the owner named in earlier transcripts are the
     // strongest reference there is, the same people in the same audio.
     // Newest transcript first; each name from the newest one that has it.
+    // Only names the owner gave count: a review's own "auto" (which can rest
+    // on "the one voice left", no voice match at all) is not their word, and
+    // carrying it came back green as "you named them before the re-run". A
+    // name confirmed on a voice too short to embed is still carried as a
+    // person who was there, just not as a voice reference.
     const byName = new Map();
+    const carriedNames = new Set();
     for (const prior of [].concat(doc.priorLabels || [])) {
       if (!prior || prior.rev === rev) continue;
       // A voice left unnamed is nobody's reference.
-      const fresh = Object.entries(prior.labels || {}).filter(([, l]) => settled(l) && l.name && !byName.has(l.name));
+      const mine = Object.entries(prior.labels || {}).filter(([, l]) => l && l.by === "user" && l.name && !/^Other \(/.test(l.name));
+      mine.forEach(([, l]) => carriedNames.add(l.name));
+      const fresh = mine.filter(([, l]) => !byName.has(l.name));
       if (!fresh.length) continue;
       const old = await voicesFor(uid, id, doc, prior.rev, wavP);
       const got = new Map();
       for (const [k, l] of fresh) if (old && old.embeddings[k]) got.set(l.name, [...(got.get(l.name) || []), old.embeddings[k]]);
       for (const [n, es] of got) byName.set(n, voice.normalize(es[0].map((_, i) => es.reduce((t, e) => t + e[i], 0))));
     }
-    const carried = [...byName.keys()];
+    const carried = [...carriedNames];
+    // With names listed, a voice is matched only against the people said to be
+    // there (and the owner): an enrolled person who was not, compared against
+    // a voice with no reference of its own, won it by default.
+    const listedNow = (doc.speakers || []).filter((s) => s && !isPlaceholder(s));
+    const may = new Set([...listedNow, ...carried, ownerName].filter(Boolean).map(lc));
+    const refs = listedNow.length ? Object.fromEntries(Object.entries(enrolledRefs).filter(([n]) => may.has(lc(n)))) : enrolledRefs;
+    for (const [k, m] of Object.entries(voice.match(emb, refs).matches)) voiceBy[k] = { ...m, from: "sample" };
     for (const [k, m] of Object.entries(voice.match(emb, Object.fromEntries(byName)).matches)) {
       if (voiceBy[k] && lc(voiceBy[k].name) !== lc(m.name)) { voiceClash[k] = [voiceBy[k].name, m.name]; delete voiceBy[k]; }
       else voiceBy[k] = { ...m, from: "earlier" };
@@ -426,13 +459,15 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
   }
 
   async function commit(uid, id, read, rev, result) {
-    await db.runTransaction(async (tx) => {
+    const wrote = await db.runTransaction(async (tx) => {
       if ((await canon.readPhase(tx)) !== "canonical") throw new Error("phase is not canonical");
       const ref = canon.docRef(uid, id);
       const s = await tx.get(ref);
       const cur = s.data();
       const done = { reviewDue: null, reviewClaim: null, reviewFailures: 0, reviewError: null, review: { rev, at: iso(), version: VERSION } };
-      if (!cur || cur.deletedAt || !cur.current || cur.current.rev !== rev) { tx.update(ref, { reviewClaim: null }); return; }
+      // Nothing written here is not a failed attempt: give the count back.
+      const undo = { reviewFailures: Math.max(0, (cur && cur.reviewFailures || 1) - 1) };
+      if (!cur || cur.deletedAt || !cur.current || cur.current.rev !== rev) { if (cur) tx.update(ref, { reviewClaim: null, ...undo }); return; }
       const t = iso();
       const stamps = { ...(cur.fieldsUpdatedAt || {}) };
       const was = read.fieldsUpdatedAt || {};
@@ -440,7 +475,7 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
       // the decision was made on what they have since changed. Run again.
       const edited = Object.keys({ ...stamps, ...was }).some((f) =>
         (f.startsWith("speakerLabels.") || ["speakers", "reviewFlag", "speakerId", "meIncluded", "folder"].includes(f)) && (stamps[f] || "") !== (was[f] || ""));
-      if (edited) { tx.update(ref, { reviewClaim: null, reviewDue: { rev, at: t, again: true } }); return; }
+      if (edited) { tx.update(ref, { reviewClaim: null, reviewDue: { rev, at: t, again: true }, ...undo }); return; }
       const labels = { ...(cur.speakerLabels || {}) };
       for (const [k, d] of Object.entries(result.labels)) {
         if (settled(labels[k])) continue;
@@ -466,19 +501,37 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
       upd.fieldsUpdatedAt = stamps;
       upd.updatedAt = t;
       tx.update(ref, upd);
+      return cur.shareId ? { shareId: cur.shareId, map: lib.publicSpeakerMap({ ...cur, speakerLabels: labels }) } : null;
     });
+    if (wrote) await shareNames(uid, wrote.shareId, rev, wrote.map);
+  }
+
+  // A public share shows the names as the review leaves them, not as they
+  // stood at publish (before any review ran). Only onto a share of this same
+  // transcript: keys of another revision are other voices.
+  async function shareNames(uid, shareId, rev, speakerMap) {
+    const ref = db.doc(`shares/${shareId}`);
+    await db.runTransaction(async (tx) => {
+      const s = await tx.get(ref);
+      if (!s.exists || s.data().ownerUid !== uid) return;
+      const at = s.data().transcriptRev;
+      if (at != null && Number(at) !== rev) return;
+      tx.update(ref, { speakerMap: speakerMap || null });
+    }).catch((e) => console.error("review shareNames", shareId, String((e && e.message) || e)));
   }
 
   // Retries what a failed or lost trigger left: due for more than 15 min,
   // fewer than three failures.
-  async function sweep(limit = 5) {
+  async function sweep(limit = 5, budgetMs = 4 * 60 * 1000) {
     const snap = await db.collectionGroup("items").where("reviewDue", "!=", null).get();
     const out = [];
     let ran = 0;
-    for (const s of snap.docs) {
-      const d = s.data();
-      if (ran >= limit) break;
-      if ((d.reviewFailures || 0) >= MAX_FAILURES || Date.now() - Date.parse(d.reviewDue.at || 0) < 15 * 60 * 1000) continue;
+    const started = Date.now();
+    // A slow recording must not starve the ones behind it every run.
+    const docs = snap.docs.map((s) => s.data()).sort((a, b) => failuresFor(a) - failuresFor(b));
+    for (const d of docs) {
+      if (ran >= limit || Date.now() - started > budgetMs) break;
+      if (failuresFor(d) >= MAX_FAILURES || Date.now() - Date.parse(d.reviewDue.at || 0) < 15 * 60 * 1000) continue;
       try {
         const r = await reviewOne(d.uid, d.id);
         if (!r.skipped) ran++;

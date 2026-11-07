@@ -160,6 +160,20 @@ function applyPatch(meta, body, ownerName, opts = {}) {
       if (!take(`speakerLabels.${L}`, v)) continue;
       if (v === null) delete labels[L]; else labels[L] = v;
     }
+    // A name you give takes it off a model's suggestion on another voice: the
+    // suggestion was the wrong voice, and refusing your correction (409) left
+    // it stuck on the phone. Only when names may not be shared.
+    const mayShare = Object.keys(labels).length > (Array.isArray(meta.speakers) ? meta.speakers.length : 0);
+    const isSettled = (l) => !!l && ["user", "auto"].includes(l.by);
+    for (const [L, v] of Object.entries(letters)) {
+      if (mayShare || !v || labels[L] !== v || !isSettled(v) || v.merge || !v.name.trim()) continue;
+      for (const [K, w] of Object.entries(labels)) {
+        if (K === L || K in letters || !w || isSettled(w) || w.merge || (w.name || "").trim().toLowerCase() !== v.name.trim().toLowerCase()) continue;
+        delete labels[K];
+        mine[`speakerLabels.${K}`] = new Date(now).toISOString();
+        applied.push(`speakerLabels.${K}`);
+      }
+    }
     // Duplicate-name guard on the MERGED state: refuse, do not silently drop.
     const names = Object.entries(labels).map(([L, v]) => [L, (v.name || "").trim().toLowerCase()]).filter(([, n]) => n);
     const counts = {};
@@ -170,7 +184,6 @@ function applyPatch(meta, body, ownerName, opts = {}) {
     // into a named one. Only a model's duplicate is refused.
     const dup = Object.entries(counts).find(([n, c]) => c > 1 &&
       names.some(([L, m]) => m === n && !["user", "auto"].includes((labels[L] || {}).by) && !(labels[L] || {}).merge));
-    const mayShare = Object.keys(labels).length > (Array.isArray(meta.speakers) ? meta.speakers.length : 0);
     if (dup && !mayShare) throw new PatchError(409, `"${dup[0]}" would be assigned to two letters`);
     meta.speakerLabels = labels;
   }
@@ -231,6 +244,8 @@ function nameForSpeaker(letter, speakers, speakerMap) {
   if (speakerMap && speakerMap[letter]) return speakerMap[letter];
   // Left unnamed by the owner: never fall back to AssemblyAI's name key.
   if (speakerMap && letter in speakerMap && !/^[A-Z]$/.test(letter)) return "Unnamed voice";
+  // AssemblyAI's identification already keys utterances by name.
+  if (!/^[A-Z]$/.test(letter)) return letter;
   // Letter order is arbitrary, so the slot entered first is not the voice
   // labelled A. Handing slots out by position named the wrong people with
   // total confidence. An unmapped letter stays anonymous.
@@ -255,13 +270,21 @@ async function anthropic(key, maxTokens, prompt, model = TOPIC_MODEL, fetchImpl 
       messages: [{ role: "user", content: prompt }],
     }),
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => null);
+  // An error (429, 529, a bad request) used to come back as "", which every
+  // caller read as "the content shows nothing" and the review committed.
+  if (res.ok === false || !data || data.type === "error" || data.error) {
+    throw new Error(`Anthropic ${res.status || ""}: ${JSON.stringify((data && data.error) || data).slice(0, 200)}`);
+  }
   // Thinking-capable models put a "thinking" block first, so content[0] is not
   // necessarily the answer — collect the text blocks instead.
-  return ((data && data.content) || [])
+  const text = (data.content || [])
     .filter((b) => b && b.type === "text")
     .map((b) => b.text)
     .join("\n");
+  // Thinking counts against max_tokens: a budget spent on it leaves no text.
+  if (!text.trim()) throw new Error(`Anthropic returned no text (stop_reason ${data.stop_reason})`);
+  return text;
 }
 // Lines that name a participant are the only real evidence of who is who, and
 // they're spread through the whole recording — sampling just the opening
@@ -297,23 +320,37 @@ function speakerStats(utterances) {
 
 // AssemblyAI's speaker identification maps letters to names by reading the
 // conversation (no voice enrollment). Mirrors src/transcription.ts.
+// The owner's free-text bio is never sent: it names other people ("partner
+// Erica"), and AssemblyAI took those names as candidates for the voices.
+const OWNER_DESCRIPTION = "Owns the phone this was recorded on; usually one of the speakers.";
 function speakerIdentification(meta) {
   const named = (meta.speakers || []).filter((s) => !/^Speaker \d+$/.test(s));
   if (!named.length) return undefined;
   const owner = ((meta.owner && meta.owner.name) || "").trim().toLowerCase();
-  const bio = ((meta.owner && meta.owner.bio) || "").trim();
   return {
     request: {
       speaker_identification: {
         speaker_type: "name",
         speakers: named.map((name) =>
-          owner && name.trim().toLowerCase() === owner && bio
-            ? { name, description: bio }
-            : { name }
+          owner && name.trim().toLowerCase() === owner ? { name, description: OWNER_DESCRIPTION } : { name }
         ),
       },
     },
   };
+}
+
+// AssemblyAI's identification can key utterances by a name it was not given.
+// A key that is neither a letter nor one of the candidate names becomes a
+// free letter again, so it renders as "Speaker X" instead of naming someone
+// who was never on the list.
+function anonymiseUnlisted(utterances, speakers) {
+  const named = new Set((speakers || []).filter((s) => !/^Speaker \d+$/.test(s)).map((s) => s.trim().toLowerCase()));
+  const keys = [...new Set(utterances.map((u) => u.speaker))];
+  const bad = keys.filter((k) => !/^[A-Z]$/.test(k) && !named.has(String(k).trim().toLowerCase()));
+  if (!bad.length) return utterances;
+  const free = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter((l) => !keys.includes(l));
+  const to = Object.fromEntries(bad.map((k, i) => [k, free[i] || `S${i + 1}`]));
+  return utterances.map((u) => (u.speaker in to ? { ...u, speaker: to[u.speaker] } : u));
 }
 
 // Only trust an identification when the transcript actually says someone's
@@ -452,8 +489,8 @@ function aaiRequestBody(meta, signedAudioUrl) {
 // Everything derived from a finished AssemblyAI transcript: speaker map (AAI's
 // identification when evidenced, else Claude's guess), rendered text, topic.
 async function postProcess(data, meta, env, fetchImpl) {
-  const utterances = data.utterances || [];
   const speakers = Array.isArray(meta.speakers) ? meta.speakers : [];
+  const utterances = anonymiseUnlisted(data.utterances || [], speakers);
   const identified = acceptSpeakerMapping(
     (((data.speech_understanding || {}).response || {}).speaker_identification || {}).mapping,
     utterances.map((u) => u.text).join(" "),
@@ -469,8 +506,25 @@ async function postProcess(data, meta, env, fetchImpl) {
     utterances, speakerMap, identified: !!identified, text, topic, audioDurationSec,
     speechModelUsed: data.speech_model || data.speech_model_used || null,
     estCostUsd: (audioDurationSec / 3600) * AAI_RATE_PER_HOUR,
-    language: !pinned && data.language_code ? LANG_NAMES[data.language_code] || data.language_code : null,
+    // Reported, never written over the owner's choice: storing the detected
+    // language as `language` pinned every later re-run to it (dropping
+    // code-switching) and erased a language picked while the job ran.
+    language: null,
+    detectedLanguage: !pinned && data.language_code ? LANG_NAMES[data.language_code] || data.language_code : null,
   };
+}
+
+// The names that leave the app (public share, rendered transcript): a person's
+// or a settled one, two agreeing signals, or AssemblyAI with the name spoken.
+// A single model guess or a voice-only match stays "Speaker X" until confirmed.
+// Mirrors liveMap() in src/screens/RecordingDetailScreen.tsx.
+const PUBLIC_BY = ["user", "auto", "ai-review", "channel", "aai"];
+function publicSpeakerMap(doc) {
+  const labels = doc.speakerLabels || {};
+  if (!Object.keys(labels).length) return doc.speakerMap || null;
+  const map = {};
+  for (const [k, l] of Object.entries(labels)) if (l && PUBLIC_BY.includes(l.by)) map[k] = l.name || "";
+  return Object.keys(map).length ? map : null;
 }
 
 // Mirrors the public share doc, after checking the share is the owner's: this
@@ -494,9 +548,54 @@ async function updateShare(db, shareId, uid, fields, rev) {
   }
 }
 
+// Stream-copies local m4a segments into one file. ffmpeg's concat demuxer
+// stops at a segment it cannot read and still exits 0, so a bad middle
+// segment gave a 40-second file for a two-minute take — which then became the
+// create-only audio. Not -xerror: every healthy AAC join raises a
+// non-monotonous-DTS error, so it fails good merges too. Instead the log must
+// not report an unreadable input, and the output must hold (nearly) every
+// byte of the inputs: a copy only loses the per-file headers.
+const CONCAT_BAD_INPUT = /Impossible to open|moov atom not found|Invalid data found/;
+const CONCAT_MIN_RATIO = 0.97;
+async function concatAudio(ffmpegPath, files, out) {
+  const fs = require("fs");
+  const path = require("path");
+  const { execFile } = require("child_process");
+  let total = 0;
+  for (const f of files) {
+    const size = fs.statSync(f).size;
+    if (!size) throw new Error(`segment ${path.basename(f)} is empty`);
+    total += size;
+  }
+  const list = out + ".list.txt";
+  fs.writeFileSync(list, files.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join("\n"));
+  try {
+    await new Promise((resolve, reject) => {
+      execFile(
+        ffmpegPath,
+        ["-y", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", out],
+        { maxBuffer: 16 * 1024 * 1024 },
+        (err, _so, se) => {
+          const log = String(se || "");
+          if (err) return reject(new Error(String(se || err.message).slice(-2000)));
+          const bad = log.split("\n").find((l) => CONCAT_BAD_INPUT.test(l));
+          return bad ? reject(new Error(`a segment could not be read: ${bad.slice(-300)}`)) : resolve();
+        }
+      );
+    });
+  } finally {
+    fs.rmSync(list, { force: true });
+  }
+  const size = fs.existsSync(out) ? fs.statSync(out).size : 0;
+  if (size < CONCAT_MIN_RATIO * total) {
+    throw new Error(`merged audio is ${size} bytes of ${total} in ${files.length} segments; a segment did not merge`);
+  }
+  return { size, total };
+}
+
 module.exports = {
   AAI, AAI_RATE_PER_HOUR, LANG_CODES, LANG_NAMES, CLIENT_FIELDS, CREATE_ONLY_FIELDS, SYNCED_FIELDS,
   ownerAttribution, canonStamp, validField, validLabel, PatchError, applyPatch,
   renderTranscript, acceptSpeakerMapping, inferSpeakerMap, inferTopic, speakerIdentification, anthropic,
-  aaiRequestBody, postProcess, updateShare,
+  aaiRequestBody, postProcess, updateShare, publicSpeakerMap, anonymiseUnlisted, concatAudio,
 };
