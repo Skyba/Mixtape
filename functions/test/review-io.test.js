@@ -106,8 +106,9 @@ test("re-run history: names the last run did not settle are kept from the one be
     speakerLabels: { A: { name: "Alice", by: "auto" }, B: { name: "Speaker B", by: "aai" } },
     priorLabels: [{ rev: 1, labels: { A: { name: "Alice", by: "user" }, B: { name: "Bob", by: "user" } } }],
   };
-  assert.deepEqual(priorLabelsAfter(cur).map((p) => p.rev), [2, 1]);
-  assert.deepEqual(priorLabelsAfter({ current: { rev: 3 }, speakerLabels: {}, priorLabels: priorLabelsAfter(cur) }).map((p) => p.rev), [2, 1]);
+  // The review's "auto" Alice is not carried; the owner's own names from rev 1 are.
+  assert.deepEqual(priorLabelsAfter(cur).map((p) => p.rev), [1]);
+  assert.deepEqual(priorLabelsAfter({ current: { rev: 3 }, speakerLabels: {}, priorLabels: priorLabelsAfter(cur) }).map((p) => p.rev), [1]);
 });
 
 test("re-run history keeps an old transcript while it is the only one with a name", () => {

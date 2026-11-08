@@ -26,7 +26,7 @@ function fakeAai() {
       state.posts.push(JSON.parse(opts.body));
       if (state.onPost) await state.onPost(JSON.parse(opts.body));
       if (state.postThrow) throw new Error("socket hang up");
-      return { json: async () => state.postResult || { id: "t1" } };
+      return { status: state.postStatus || 200, json: async () => state.postResult || { id: "t1" } };
     }
     if (u.includes("/v2/transcript/")) {
       state.gets.push(u);
@@ -462,4 +462,59 @@ test("language changed while the job ran: publish, then one automatic re-run", a
   assert.equal((await c.webhook({ uid: UID, id: ID, lockId: d.active, payload: { transcript_id: "t2", status: "completed" } })).note, "published");
   d = await docOf();
   assert.equal(d.status, "done"); assert.equal(d.current.rev, 2); assert.equal(aai.state.posts.length, 2, "no third run");
+});
+
+test("deleted while the job ran: nothing is stored or sent to Claude, and AssemblyAI's copy is deleted", async () => {
+  await reset();
+  const aai = fakeAai(); const clock = { t: Date.parse("2026-11-06T12:00:00Z") };
+  const c = build(aai, clock);
+  await c.createRecording(UID, { id: ID, speakers: ["Basile", "Erica"] });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  await c.deleteRecording(UID, ID, "del1");
+  aai.state.transcript = completed(gen);
+  const calls = [];
+  const inner = aai.fetch;
+  const c2 = makeCanonical({ db, bucket, signer, fetchImpl: async (u, o = {}) => { calls.push([o.method || "GET", String(u)]); return inner(u, o); },
+    env: { GCLOUD_PROJECT: PROJECT, ASSEMBLYAI_KEY: "k", TRANSCRIBE_WEBHOOK_SECRET: "s" }, now: () => new Date(clock.t) });
+  const out = await c2.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } });
+  assert.match(out.note, /deleted/);
+  assert.ok(!calls.some(([, u]) => u.includes("anthropic")));
+  assert.ok(calls.some(([m, u]) => m === "DELETE" && u.endsWith("/transcript/t1")));
+  const [files] = await bucket.getFiles({ prefix: `rec2/${UID}/${ID}/` });
+  // The delete purged the audio; the late job must not bring anything back.
+  assert.deepEqual(files.map((f) => f.name), []);
+});
+
+test("AssemblyAI refusing the job outright is a failure, not a lost answer", async () => {
+  await reset();
+  const aai = fakeAai(); const clock = { t: Date.parse("2026-11-06T12:00:00Z") };
+  const c = build(aai, clock);
+  await c.createRecording(UID, { id: ID, speakers: [] });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  aai.state.postStatus = 401; aai.state.postResult = { error: "account balance is negative" };
+  const st = await c.maybeStart(UID, ID);
+  assert.equal(st.failed, true);
+  const d = await docOf();
+  assert.equal(d.status, "failed"); assert.equal(d.active, null);
+});
+
+test("detected language is kept apart, so a re-run still auto-detects", async () => {
+  await reset();
+  const aai = fakeAai(); const clock = { t: Date.parse("2026-11-06T12:00:00Z") };
+  const c = build(aai, clock);
+  await c.createRecording(UID, { id: ID, language: "Auto", speakers: [] });
+  const gen = await uploadAudio();
+  await c.audioFinalized(UID, ID, gen);
+  const st = await c.maybeStart(UID, ID);
+  aai.state.transcript = completed(gen, { language_code: "fr" });
+  await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } });
+  let d = await docOf();
+  assert.equal(d.language, "Auto"); assert.equal(d.detectedLanguage, "French");
+  aai.state.postResult = { id: "t2" };
+  await c.retranscribe(UID, ID, "re1");
+  assert.equal(aai.state.posts[1].language_detection, true);
+  assert.equal(aai.state.posts[1].language_code, undefined);
 });

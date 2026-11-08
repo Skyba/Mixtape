@@ -157,7 +157,7 @@ test("delete: link closed, every blob and live segment gone, voice samples kept,
   await assert.rejects(c.createRecording(UID, { id: ID }), (e) => e.code === "failed-precondition");
 
   aai.state.transcript = completed(gen);
-  assert.equal((await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } })).note, "deleted; ignored");
+  assert.equal((await c.webhook({ uid: UID, id: ID, lockId: st.lockId, payload: { transcript_id: "t1", status: "completed" } })).note, "recording deleted; transcript not kept");
   const [after] = await bucket.getFiles({ prefix: `rec2/${UID}/${ID}/` });
   assert.equal(after.length, 0, "a late job writes nothing");
 });

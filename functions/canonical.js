@@ -19,6 +19,7 @@ const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 
 const CLAIMED_STALE_MS = 10 * 60 * 1000;
 const SUBMITTED_STALE_MS = 2 * 60 * 60 * 1000;
+const SUBMITTED_DEAD_MS = 24 * 60 * 60 * 1000;
 const ATTEMPTS_KEPT = 20;
 const OPS_KEPT = 50;
 // No take is longer than 10h (AssemblyAI's ceiling), so a live link still
@@ -256,6 +257,18 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
       // Ambiguous: the POST may have landed. Leave the attempt claimed; the
       // sweep turns it into needs-review and a late webhook still resolves it.
       console.error("maybeStart submit", id, String((e && e.message) || e));
+      // AssemblyAI answered and said no (a 4xx other than a rate limit):
+      // nothing was created, so it is a failure, not a lost answer.
+      if (e && e.definitive) {
+        await mutate(uid, id, (cur) => {
+          const a = cur.attempts && cur.attempts[claimed.lockId];
+          if (!a || !canMove(a.state, "failed")) return null;
+          const attempts = { ...cur.attempts, [claimed.lockId]: { ...a, state: "failed", error: String(e.message).slice(0, 300), updatedAt: iso() } };
+          const isActive = cur.active === claimed.lockId;
+          return { doc: { ...cur, attempts, active: isActive ? null : cur.active, status: isActive ? "failed" : cur.status } };
+        });
+        return { started: false, failed: true };
+      }
       return { started: true, submitted: false, lockId: claimed.lockId };
     }
     await mutate(uid, id, (cur) => {
@@ -295,8 +308,12 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
       headers: { authorization: env.ASSEMBLYAI_KEY, "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    const created = await res.json();
-    if (!created || !created.id) throw new Error("AAI create failed: " + JSON.stringify(created).slice(0, 200));
+    const created = await res.json().catch(() => null);
+    if (!created || !created.id) {
+      const err = new Error("AAI create failed: " + JSON.stringify(created).slice(0, 200));
+      err.definitive = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
+      throw err;
+    }
     return created;
   }
 
@@ -325,9 +342,15 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
     const snap = await docRef(uid, id).get();
     if (!snap.exists) return { note: "unknown recording" };
     const doc = snap.data();
-    // A job that finishes after a delete writes nothing and pays for no
-    // post-processing.
-    if (doc.deletedAt) return { note: "deleted; ignored" };
+    // A job that finishes after a delete writes nothing, pays for no
+    // post-processing, and AssemblyAI's copy is deleted too. The purge may
+    // already have stripped the attempts, so this can't wait for the lock.
+    if (doc.deletedAt) {
+      if (payload.status === "completed" && transcriptId) {
+        await doFetch(`${lib.AAI}/transcript/${transcriptId}`, { method: "DELETE", headers: { authorization: env.ASSEMBLYAI_KEY } }).catch(() => {});
+      }
+      return { note: "recording deleted; transcript not kept" };
+    }
     const a = doc.attempts && doc.attempts[lockId];
     if (!a) return { note: "unknown lock; recorded, ignored" };
     if (doc.current && doc.current.lockId === lockId) return { note: "duplicate after publish" };
@@ -411,7 +434,7 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
         (langStamp > at.createdAt && (cur.language || "") !== (at.languageAtSubmit || "")) ||
         (spkStamp > at.createdAt && JSON.stringify(cur.speakers || []) !== JSON.stringify(at.speakersAtSubmit || []));
       const doc2 = {
-        ...cur, attempts, active: null, current, status: changedMeanwhile && !at.rerunForEdit ? "pending" : "done",
+        ...cur, attempts, active: null, current, status: changedMeanwhile ? "pending" : "done",
         // Which voices this transcript has: the phone colours by these, not
         // by labels left from an earlier run.
         speakerKeys: Array.from(new Set(utterances.map((u) => u.speaker))).sort(),
@@ -422,7 +445,9 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
         // Newest first: a name the last run did not settle is still found
         // in the one before.
         priorLabels: firstRun ? null : priorLabelsAfter(cur),
-        rerunQueued: changedMeanwhile && !at.rerunForEdit ? { afterRev: rev, reason: "language or speakers changed while the job ran" } : null,
+        // Each re-run needs a new edit made after its own start, so this
+        // cannot loop; a second change during the automatic re-run counts.
+        rerunQueued: changedMeanwhile ? { afterRev: rev, reason: "language or speakers changed while the job ran" } : null,
         speakerMap: Object.keys(speakerMap).length ? speakerMap : null, speakerLabels, speakerId: keepOwner ? cur.speakerId : null,
         fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), ...labelStamps, ...(keepOwner ? {} : { speakerId: transcribedAt }),
           // The inferred title is a server edit of a client field: stamped,
@@ -431,7 +456,9 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
         topic: (cur.fieldsUpdatedAt || {}).topic ? cur.topic : post.topic || cur.topic, aaiTranscriptId: transcriptId, speechModelUsed: post.speechModelUsed,
         audioDurationSec: post.audioDurationSec, transcribedAt, estCostUsd: post.estCostUsd,
         durationSeconds: cur.durationSeconds || Math.round(post.audioDurationSec || 0),
+        // The owner's choice stays theirs; what detection found is shown apart.
         ...(post.language ? { language: post.language } : {}),
+        detectedLanguage: post.detectedLanguage || null,
         // Derived share doc is updated after this commit; the marker makes
         // the sweep finish it if we die in between.
         shareDirty: cur.shareId ? { shareId: cur.shareId, rev } : null,
@@ -457,7 +484,7 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
     const post = await readOwnArtifact(uid, id, d.current.post.name, { lockId: d.current.lockId, aaiTranscriptId: d.current.aaiTranscriptId });
     if (!post) return false;
     const ok = await pushShare(d.shareDirty.shareId, uid, {
-      utterances: post.utterances || [], speakerMap: d.speakerMap, topic: d.topic,
+      utterances: post.utterances || [], speakerMap: lib.publicSpeakerMap(d), topic: d.topic,
       durationSeconds: d.durationSeconds || 0, speakers: d.speakers, language: d.language || "",
     }, d.current.rev);
     if (!ok) return false;
@@ -541,6 +568,10 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
       const data = await (await doFetch(`${lib.AAI}/transcript/${a.aaiTranscriptId}`, { headers: { authorization: env.ASSEMBLYAI_KEY } })).json();
       if (data.status === "completed" || data.status === "error") {
         return webhook({ uid, id, lockId: d.active, payload: { transcript_id: a.aaiTranscriptId, status: data.status, error: data.error } });
+      }
+      // Still not done a day after submit: AssemblyAI is not finishing it.
+      if (age(a.createdAt || a.updatedAt) > SUBMITTED_DEAD_MS) {
+        return webhook({ uid, id, lockId: d.active, payload: { transcript_id: a.aaiTranscriptId, status: "error", error: `not finished after 24 h (${data.status})` } });
       }
     }
     return null;
@@ -653,8 +684,15 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
       const out = lib.applyPatch(cur, body, ownerName, { revision: cur.current ? cur.current.rev : 0, now: clock().getTime() });
       return { doc: forcePrivate(out.meta, folders), result: { applied: out.applied } };
     });
+    const applied = r.result ? r.result.applied : [];
     const closed = await enforceShare(uid, id, r.doc);
-    return { applied: r.result ? r.result.applied : [], doc: project(closed ? (await docRef(uid, id).get()).data() : r.doc) };
+    if (closed) return { applied, doc: project((await docRef(uid, id).get()).data()) };
+    // A naming edit reaches the public share of the same transcript.
+    const d = r.doc;
+    if (d.shareId && d.current && !d.shareDirty && applied.some((k) => k.startsWith("speakerLabels."))) {
+      await pushShare(d.shareId, uid, { speakerMap: lib.publicSpeakerMap(d) }, d.current.rev);
+    }
+    return { applied, doc: project(d) };
   }
 
   // ---- reads ----
@@ -725,7 +763,9 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
 }
 
 function priorLabelsAfter(cur) {
-  const keep = Object.fromEntries(Object.entries(cur.speakerLabels || {}).filter(([, l]) => l && (l.by === "user" || l.by === "auto")));
+  // Only the owner's own names: a review's "auto" is not their word, and
+  // letting it cover an older revision dropped the name they did give.
+  const keep = Object.fromEntries(Object.entries(cur.speakerLabels || {}).filter(([, l]) => l && l.by === "user"));
   const older = [].concat(cur.priorLabels || []).filter((p) => p && p.rev !== cur.current.rev);
   const list = Object.keys(keep).length ? [{ rev: cur.current.rev, labels: keep }, ...older] : older;
   // An older transcript is kept only while it holds a name no newer one has.
