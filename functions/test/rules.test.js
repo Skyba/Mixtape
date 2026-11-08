@@ -97,12 +97,16 @@ test("firestore rules: closed share links read as nothing and cannot be written 
     await setDoc(doc(ctx.firestore(), "shares/live1"), { ownerUid: "u1", live: true });
     await setDoc(doc(ctx.firestore(), "shares/ended1"), { ownerUid: "u1", live: false });
     await setDoc(doc(ctx.firestore(), "shares/rev1"), { ownerUid: "u1", revoked: true });
+    await setDoc(doc(ctx.firestore(), "shares/oldEnded1"), { ownerUid: "u1", live: false, createdAt: new Date("2026-09-01T00:00:00Z") });
+    await setDoc(doc(ctx.firestore(), "shares/oldEnded2"), { ownerUid: "u1", live: false, createdAt: "2026-09-01T00:00:00.000Z" });
   });
   await assertSucceeds(getDoc(doc(anon.firestore(), "shares/open1")), "open link");
   await assertSucceeds(getDoc(doc(anon.firestore(), "shares/live1")), "live take in progress");
   await assertSucceeds(getDoc(doc(anon.firestore(), "shares/missing")), "missing reads as not found");
   await assertFails(getDoc(doc(anon.firestore(), "shares/ended1")), "live take ended");
   await assertFails(getDoc(doc(anon.firestore(), "shares/rev1")), "revoked");
+  await assertSucceeds(getDoc(doc(anon.firestore(), "shares/oldEnded1")), "ended before the cutoff (Timestamp)");
+  await assertSucceeds(getDoc(doc(anon.firestore(), "shares/oldEnded2")), "ended before the cutoff (string)");
   await assertFails(setDoc(doc(me.firestore(), "shares/rev1"), { liveText: "again" }, { merge: true }), "no writing into a revoked link");
   await assertFails(setDoc(doc(me.firestore(), "shares/open1"), { revoked: false, ownerUid: "u2" }, { merge: true }), "no handing a link to another uid");
   await assertSucceeds(setDoc(doc(me.firestore(), "shares/live1"), { liveText: "hi" }, { merge: true }), "live updates");

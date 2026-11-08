@@ -25,6 +25,12 @@ const OPS_KEPT = 50;
 // No take is longer than 10h (AssemblyAI's ceiling), so a live link still
 // open after this was orphaned by a crash.
 const LIVE_SHARE_MAX_MS = 12 * 60 * 60 * 1000;
+// Links made by the old live flow before this deploy are the owner's existing
+// public links: a finished live take no longer closes them. Mirrored in
+// firestore.rules. createdAt is a Timestamp or an ISO string.
+const LIVE_GRANDFATHER_BEFORE = Date.parse("2026-11-08T00:00:00Z");
+const createdMs = (v) => (v && typeof v.toMillis === "function" ? v.toMillis() : Date.parse(v || 0) || 0);
+const grandfathered = (share) => createdMs(share.createdAt) < LIVE_GRANDFATHER_BEFORE;
 // Live diarization scratch (_live/<epoch ms>/) is only read during the take.
 const LIVE_SCRATCH_MAX_MS = 24 * 60 * 60 * 1000;
 
@@ -105,15 +111,27 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
   // content-free tombstone rather than deleting it: firestore.rules refuse to
   // read or update a revoked share, so neither a phone's live updater nor a
   // stale publish can bring the transcript back under the same id.
+  // Any recording still naming the link loses it, stamped by the server, so
+  // the phone neither shows a dead link nor republishes under its id.
   async function revokeShare(uid, shareId, reason) {
     if (typeof shareId !== "string" || !shareId) return false;
-    return db.runTransaction(async (tx) => {
+    const ok = await db.runTransaction(async (tx) => {
       const s = await tx.get(shareRef(shareId));
       if (!s.exists || s.data().ownerUid !== uid) return false;
       if (s.data().revoked === true) return true;
       tx.set(shareRef(shareId), { ownerUid: uid, revoked: true, revokedAt: iso(), reason });
       return true;
     });
+    if (ok) for (const r of await referencing(uid, shareId)) {
+      const t = iso();
+      await mutate(uid, r.id, (cur) => (cur.shareId === shareId
+        ? { doc: { ...cur, shareId: null, shareDirty: null, fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), shareId: t } } }
+        : null));
+    }
+    return ok;
+  }
+  async function referencing(uid, shareId) {
+    return (await db.collection("recordings").doc(uid).collection("items").where("shareId", "==", shareId).get()).docs;
   }
   // A private or deleted recording has no public link, and a live (QR) link
   // closes once its take is saved: it was for the room, not for the final
@@ -124,14 +142,13 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
     let reason = doc.deletedAt ? "deleted" : isPrivateDoc(doc, await alwaysPrivateFolders()) ? "private" : null;
     if (!reason) {
       const s = await shareRef(shareId).get();
-      if (s.exists && s.data().ownerUid === uid && "live" in s.data()) reason = "live take ended";
+      const d = s.exists && s.data().ownerUid === uid ? s.data() : null;
+      // An already-closed link is cleared off the recording too.
+      if (d && d.revoked === true) reason = "revoked";
+      else if (d && "live" in d && !grandfathered(d)) reason = "live take ended";
     }
     if (!reason) return null;
     await revokeShare(uid, shareId, reason);
-    const t = iso();
-    await mutate(uid, id, (cur) => (cur.shareId === shareId
-      ? { doc: { ...cur, shareId: null, shareDirty: null, fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), shareId: t } } }
-      : null));
     return reason;
   }
 
@@ -607,7 +624,10 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
     const live = await db.collection("shares").where("live", "in", [true, false]).get();
     for (const s of live.docs) {
       const d = s.data();
-      if (d.live === true && clock().getTime() - Date.parse(d.createdAt || 0) < LIVE_SHARE_MAX_MS) continue;
+      if (d.live === false && grandfathered(d)) continue;
+      if (d.live === true && clock().getTime() - createdMs(d.createdAt) < LIVE_SHARE_MAX_MS) continue;
+      // An old open live link that a recording carries is a published link.
+      if (d.live === true && grandfathered(d) && (await referencing(d.ownerUid, s.id)).length) continue;
       if (await revokeShare(d.ownerUid, s.id, d.live === false ? "live take ended" : "live link expired")) shares++;
     }
     const [files] = await bucket.getFiles({ prefix: "recordings/", matchGlob: "recordings/*/_live/**" });

@@ -70,7 +70,9 @@ exports.createApiKey = onCall({ region: "us-central1" }, async (req) => {
     .doc(sha256(raw))
     .set({
       ownerUid: uid,
-      label: label || "API key",
+      // An app without the private switch can't show what it got; the
+      // label it lists says so.
+      label: (label || "API key") + (includePrivate === undefined ? " · skips private" : ""),
       scopes: valid,
       prefix: raw.slice(0, 16),
       hidePrivate: includePrivate !== true,

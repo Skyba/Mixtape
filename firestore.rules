@@ -9,7 +9,13 @@ service cloud.firestore {
     // (live == false). A closed link reads as nothing and cannot be written
     // back into; only the owner can delete its tombstone.
     match /shares/{shareId} {
-      function open(d) { return d.get('revoked', false) != true && d.get('live', true) != false; }
+      // Links made before the 2026-11-08 deploy stay open after their live
+      // take ended (canonical.js LIVE_GRANDFATHER_BEFORE).
+      function before(d) {
+        return (d.get('createdAt', null) is timestamp && d.createdAt < timestamp.date(2026, 11, 8))
+            || (d.get('createdAt', null) is string && d.createdAt < "2026-11-08T00:00:00Z");
+      }
+      function open(d) { return d.get('revoked', false) != true && (d.get('live', true) != false || before(d)); }
       allow get: if resource == null || open(resource.data);
       allow list: if false;
       allow create: if request.auth != null
