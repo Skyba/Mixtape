@@ -514,7 +514,7 @@ function makeReview({ db, bucket, env, now, fetchImpl, canon, runner }) {
     const ref = db.doc(`shares/${shareId}`);
     await db.runTransaction(async (tx) => {
       const s = await tx.get(ref);
-      if (!s.exists || s.data().ownerUid !== uid) return;
+      if (!s.exists || s.data().ownerUid !== uid || s.data().revoked === true) return;
       const at = s.data().transcriptRev;
       if (at != null && Number(at) !== rev) return;
       tx.update(ref, { speakerMap: speakerMap || null });

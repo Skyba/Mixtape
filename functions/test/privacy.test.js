@@ -108,7 +108,8 @@ test("marking private closes the link; publishing into it later does nothing", a
 
 test("a live link closes when its take is saved, and the sweep closes orphans", async () => {
   await reset();
-  const clock = { t: Date.now() };
+  // After the grandfather cutoff, so these links are new ones.
+  const clock = { t: Math.max(Date.now(), Date.parse("2026-11-20T12:00:00Z")) };
   const c = build(fakeAai(), clock);
   await db.doc("shares/live1").set({ ownerUid: UID, live: true, liveText: "hi", createdAt: new Date(clock.t).toISOString() });
   await c.createRecording(UID, { id: ID, folder: "Work", shareId: "live1" });
@@ -181,4 +182,34 @@ test("only the owner's uploads are transcribed", async () => {
   assert.deepEqual(await c.audioFinalized(UID, ID, gen), { stub: true });
   assert.equal((await c.maybeStart(UID, ID)).started, false);
   assert.equal(aai.state.posts.length, 0, "nothing paid for");
+});
+
+test("links made before the cutoff: ended live links stay open, unreferenced old live ones close, revoking clears the recording", async () => {
+  await reset();
+  const clock = { t: Date.parse("2026-11-20T12:00:00Z") };
+  const c = build(fakeAai(), clock);
+  const ts = (iso) => admin.firestore.Timestamp.fromDate(new Date(iso));
+  await db.doc("shares/oldEnded").set({ ownerUid: UID, live: false, createdAt: ts("2026-09-01T10:00:00Z"), utterances: [] });
+  await db.doc("shares/oldOpenUsed").set({ ownerUid: UID, live: true, createdAt: ts("2026-07-01T10:00:00Z") });
+  await db.doc("shares/oldOpenOrphan").set({ ownerUid: UID, live: true, createdAt: ts("2026-07-02T10:00:00Z") });
+  await db.doc("shares/newEnded").set({ ownerUid: UID, live: false, createdAt: "2026-11-19T10:00:00.000Z" });
+  const ID2 = "2026-07-01T10:00:00.000Z", ID3 = "2026-11-19T10:00:00.000Z";
+  await c.createRecording(UID, { id: ID, folder: "Work", shareId: "oldEnded" });
+  await c.createRecording(UID, { id: ID2, folder: "Work", shareId: "oldOpenUsed" });
+  await c.createRecording(UID, { id: ID3, folder: "Work" });
+  await c.docRef(UID, ID3).update({ shareId: "newEnded" });
+  assert.equal((await docOf()).shareId, "oldEnded", "an existing public link survives the create");
+  await c.patch(UID, ID, { note: "x", fieldsUpdatedAt: { note: new Date(clock.t).toISOString() } });
+  assert.equal((await docOf()).shareId, "oldEnded", "and a patch");
+  await c.sweepLive();
+  assert.equal((await share("oldEnded")).revoked, undefined);
+  assert.equal((await share("oldOpenUsed")).revoked, undefined, "an old open link a recording carries stays");
+  assert.equal((await share("oldOpenOrphan")).revoked, true);
+  assert.equal((await share("newEnded")).revoked, true);
+  assert.equal((await docOf(ID3)).shareId, null, "the sweep clears the recording naming a link it closed");
+
+  // A recording still naming an already-revoked link loses it on its next write.
+  await c.docRef(UID, ID3).update({ shareId: "newEnded" });
+  await c.patch(UID, ID3, { note: "y", fieldsUpdatedAt: { note: new Date(clock.t).toISOString() } });
+  assert.equal((await docOf(ID3)).shareId, null);
 });

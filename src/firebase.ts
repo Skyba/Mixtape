@@ -27,6 +27,7 @@ import {
   doc,
   setDoc,
   deleteDoc,
+  getDoc,
   Firestore,
 } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
@@ -306,7 +307,19 @@ export async function publishShare(
   utterances: Utterance[]
 ): Promise<{ shareId: string; url: string }> {
   await ensureSignedIn();
-  const shareId = rec.shareId || randomId();
+  // A link the server closed (private, deleted, ended live take) can't be
+  // read or written again; publishing makes a new one.
+  let shareId = rec.shareId;
+  if (shareId) {
+    try {
+      const s = await getDoc(doc(db(), "shares", shareId));
+      if (s.exists() && (s.data() as any).revoked) shareId = undefined;
+    } catch (e: any) {
+      if (e?.code === "permission-denied") shareId = undefined;
+      else throw e;
+    }
+  }
+  shareId = shareId || randomId();
   await setDoc(doc(db(), "shares", shareId), {
     ownerUid: currentUid(),
     base: rec.base,
