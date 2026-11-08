@@ -87,3 +87,27 @@ test("firestore rules: items owner-readable, never client-writable; phase readab
   await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), "config/migration")));
   await env.cleanup();
 });
+
+test("firestore rules: closed share links read as nothing and cannot be written back", async () => {
+  const env = await envWith("storage.rules");
+  const me = env.authenticatedContext("u1");
+  const anon = env.unauthenticatedContext();
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), "shares/open1"), { ownerUid: "u1", utterances: [] });
+    await setDoc(doc(ctx.firestore(), "shares/live1"), { ownerUid: "u1", live: true });
+    await setDoc(doc(ctx.firestore(), "shares/ended1"), { ownerUid: "u1", live: false });
+    await setDoc(doc(ctx.firestore(), "shares/rev1"), { ownerUid: "u1", revoked: true });
+  });
+  await assertSucceeds(getDoc(doc(anon.firestore(), "shares/open1")), "open link");
+  await assertSucceeds(getDoc(doc(anon.firestore(), "shares/live1")), "live take in progress");
+  await assertSucceeds(getDoc(doc(anon.firestore(), "shares/missing")), "missing reads as not found");
+  await assertFails(getDoc(doc(anon.firestore(), "shares/ended1")), "live take ended");
+  await assertFails(getDoc(doc(anon.firestore(), "shares/rev1")), "revoked");
+  await assertFails(setDoc(doc(me.firestore(), "shares/rev1"), { liveText: "again" }, { merge: true }), "no writing into a revoked link");
+  await assertFails(setDoc(doc(me.firestore(), "shares/open1"), { revoked: false, ownerUid: "u2" }, { merge: true }), "no handing a link to another uid");
+  await assertSucceeds(setDoc(doc(me.firestore(), "shares/live1"), { liveText: "hi" }, { merge: true }), "live updates");
+  await assertFails(setDoc(doc(me.firestore(), "shares/new1"), { liveText: "x" }), "create needs ownerUid");
+  await assertFails(getDoc(doc(me.firestore(), "askQuota/2026-11-07")), "ask quota is server-only");
+  await assertFails(getDoc(doc(me.firestore(), "config/privacy")), "folder names are server-only");
+  await env.cleanup();
+});

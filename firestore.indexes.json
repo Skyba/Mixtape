@@ -45,6 +45,20 @@
     },
     {
       "collectionGroup": "items",
+      "fieldPath": "purgePending",
+      "indexes": [
+        {
+          "queryScope": "COLLECTION_GROUP",
+          "order": "ASCENDING"
+        },
+        {
+          "queryScope": "COLLECTION",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "items",
       "fieldPath": "deletedAt",
       "indexes": [
         {

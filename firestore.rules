@@ -4,13 +4,29 @@ service cloud.firestore {
     // Public share docs: anyone WITH THE LINK (the exact id) can read one — but
     // `list`/query is denied so the collection can't be enumerated. (`read` alone
     // would grant both get AND list, exposing every share's transcript.)
+    // A link is closed when the server revoked it (its recording went private
+    // or was deleted) or when it is a live link whose take has ended
+    // (live == false). A closed link reads as nothing and cannot be written
+    // back into; only the owner can delete its tombstone.
     match /shares/{shareId} {
-      allow get: if true;
+      function open(d) { return d.get('revoked', false) != true && d.get('live', true) != false; }
+      allow get: if resource == null || open(resource.data);
       allow list: if false;
       allow create: if request.auth != null
-                    && request.resource.data.ownerUid == request.auth.uid;
-      allow update, delete: if request.auth != null
+                    && request.resource.data.ownerUid == request.auth.uid
+                    && request.resource.data.get('revoked', false) != true;
+      allow update: if request.auth != null
+                    && resource.data.ownerUid == request.auth.uid
+                    && resource.data.get('revoked', false) != true
+                    && request.resource.data.ownerUid == request.auth.uid
+                    && request.resource.data.get('revoked', false) != true;
+      allow delete: if request.auth != null
                     && resource.data.ownerUid == request.auth.uid;
+    }
+
+    // Ask's daily budget across all shares; Cloud Functions only.
+    match /askQuota/{day} {
+      allow read, write: if false;
     }
 
     // API keys are managed only by Cloud Functions (admin); no client access.
@@ -25,8 +41,9 @@ service cloud.firestore {
 
     // Migration phase: readable by any signed-in client (the phone shows
     // "migration in progress"), set only by the migrator with admin rights.
+    // config/privacy (the always-private folder names) is server-only.
     match /config/{doc} {
-      allow read: if request.auth != null;
+      allow read: if request.auth != null && doc != "privacy";
       allow write: if false;
     }
 

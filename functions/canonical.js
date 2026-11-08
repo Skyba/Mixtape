@@ -21,6 +21,11 @@ const CLAIMED_STALE_MS = 10 * 60 * 1000;
 const SUBMITTED_STALE_MS = 2 * 60 * 60 * 1000;
 const ATTEMPTS_KEPT = 20;
 const OPS_KEPT = 50;
+// No take is longer than 10h (AssemblyAI's ceiling), so a live link still
+// open after this was orphaned by a crash.
+const LIVE_SHARE_MAX_MS = 12 * 60 * 60 * 1000;
+// Live diarization scratch (_live/<epoch ms>/) is only read during the take.
+const LIVE_SCRATCH_MAX_MS = 24 * 60 * 60 * 1000;
 
 // frozen: admitted legacy jobs may still finish; sealed: nothing legacy is
 // admitted at all (the migrator copies under sealed); canonical: cut over.
@@ -44,13 +49,17 @@ const ATTEMPT_NEXT = {
 };
 const canMove = (from, to) => (ATTEMPT_NEXT[from] || []).includes(to);
 
-function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
+function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
   const sign = signer || ((file, opts) => file.getSignedUrl(opts));
+  // Who may spend the AssemblyAI/Anthropic budget; index.js passes the owner
+  // check, tests run as owner.
+  const ownerOk = isOwner || (async () => true);
   const clock = now || (() => new Date());
   const iso = () => clock().toISOString();
   const doFetch = fetchImpl || fetch;
   const docRef = (uid, id) => db.collection("recordings").doc(uid).collection("items").doc(id);
   const phaseRef = () => db.collection("config").doc("migration");
+  const shareRef = (shareId) => db.collection("shares").doc(shareId);
   const blob = (uid, id, name) => bucket.file(`rec2/${uid}/${id}/${name}`);
   const audioName = "audio.m4a";
   const txtName = (rev) => `transcript-r${rev}.txt`;
@@ -68,6 +77,61 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
   async function setPhase(phase, by) {
     if (!PHASES.includes(phase)) throw new CanonError("invalid-argument", "bad phase");
     await phaseRef().set({ phase, changedAt: iso(), by: by || "unknown" });
+  }
+
+  // Folders whose recordings are private whatever the switch says (routes.json
+  // defaults.private, mirrored as alwaysPrivate in placement.local.ts). The
+  // list is personal, so it lives in config/privacy, written by
+  // tools/backfill-always-private.js, not in this public repo.
+  async function alwaysPrivateFolders() {
+    const s = await db.collection("config").doc("privacy").get();
+    const list = s.exists && Array.isArray(s.data().alwaysPrivateFolders) ? s.data().alwaysPrivateFolders : [];
+    return list.map((f) => String(f).toLowerCase());
+  }
+  // Privacy only goes up from a folder's default: moving into such a folder,
+  // or a newer-stamped private:false while there, still ends private. The
+  // stamp is the server's, after any client stamp, so every merge accepts it.
+  function forcePrivate(doc, folders) {
+    if (doc.private === true || !folders.includes(String(doc.folder || "").toLowerCase())) return doc;
+    const fu = doc.fieldsUpdatedAt || {};
+    const at = new Date(Math.max(clock().getTime(), Date.parse(fu.private || 0) + 1)).toISOString();
+    return { ...doc, private: true, fieldsUpdatedAt: { ...fu, private: at } };
+  }
+  const isPrivateDoc = (doc, folders) => doc.private === true || folders.includes(String(doc.folder || "").toLowerCase());
+
+  // ---- public share links ----
+  // A share doc is readable by anyone holding its id. Closing one leaves a
+  // content-free tombstone rather than deleting it: firestore.rules refuse to
+  // read or update a revoked share, so neither a phone's live updater nor a
+  // stale publish can bring the transcript back under the same id.
+  async function revokeShare(uid, shareId, reason) {
+    if (typeof shareId !== "string" || !shareId) return false;
+    return db.runTransaction(async (tx) => {
+      const s = await tx.get(shareRef(shareId));
+      if (!s.exists || s.data().ownerUid !== uid) return false;
+      if (s.data().revoked === true) return true;
+      tx.set(shareRef(shareId), { ownerUid: uid, revoked: true, revokedAt: iso(), reason });
+      return true;
+    });
+  }
+  // A private or deleted recording has no public link, and a live (QR) link
+  // closes once its take is saved: it was for the room, not for the final
+  // named transcript. Runs after every write that can change either.
+  async function enforceShare(uid, id, doc) {
+    const shareId = doc && doc.shareId;
+    if (!shareId) return null;
+    let reason = doc.deletedAt ? "deleted" : isPrivateDoc(doc, await alwaysPrivateFolders()) ? "private" : null;
+    if (!reason) {
+      const s = await shareRef(shareId).get();
+      if (s.exists && s.data().ownerUid === uid && "live" in s.data()) reason = "live take ended";
+    }
+    if (!reason) return null;
+    await revokeShare(uid, shareId, reason);
+    const t = iso();
+    await mutate(uid, id, (cur) => (cur.shareId === shareId
+      ? { doc: { ...cur, shareId: null, shareDirty: null, fieldsUpdatedAt: { ...(cur.fieldsUpdatedAt || {}), shareId: t } } }
+      : null));
+    return reason;
   }
 
   // Every mutation: read phase + doc in one transaction, require canonical,
@@ -124,18 +188,20 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       if (lib.CLIENT_FIELDS.includes(k) && !lib.validField(k, v)) throw new CanonError("invalid-argument", `bad value for ${k}`);
       fields[k] = v;
     }
+    const folders = await alwaysPrivateFolders();
     const r = await mutate(uid, id, (cur) => {
-      if (!cur) return { doc: newDoc(uid, id, fields), result: { created: true } };
+      if (!cur) return { doc: forcePrivate(newDoc(uid, id, fields), folders), result: { created: true } };
       if (cur.deletedAt) throw new CanonError("failed-precondition", "tombstoned");
       if (cur.stub) {
         // Audio landed before the create: adopt the stub, keep its audio and
         // anything the pipeline already did with it.
         const { stub, ...keep } = cur;
-        return { doc: { ...newDoc(uid, id, fields), ...keep, ...fields }, result: { created: true, adoptedStub: true } };
+        return { doc: forcePrivate({ ...newDoc(uid, id, fields), ...keep, ...fields }, folders), result: { created: true, adoptedStub: true } };
       }
       return { doc: cur, result: { created: false } };
     }, { opId, allowMissing: true });
-    return { ...r.result, doc: project(r.doc) };
+    const closed = await enforceShare(uid, id, r.doc);
+    return { ...r.result, doc: project(closed ? await docRef(uid, id).get().then((s) => s.data()) : r.doc) };
   }
 
   // ---- audio finalize ----
@@ -167,6 +233,8 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
 
   // ---- maybeStart: the single owner of revision allocation ----
   async function maybeStart(uid, id, { rerunForEdit = false } = {}) {
+    // Every paid job starts here, including audio uploaded without a create.
+    if (!(await ownerOk(uid))) return { started: false, refused: "not the owner" };
     // The claim is whatever the COMMITTED transaction returned: a body that
     // ran, lost the conflict and re-ran against someone else's claim returns
     // null, and nothing is submitted here.
@@ -257,6 +325,9 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
     const snap = await docRef(uid, id).get();
     if (!snap.exists) return { note: "unknown recording" };
     const doc = snap.data();
+    // A job that finishes after a delete writes nothing and pays for no
+    // post-processing.
+    if (doc.deletedAt) return { note: "deleted; ignored" };
     const a = doc.attempts && doc.attempts[lockId];
     if (!a) return { note: "unknown lock; recorded, ignored" };
     if (doc.current && doc.current.lockId === lockId) return { note: "duplicate after publish" };
@@ -381,15 +452,34 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
     const snap = await docRef(uid, id).get();
     const d = snap.data();
     if (!d || !d.shareDirty || !d.current) return false;
+    // Never publish into a link that must be closed; closing clears the marker.
+    if (await enforceShare(uid, id, d)) return true;
     const post = await readOwnArtifact(uid, id, d.current.post.name, { lockId: d.current.lockId, aaiTranscriptId: d.current.aaiTranscriptId });
     if (!post) return false;
-    const ok = await lib.updateShare(db, d.shareDirty.shareId, uid, {
+    const ok = await pushShare(d.shareDirty.shareId, uid, {
       utterances: post.utterances || [], speakerMap: d.speakerMap, topic: d.topic,
       durationSeconds: d.durationSeconds || 0, speakers: d.speakers, language: d.language || "",
     }, d.current.rev);
     if (!ok) return false;
     await mutate(uid, id, (cur) => (cur.shareDirty && cur.shareDirty.rev === d.shareDirty.rev ? { doc: { ...cur, shareDirty: null } } : null));
     return true;
+  }
+
+  // lib.updateShare, plus: a revoked share stays a tombstone.
+  async function pushShare(shareId, uid, fields, rev) {
+    try {
+      return await db.runTransaction(async (tx) => {
+        const s = await tx.get(shareRef(shareId));
+        if (!s.exists || s.data().ownerUid !== uid) { console.warn(`share not owned by ${uid}`); return false; }
+        if (s.data().revoked === true) return true;
+        if (Number(s.data().transcriptRev || 0) > rev) return true; // newer already there
+        tx.set(shareRef(shareId), { ...fields, transcriptRev: rev }, { merge: true });
+        return true;
+      });
+    } catch (e) {
+      console.error("pushShare", String((e && e.message) || e));
+      return false;
+    }
   }
 
   // Reads an artifact only if it carries this attempt's provenance.
@@ -467,7 +557,36 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       const d = s.data();
       try { out.push([d.id, await sweepOne(d.uid, d.id)]); } catch (e) { out.push([d.id, String((e && e.message) || e)]); }
     }
+    // Guarded like the live sweep: cleanup must never stop the transcription
+    // repair above from running (a missing index would throw here).
+    try {
+      const purges = await db.collectionGroup("items").where("purgePending", "==", true).get();
+      for (const s of purges.docs) { const d = s.data(); try { await purge(d.uid, d.id); out.push([d.id, "purged"]); } catch (e) { out.push([d.id, "purge: " + String((e && e.message) || e)]); } }
+    } catch (e) { out.push(["purge", String((e && e.message) || e)]); }
+    try { out.push(["live", await sweepLive()]); } catch (e) { out.push(["live", String((e && e.message) || e)]); }
     return { swept: out };
+  }
+
+  // Closes live links a crash orphaned (the phone keeps their id only in
+  // memory) or that ended without a saved take, and deletes live diarization
+  // scratch audio once its take is long over: each pass's merged.m4a was
+  // handed out as a download URL that works for as long as the object exists.
+  async function sweepLive() {
+    let shares = 0, scratch = 0;
+    const live = await db.collection("shares").where("live", "in", [true, false]).get();
+    for (const s of live.docs) {
+      const d = s.data();
+      if (d.live === true && clock().getTime() - Date.parse(d.createdAt || 0) < LIVE_SHARE_MAX_MS) continue;
+      if (await revokeShare(d.ownerUid, s.id, d.live === false ? "live take ended" : "live link expired")) shares++;
+    }
+    const [files] = await bucket.getFiles({ prefix: "recordings/", matchGlob: "recordings/*/_live/**" });
+    for (const f of files) {
+      if (!/^recordings\/[^/]+\/_live\/\d+\//.test(f.name)) continue;
+      if (clock().getTime() - Date.parse(f.metadata.updated || f.metadata.timeCreated || 0) < LIVE_SCRATCH_MAX_MS) continue;
+      await f.delete().catch(() => {});
+      scratch++;
+    }
+    return { shares, scratch };
   }
 
   // ---- retranscribe / delete / patch ----
@@ -496,18 +615,46 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
       if (cur.active && attempts[cur.active] && canMove(attempts[cur.active].state, "superseded")) {
         attempts[cur.active] = { ...attempts[cur.active], state: "superseded", updatedAt: t };
       }
-      return { doc: { ...cur, attempts, active: null, status: "none", deletedAt: t }, result: { deletedAt: t } };
+      return { doc: { ...cur, attempts, active: null, status: "none", deletedAt: t, purgePending: true }, result: { deletedAt: t } };
     }, { opId });
+    // The tombstone is committed, so nothing can recreate or republish the
+    // recording; what follows is cleanup, which the sweep retries.
+    await purge(uid, id).catch((e) => console.error("purge", id, String((e && e.message) || e)));
     return r.result;
   }
 
+  // Deletes everything a tombstoned recording left: its public link, every
+  // blob under rec2/<uid>/<id>/ (audio, transcripts, utterances, post, the
+  // per-recording voice embeddings voices-r*.json), its live segments, and
+  // every content field of the document. Enrolled voice samples
+  // (recordings/<uid>/_voiceprint/) are shared by all recordings and are not
+  // touched. The tombstone keeps only what blocks a re-create and makes the
+  // delete replay-safe.
+  async function purge(uid, id) {
+    const snap = await docRef(uid, id).get();
+    if (!snap.exists || !snap.data().deletedAt) return false;
+    const d = snap.data();
+    if (d.shareId) await revokeShare(uid, d.shareId, "deleted");
+    for (const prefix of [`rec2/${uid}/${id}/`, `recordings/${uid}/_live/${id}/`]) {
+      const [files] = await bucket.getFiles({ prefix });
+      await Promise.all(files.map((f) => f.delete().catch((e) => { if (e.code !== 404) throw e; })));
+    }
+    await mutate(uid, id, (cur) => (cur.deletedAt
+      ? { doc: { id, uid, schema: cur.schema || 2, deletedAt: cur.deletedAt, status: "none", rev: cur.rev || 0, active: null, current: null, audio: null,
+          attempts: {}, ops: cur.ops || {}, purge: cur.purge || null, createdAt: cur.createdAt || null, purgePending: null, purgedAt: iso() } }
+      : null));
+    return true;
+  }
+
   async function patch(uid, id, body, ownerName) {
+    const folders = await alwaysPrivateFolders();
     const r = await mutate(uid, id, (cur) => {
       if (cur.deletedAt) throw new CanonError("failed-precondition", "tombstoned");
       const out = lib.applyPatch(cur, body, ownerName, { revision: cur.current ? cur.current.rev : 0, now: clock().getTime() });
-      return { doc: out.meta, result: { applied: out.applied } };
+      return { doc: forcePrivate(out.meta, folders), result: { applied: out.applied } };
     });
-    return { applied: r.result ? r.result.applied : [], doc: project(r.doc) };
+    const closed = await enforceShare(uid, id, r.doc);
+    return { applied: r.result ? r.result.applied : [], doc: project(closed ? (await docRef(uid, id).get()).data() : r.doc) };
   }
 
   // ---- reads ----
@@ -571,7 +718,8 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer }) {
 
   return {
     ID_RE, CanonError, readPhase, setPhase, createRecording, audioFinalized, maybeStart, webhook, recordDeferredWebhook, syncShare, sweepOne, sweepAll,
-    retranscribe, deleteRecording, patch, get, list, readArtifact, audioUrl, audioDescriptor, project, docRef, blob,
+    retranscribe, deleteRecording, purge, patch, get, list, readArtifact, audioUrl, audioDescriptor, project, docRef, blob,
+    alwaysPrivateFolders, isPrivateDoc, revokeShare, enforceShare, sweepLive,
     _internal: { canMove, mutate },
   };
 }

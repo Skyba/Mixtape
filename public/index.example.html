@@ -92,7 +92,9 @@ function load() {
       if (!snap.exists()) { document.getElementById("loading").textContent = "This link is no longer available."; return; }
       render(snap.data());
     },
-    () => { document.getElementById("loading").textContent = "Error loading."; }
+    // A closed link (made private, deleted, or a live take that ended) is
+    // refused by the rules, not missing.
+    (e) => { document.getElementById("loading").textContent = e && e.code === "permission-denied" ? "This link is no longer available." : "Error loading."; }
   );
 }
 
