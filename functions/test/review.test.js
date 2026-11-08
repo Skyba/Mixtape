@@ -150,3 +150,13 @@ test("a voice the owner left unnamed is not contradicted by a voice match", () =
   assert.strictEqual(r.flag, null);
   assert.deepStrictEqual(r.labels, {});
 });
+
+test("with names listed, a voice that sounds like someone not listed is red, never a label", () => {
+  const r = run({
+    doc: doc({ speakers: ["Basile", "Danny", "Logina"], speakerLabels: { A: { name: "Basile", by: "aai" }, B: { name: "Danny", by: "aai" } } }),
+    keys: ["A", "B", "C"], seconds: { A: 600, B: 500, C: 400 },
+    voiceBy: { A: V("Basile"), B: V("Danny"), C: V("Erica", 0.42) },
+  });
+  assert.strictEqual(r.labels.C, undefined);
+  assert.match(r.flag, /C: the voice sounds like Erica, who is not among the names you gave/);
+});

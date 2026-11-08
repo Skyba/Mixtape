@@ -118,3 +118,35 @@ test("re-run history keeps an old transcript while it is the only one with a nam
   const names = new Set(priorLabelsAfter(cur).flatMap((p) => Object.values(p.labels).map((l) => l.name)));
   assert.deepEqual([...names].sort(), ["Alice", "Bob"]);
 });
+
+test("the attempt counts when it starts, so a review killed by the timeout is still counted", async () => {
+  await seed();
+  let during;
+  const runner = async (...a) => { during = (await ref.get()).data().reviewFailures; return decided()(...a); };
+  await makeReview({ db, bucket, env: {}, canon, runner }).reviewOne(UID, ID);
+  assert.equal(during, 1);
+  assert.equal((await ref.get()).data().reviewFailures, 0);
+});
+
+test("failures of an earlier revision do not stop the sweep reviewing a new one", async () => {
+  await seed({ reviewFailures: 3, reviewFailedRev: 1 });
+  const out = await makeReview({ db, bucket, env: {}, canon, runner: decided() }).sweep();
+  assert.ok(out.some(([id, r]) => id === ID && r.rev === 2));
+  await seed({ reviewFailures: 3, reviewFailedRev: 2 });
+  const again = await makeReview({ db, bucket, env: {}, canon, runner: decided() }).sweep();
+  assert.ok(!again.some(([id]) => id === ID));
+});
+
+test("a published share gets the names the review settled", async () => {
+  const share = db.doc("shares/reviewShare1");
+  await share.set({ ownerUid: UID, transcriptRev: 2, speakerMap: { A: "Speaker A" } });
+  await seed({ shareId: "reviewShare1" });
+  await makeReview({ db, bucket, env: {}, canon, runner: decided() }).reviewOne(UID, ID);
+  assert.deepEqual((await share.get()).data().speakerMap, { A: "Basile", B: "Erica" });
+});
+
+test("a failed re-run does not block the review of the transcript still current", async () => {
+  await seed({ status: "failed" });
+  const out = await makeReview({ db, bucket, env: {}, canon, runner: decided() }).reviewOne(UID, ID);
+  assert.equal(out.rev, 2);
+});

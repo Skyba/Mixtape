@@ -1,9 +1,10 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { callFunction, isFirebaseConfigured, isSignedIn, uploadRecording } from "./firebase";
+import { doc, getDocFromServer } from "firebase/firestore";
+import { currentUid, db, isFirebaseConfigured, isSignedIn, uploadRecording } from "./firebase";
 import { listRecordings, writeMeta, updateMeta, isLayoutV2 } from "./recordings";
 import { logEvent } from "./log";
-import { mergeNewest } from "./attribution";
-import { isCanonical, isCanonicalSync, fromDoc } from "./cloud";
+import { mergeNewest, revertTo } from "./attribution";
+import { isCanonical, isCanonicalSync, fromDoc, callAwake } from "./cloud";
 import type { Recording } from "./types";
 
 /**
@@ -106,10 +107,49 @@ export async function pushMeta(next: Recording, patch: Record<string, unknown>, 
   await sendEdits(next);
 }
 
-/** How many edits are waiting, and how many the server has refused. */
-export async function outboxStatus(): Promise<{ pending: number; stuck: number }> {
-  const items = await load();
+/** How many edits are waiting, and how many the server has refused — for one
+ *  recording when given, else for all. */
+export async function outboxStatus(recordingId?: string): Promise<{ pending: number; stuck: number }> {
+  const items = (await load()).filter((x) => !recordingId || x.recordingId === recordingId);
   return { pending: items.filter((x) => !x.stuck).length, stuck: items.filter((x) => x.stuck).length };
+}
+
+/** Screens learn that an edit was sent or refused. */
+const listeners = new Set<() => void>();
+export function onOutboxChange(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
+const notify = () => { for (const cb of listeners) { try { cb(); } catch {} } };
+
+/** Edits of one recording the server refused, with its reason. The phone
+ *  already shows them as done, so a screen must say they are not. */
+export async function refusedEdits(recordingId: string): Promise<{ fields: string[]; reason: string }[]> {
+  return (await load()).filter((x) => x.stuck && x.recordingId === recordingId)
+    .map((x) => ({ fields: Object.keys(x.patch), reason: x.lastError ?? "" }));
+}
+/** Sends the refused edits once more (the cause may be gone). */
+export async function retryRefused(recordingId: string): Promise<number> {
+  await mutateQueue((items) => { for (const it of items) if (it.stuck && it.recordingId === recordingId) { it.stuck = false; it.attempts = 0; } });
+  return replayOutbox();
+}
+/**
+ * Gives up the refused edits: drops them and puts back on the phone what the
+ * server has for those fields, so the screen stops showing what never landed.
+ * Needs the server's copy; throws (and keeps the edits) without one.
+ */
+export async function discardRefused(recordingId: string): Promise<void> {
+  const s = await getDocFromServer(doc(db(), "recordings", currentUid(), "items", recordingId));
+  if (!s.exists()) throw new Error("recording not found in the cloud");
+  const server = fromDoc(s.data());
+  const dropped = await mutateQueue((items) => {
+    const out: OutboxItem[] = [];
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].stuck && items[i].recordingId === recordingId) out.push(...items.splice(i, 1));
+    return out;
+  });
+  const keys = dropped.flatMap((it) => Object.keys(it.patch));
+  if (keys.length) await updateMeta(recordingId, (cur) => revertTo(cur, server, keys));
+  notify();
 }
 
 let inFlight: Promise<number> | null = null;
@@ -172,7 +212,7 @@ async function doReplay(): Promise<number> {
     const sentKeys = new Set(group.map((g) => `${g.key}@${stampOf(g)}`));
     const matches = (x: OutboxItem) => sentKeys.has(`${x.key}@${stampOf(x)}`);
     try {
-      const res = await callFunction<{ meta?: any }>(
+      const res = await callAwake<{ meta?: any }>(
         "patchMeta",
         canonical ? { id: recordingId, patch: body } : { folder, base, patch: body }
       );
@@ -211,5 +251,6 @@ async function doReplay(): Promise<number> {
       logEvent(`outbox ${permanent ? "stuck" : "retry"} ${base}: ${msg.slice(0, 120)}`);
     }
   }
+  notify();
   return sent;
 }

@@ -6,7 +6,7 @@ import { placeLabel } from "../place";
 import { Modal } from "react-native";
 import { downloadUrlForPath } from "../firebase";
 import { iconOf, useFolderIcons } from "../folderIcons";
-import { enqueue, replayOutbox, outboxStatus } from "../outbox";
+import { enqueue, replayOutbox, outboxStatus, refusedEdits, retryRefused, discardRefused, onOutboxChange } from "../outbox";
 import {
   ActivityIndicator,
   Alert,
@@ -57,7 +57,7 @@ import {
   shareUrl,
 } from "../firebase";
 import { transcribeExisting } from "../recordingFlow";
-import { isCanonical, deleteRemote, onCloudChange, getPeople, Person } from "../cloud";
+import { isCanonical, deleteRemote, onCloudChange, getPeople, Person, updateShareNames } from "../cloud";
 import { readMeta, commitMeta } from "../recordings";
 import { remoteCanonicalPath } from "../firebase";
 import { pushMeta, recordEdit, sendEdits } from "../outbox";
@@ -155,20 +155,37 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   const [customOpen, setCustomOpen] = useState(false);
   const insets = useSafeAreaInsets();
 
-  const done = rec.transcriptStatus === "done";
+  // A re-run that failed leaves the published transcript current: it stays
+  // usable, with a note, instead of disappearing behind "error".
+  const failedRerun = rec.transcriptStatus === "error" && !!rec.transcriptRevision;
+  const done = rec.transcriptStatus === "done" || failedRerun;
   const pending =
     rec.transcriptStatus === "pending" || rec.transcriptStatus === "processing";
+  // Edits the server refused: the phone shows them, the cloud does not have them.
+  const [refused, setRefused] = useState<{ fields: string[]; reason: string }[]>([]);
+  useEffect(() => {
+    const load = () => { refusedEdits(rec.id).then(setRefused).catch(() => {}); };
+    load();
+    return onOutboxChange(load);
+  }, [rec.id]);
   const canUseTranscript = done && !isRemote && !!transcript;
   // A speaker's name everywhere on this screen: its label first (whoever set
   // it), then the legacy map, then the key itself.
   const nameOf = (L: string) => rec.speakerLabels?.[L]?.name || nameForSpeaker(L, rec.speakers, rec.speakerMap);
   // What leaves the phone (copy, share, public link) carries the names as they
-  // stand now: confirmed labels over the map the stored .txt was rendered with,
-  // which lags every confirmation until a re-render.
-  function liveMap(): Record<string, string> | undefined {
-    const map: Record<string, string> = { ...(rec.speakerMap ?? {}) };
-    for (const [k, l] of Object.entries(rec.speakerLabels ?? {})) if (l && settled(l)) map[k] = l.name;
+  // stand now, from the labels rather than the map the stored .txt was
+  // rendered with. A single model guess or a voice-only match is not sent out
+  // as a name until confirmed. Mirrors publicSpeakerMap in functions/lib.js.
+  function liveMap(r: Recording = rec): Record<string, string> | undefined {
+    const labels = r.speakerLabels ?? {};
+    if (!Object.keys(labels).length) return r.speakerMap;
+    const map: Record<string, string> = {};
+    for (const [k, l] of Object.entries(labels)) if (l && (settled(l) || ["ai-review", "channel", "aai"].includes(l.by))) map[k] = l.name;
     return Object.keys(map).length ? map : undefined;
+  }
+  /** A naming edit reaches the public link too, not only the phone. */
+  function shareNames(r: Recording) {
+    if (r.shareId && isFirebaseConfigured && isSignedIn()) updateShareNames(r.shareId, shownRev, liveMap(r)).catch(() => {});
   }
   const liveText = () => (utterances?.length ? renderTranscript(utterances, rec.speakers, liveMap()) : transcript);
 
@@ -359,9 +376,11 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     await writeTranscript({ ...next, transcriptLocalRev: loadedRev }, nextText);
     if (isFirebaseConfigured && isSignedIn()) {
       // Legacy: the re-rendered transcript text goes up as a file. Canonical:
-      // the server renders from the labels; nothing but the patch is sent.
+      // the patch is sent; the stored transcript-rN.txt keeps the names it was
+      // published with, and the public link is updated here.
       if (!(await isCanonical())) uploadRecording(next, { skipAudio: !!next.mergedInCloud }).catch(() => {});
       replayOutbox().catch(() => {});
+      shareNames(next);
     }
   }
 
@@ -406,6 +425,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     try {
       const next = await commitMeta(rec, (cur) => adopt(sameRev(cur), preview, keys));
       setRec(next);
+      shareNames(next);
     } catch {
       Alert.alert("New transcript arrived", "Check the speakers on the new one.");
       return;
@@ -449,11 +469,17 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     setRespeak(null);
     await saveSpeakers(names);
     await replayOutbox().catch(() => {});
-    const q = await outboxStatus();
-    if (q.pending || q.stuck) {
-      // Restarting now would re-run with the old count. Once the edit lands,
-      // the server re-runs on its own after the current job.
-      Alert.alert("Not sent yet", "The new speaker count is saved on the phone and will re-run the transcription once it reaches the cloud.");
+    // Only this recording's edits matter here; another recording's unsent
+    // edit says nothing about this one.
+    const q = await outboxStatus(rec.id);
+    if (q.stuck) {
+      Alert.alert("Not saved in the cloud", "The cloud refused an edit to this recording (shown at the top), so restarting now would use the old count. Send it again or undo it first.");
+      return;
+    }
+    if (q.pending) {
+      // Restarting now would re-run with the old count, and an edit that
+      // lands after the job has finished does not restart anything by itself.
+      Alert.alert("Not sent yet", "The new speaker count is saved on the phone but has not reached the cloud. Restart again once you are online.");
       return;
     }
     const now = (await readMeta(rec.id).catch(() => null)) ?? rec;
@@ -597,6 +623,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       return;
     }
     setRec(next);
+    shareNames(next);
     await rememberSpeakers(speakers.filter((s) => !/^Speaker \d+$/.test(s)));
 
     if (utterances && utterances.length) {
@@ -636,6 +663,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       return;
     }
     setRec(next);
+    shareNames(next);
     await sendEdits(next);
   }
 
@@ -699,8 +727,29 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       </Text>
       {!done || rec.uploadStatus !== "uploaded" ? (
         <Text style={[styles.meta, { color: pending ? "#fbbf24" : "#9aa0a6" }]}>
-          {[done ? "" : pending ? "Transcribing…" : "No transcript", rec.uploadStatus === "uploaded" ? "" : `upload ${rec.uploadStatus}`].filter(Boolean).join(" · ")}
+          {[done ? "" : pending ? "Transcribing…" : rec.transcriptStatus === "error" ? "Transcription failed" : "No transcript", rec.uploadStatus === "uploaded" ? "" : `upload ${rec.uploadStatus}`].filter(Boolean).join(" · ")}
         </Text>
+      ) : null}
+      {failedRerun ? (
+        <Text style={[styles.meta, { color: "#fbbf24" }]}>The last re-run failed; this is the transcript from before it.</Text>
+      ) : null}
+      {refused.length ? (
+        <View style={styles.metaCard}>
+          <Text style={[styles.meta, { color: "#f87171" }]}>
+            {`Not saved in the cloud: the cloud refused ${refused.length === 1 ? "an edit" : `${refused.length} edits`} (${Array.from(new Set(refused.flatMap((x) => x.fields.map((f) => f.replace(/^speakerLabels\./, "voice "))))).join(", ")}). ${refused[0].reason}`}
+          </Text>
+          <View style={styles.actRow}>
+            <TouchableOpacity style={styles.act} onPress={() => retryRefused(rec.id).catch(() => {})}>
+              <Text style={styles.actTxt}>Send again</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.act} onPress={async () => {
+              try { await discardRefused(rec.id); const cur = await readMeta(rec.id); if (cur) setRec(cur); }
+              catch (e: any) { Alert.alert("Could not undo", String(e?.message ?? e)); }
+            }}>
+              <Text style={styles.actTxt}>Undo on phone</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       ) : null}
 
       {pending ? (
@@ -878,6 +927,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
             {[
               { t: "Share audio (.m4a)", f: () => shareFile(audioPath(rec)) },
               canUseTranscript && isFirebaseConfigured && !rec.shareId ? { t: "Publish a public link", f: publish } : null,
+              canUseTranscript && isFirebaseConfigured && rec.shareId ? { t: "Update the public link", f: publish } : null,
               done && !pending && !rec.damaged ? { t: "Re-transcribe", f: () => doTranscribe() } : null,
               { t: "Change folder", f: () => setShowPlacement(true) },
               { t: `Language: ${rec.language || "Auto"} — change…`, f: () => setLangSheet(true) },

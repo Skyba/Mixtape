@@ -216,6 +216,32 @@ export function adopt(cur: Recording, preview: Recording, keys: string[]): Recor
   }
   return { ...out, fieldsUpdatedAt: stamps };
 }
+/** Puts the server's value and stamp back for the listed stamp keys (an edit
+ *  the server refused and the owner gave up): what the phone shows is then
+ *  what the cloud has, and the next server change merges normally. */
+export function revertTo(cur: Recording, server: Partial<Recording>, keys: string[]): Recording {
+  const out: Recording = { ...cur };
+  const stamps: Record<string, string> = { ...(cur.fieldsUpdatedAt ?? {}) };
+  const labels: Record<string, SpeakerLabel> = { ...(cur.speakerLabels ?? {}) };
+  let touchedLabels = false;
+  for (const k of keys) {
+    const t = server.fieldsUpdatedAt?.[k];
+    if (t) stamps[k] = t; else delete stamps[k];
+    if (k.startsWith("speakerLabels.")) {
+      const L = k.slice(14);
+      const v = server.speakerLabels?.[L];
+      if (v) labels[L] = v; else delete labels[L];
+      touchedLabels = true;
+    } else {
+      (out as any)[k] = (server as any)[k];
+    }
+  }
+  if (touchedLabels) {
+    out.speakerLabels = Object.keys(labels).length ? labels : undefined;
+    out.speakerMap = labelsToMap(out.speakerLabels);
+  }
+  return { ...out, fieldsUpdatedAt: stamps };
+}
 /** The stamp keys a preview changed relative to `from`. */
 export function changedKeys(from: Recording, preview: Recording): string[] {
   const a = from.fieldsUpdatedAt ?? {}, b = preview.fieldsUpdatedAt ?? {};
