@@ -614,8 +614,7 @@ async function pooled(items, limit, fn) {
 exports.mergeAudio = onCall(
   { region: "us-central1", memory: "4GiB", timeoutSeconds: 540, secrets: TRANSCRIBE_SECRETS },
   async (req) => {
-    const uid = req.auth && req.auth.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
+    const uid = await ownerOnly(req);
     const { segments, dest } = req.data || {};
     if (!Array.isArray(segments) || segments.length < 1 || !dest) {
       throw new HttpsError("invalid-argument", "segments[] and dest required.");

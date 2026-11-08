@@ -298,6 +298,10 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       Alert.alert("Sign in first", "Cloud sign-in is required to publish.");
       return;
     }
+    if (rec.private || alwaysPrivate(rec.folder)) {
+      Alert.alert("Private recording", "A private recording can't have a public link. Unlock it first.");
+      return;
+    }
     setShareBusy(true);
     try {
       const { shareId, url } = await publishShare({ ...rec, speakerMap: liveMap() }, utterances ?? []);

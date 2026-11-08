@@ -24,6 +24,8 @@ async function setJSON(key: string, value: unknown): Promise<void> {
 
 export async function getSettings(): Promise<Settings> {
   const s = await getJSON<Partial<Settings>>(K.settings, {});
+  // Claude 3.x models are retired; a saved one would make every call fail.
+  if (s.topicModel?.startsWith("claude-3")) delete s.topicModel;
   return { ...DEFAULT_SETTINGS, ...s };
 }
 

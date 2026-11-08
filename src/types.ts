@@ -164,7 +164,7 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   assemblyAiKey: "",
   anthropicKey: "",
-  topicModel: "claude-3-5-haiku-latest",
+  topicModel: "claude-haiku-4-5-20251001",
   ownerName: "",
   ownerBio: "",
   voiceEnrolledAt: "",
