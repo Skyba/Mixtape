@@ -170,6 +170,13 @@ export default function SettingsScreen() {
     if (next) refreshOrphans();
   }
 
+  // The list goes stale the moment a take starts elsewhere; a stale Delete
+  // button would then delete the take being written.
+  useEffect(
+    () => navigation.addListener("focus", () => { if (cacheOpen) refreshOrphans(); }),
+    [navigation, cacheOpen]
+  );
+
   async function refreshOrphans() {
     // Never list the take that's being recorded right now — it lives in the
     // same cache directory and is very much still wanted.
@@ -182,6 +189,7 @@ export default function SettingsScreen() {
   }
 
   async function importOrphan(o: CacheAudio) {
+    if (isRecordingInProgress()) return refreshOrphans();
     setCacheBusy("Importing…");
     try {
       const rec = await importOrphanAudio(o, s);
@@ -198,6 +206,11 @@ export default function SettingsScreen() {
   }
 
   function clearCachedAudio() {
+    if (isRecordingInProgress()) {
+      refreshOrphans();
+      Alert.alert("Recording in progress", "Stop and save the recording first.");
+      return;
+    }
     const mb = orphans.reduce((n, o) => n + o.size, 0) / 1048576;
     Alert.alert(
       "Delete cached audio?",
@@ -209,10 +222,14 @@ export default function SettingsScreen() {
           style: "destructive",
           onPress: async () => {
             setCacheBusy("Deleting…");
-            const freed = await clearAllCacheAudio();
+            try {
+              const freed = await clearAllCacheAudio();
+              Alert.alert("Cleared", `${(freed / 1048576).toFixed(1)} MB freed.`);
+            } catch (e: any) {
+              Alert.alert("Not cleared", String(e?.message ?? e));
+            }
             await refreshOrphans();
             setCacheBusy("");
-            Alert.alert("Cleared", `${(freed / 1048576).toFixed(1)} MB freed.`);
           },
         },
       ]
@@ -237,6 +254,12 @@ export default function SettingsScreen() {
 
   const [updating, setUpdating] = useState(false);
   async function checkForUpdate() {
+    // Applying an update restarts the app, which ends a take without saving
+    // it (or cuts off its save).
+    if (isRecordingInProgress()) {
+      Alert.alert("Recording in progress", "Stop and save the recording first, then check for updates.");
+      return;
+    }
     if (!Updates.isEnabled) {
       Alert.alert("Updates unavailable", "Only works in an installed build.");
       return;
@@ -246,7 +269,12 @@ export default function SettingsScreen() {
       const res = await Updates.checkForUpdateAsync();
       if (res.isAvailable) {
         await Updates.fetchUpdateAsync();
-        await Updates.reloadAsync(); // restarts into the new version
+        // A take may have started while the download ran.
+        if (isRecordingInProgress()) {
+          Alert.alert("Update downloaded", "It applies the next time Mixtape starts.");
+        } else {
+          await Updates.reloadAsync(); // restarts into the new version
+        }
       } else {
         Alert.alert("Up to date", "You're on the latest version.");
       }
@@ -524,6 +552,7 @@ export default function SettingsScreen() {
                 {" · "}
                 {(o.size / 1048576).toFixed(1)} MB
                 {o.segments ? ` · ${o.segments.length} chunks` : ""}
+                {o.missing ? ` · ${o.missing} missing` : ""}
                 {o.damaged ? " · interrupted" : ""}
               </Text>
               <Text style={styles.cacheAction}>Import →</Text>

@@ -6,7 +6,9 @@ import { View, Text } from "react-native";
 import { runLocalMigration } from "./src/localMigration";
 import { detectLayout } from "./src/recordings";
 import { readPending, clearPending } from "./src/pendingTake";
-import { processStop, isRecordingInProgress } from "./src/recordingFlow";
+import { processStop, processStopLive, isRecordingInProgress } from "./src/recordingFlow";
+import { isPlayable } from "./src/mp4";
+import * as FileSystem from "expo-file-system/legacy";
 import { canUploadNow } from "./src/network";
 import { AppState } from "react-native";
 import * as Font from "expo-font";
@@ -96,10 +98,26 @@ async function savePendingTake(settings: any) {
   // Already saved (the app died after the save, before the marker went).
   const { listRecordings } = await import("./src/recordings");
   if ((await listRecordings()).some((r) => r.id === p.startedAt)) { await clearPending(); return; }
-  logEvent(`saving interrupted take from ${p.startedAt}`);
+  logEvent(`saving interrupted take from ${p.startedAt}${p.segments ? ` (${p.segments.length} segments)` : ""}`);
   try {
-    const { startedAt, ...args } = p;
-    await processStop({ ...args, recordedAt: startedAt, durationSeconds: 0, settings });
+    const { startedAt, segments, live, ...args } = p;
+    if (segments) {
+      // Finished segments only: the one being written when the app died was
+      // never closed. It stays in the cache list, marked interrupted.
+      await processStopLive({
+        ...args, recordedAt: startedAt, segmentUris: segments, liveText: "",
+        durationSeconds: 0, settings, transcribeAfterMerge: true,
+        provisionalTopic: live ? undefined : "untitled",
+      });
+      return;
+    }
+    // The recorder never finalised this file, so it has no index. Saved as
+    // healthy it would upload into the create-only audio slot and block the
+    // repaired file for good.
+    const info = await FileSystem.getInfoAsync(args.cacheUri);
+    const size = info.exists ? info.size ?? 0 : 0;
+    const damaged = !(await isPlayable(args.cacheUri, size));
+    await processStop({ ...args, recordedAt: startedAt, durationSeconds: 0, settings, damaged });
   } catch (e: any) {
     logEvent(`interrupted take not saved: ${String(e?.message ?? e)}`);
   }
@@ -177,7 +195,12 @@ export default function App() {
           if (await isCanonical()) {
             // Discovered after a legacy start: close the UI again while the
             // local move runs, so nothing writes the old layout meanwhile.
-            if (!(await detectLayout())) setStorageReady(false);
+            if (!(await detectLayout())) {
+              // Closing the UI unmounts the record screen, which would end a
+              // running take. The move waits for the next foreground instead.
+              if (isRecordingInProgress()) return;
+              setStorageReady(false);
+            }
             if (!(await runLocalMigration().catch(() => false))) { setStorageMsg("Some recordings could not be moved. Export the log from Settings."); return; }
             setStorageReady(true);
             startListener();

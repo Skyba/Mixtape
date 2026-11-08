@@ -1,6 +1,8 @@
 package expo.modules.mixtapewakelock
 
+import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.AudioRecordingConfiguration
@@ -10,6 +12,7 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
 import android.os.PowerManager
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -23,11 +26,78 @@ class MixtapeWakelockModule : Module() {
   private var segHandler: Handler? = null
   private var segRunnable: Runnable? = null
   private var segSeq = 0
+  // Set when the notification's Stop opened the app; read once by JS, which
+  // may not be listening yet when the activity is recreated.
+  private var stopRequested = false
 
   override fun definition() = ModuleDefinition {
     Name("MixtapeWakelock")
 
-    Events("onRecordingSilenced", "onSegmentDue")
+    Events("onRecordingSilenced", "onSegmentDue", "onStopRequested")
+
+    // Must be called with the app on screen: that is the only moment Android
+    // lets a microphone foreground service start. Resolves false when it was
+    // refused, so the caller can fall back to expo-audio's own service.
+    AsyncFunction("startTakeService") { text: String, promise: Promise ->
+      val context = appContext.reactContext
+      if (context == null) {
+        promise.resolve(false)
+      } else if (MixtapeRecordingService.running) {
+        updateNotification(context, text)
+        promise.resolve(true)
+      } else {
+        MixtapeRecordingService.onStarted = { ok -> promise.resolve(ok) }
+        try {
+          // startService, not startForegroundService: the app is in the
+          // foreground, and this way a refused startForeground() just stops
+          // the service instead of tripping the five-second crash contract.
+          context.startService(
+            Intent(context, MixtapeRecordingService::class.java)
+              .putExtra(MixtapeRecordingService.EXTRA_TEXT, text)
+          )
+        } catch (e: Exception) {
+          MixtapeRecordingService.onStarted = null
+          promise.resolve(false)
+        }
+      }
+    }
+
+    Function("updateTakeService") { text: String ->
+      val context = appContext.reactContext
+      if (context != null && MixtapeRecordingService.running) updateNotification(context, text)
+      null
+    }
+
+    Function("stopTakeService") {
+      val context = appContext.reactContext
+      if (context != null) {
+        context.stopService(Intent(context, MixtapeRecordingService::class.java))
+      }
+      null
+    }
+
+    Function("isTakeServiceRunning") {
+      MixtapeRecordingService.running
+    }
+
+    // expo-audio's recorder calls need an activity. After a swipe from recents
+    // the JS runtime and the recorder survive without one, and a stop then
+    // throws halfway, so the caller waits for the app to be reopened instead.
+    Function("hasActivity") {
+      appContext.currentActivity != null
+    }
+
+    Function("consumeStopRequest") {
+      val was = stopRequested
+      stopRequested = false
+      was
+    }
+
+    OnNewIntent { intent -> checkStopIntent(intent) }
+
+    OnActivityEntersForeground {
+      appContext.currentActivity?.intent?.let { checkStopIntent(it) }
+    }
 
     // Hold a partial wakelock so the CPU keeps running (screen can be off) and
     // the audio recording thread isn't starved during Doze.
@@ -164,6 +234,22 @@ class MixtapeWakelockModule : Module() {
       lastSilenced = false
       null
     }
+  }
+
+  private fun checkStopIntent(intent: Intent) {
+    if (!intent.getBooleanExtra(MixtapeRecordingService.EXTRA_STOP, false)) return
+    // Consumed here, or every later return to the app would stop again.
+    intent.removeExtra(MixtapeRecordingService.EXTRA_STOP)
+    stopRequested = true
+    sendEvent("onStopRequested", mapOf<String, Any>())
+  }
+
+  private fun updateNotification(context: Context, text: String) {
+    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    nm.notify(
+      MixtapeRecordingService.NOTIFICATION_ID,
+      MixtapeRecordingService.buildNotification(context, text)
+    )
   }
 
   private fun ensureSegHandler(): Handler {

@@ -1,7 +1,9 @@
 import * as FileSystem from "expo-file-system/legacy";
-import { listRecordings, audioPath, writeMeta } from "./recordings";
-import { processStop, processStopLive } from "./recordingFlow";
+import { listRecordings, audioPath } from "./recordings";
+import { processStop, processStopLive, isRecordingInProgress } from "./recordingFlow";
+import { peekPending } from "./pendingTake";
 import { INBOX, Recording, Settings } from "./types";
+import { isPlayable } from "./mp4";
 
 export type CacheAudio = {
   uri: string;
@@ -14,71 +16,34 @@ export type CacheAudio = {
   // A live session records in 20-second segments, so one conversation is
   // hundreds of files. They're grouped into a single entry, in order.
   segments?: string[];
+  // Segments absent from the middle of the run (index gaps): the joined
+  // file will be shorter than the take was.
+  missing?: number;
 };
 
-const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-function b64Bytes(s: string): number[] {
-  const out: number[] = [];
-  let acc = 0;
-  let bits = 0;
-  for (const ch of s) {
-    const v = B64.indexOf(ch);
-    if (v < 0) continue;
-    acc = (acc << 6) | v;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out.push((acc >> bits) & 0xff);
-    }
-  }
-  return out;
-}
-
-async function readBytes(uri: string, position: number, length: number) {
-  const b64 = await FileSystem.readAsStringAsync(uri, {
-    encoding: FileSystem.EncodingType.Base64,
-    position,
-    length,
-  });
-  return b64Bytes(b64);
-}
-
-const be32 = (b: number[], i: number) =>
-  ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
-
 /**
- * True if the file carries an MP4 index. The recorder streams audio into an
- * `mdat` box whose size field is a placeholder until it stops and writes
- * `moov`; if the process is killed first (restart, flat battery) the
- * placeholder is never patched, so walking the box chain runs off the rails.
- * That's the signature of an unfinalised recording.
+ * Where a chunked or live take keeps its finished segments. Not the cache:
+ * Android clears that when storage runs low, and until the merge lands these
+ * are the only copy of everything after the first segment.
  */
-export async function isPlayable(uri: string, size: number): Promise<boolean> {
-  try {
-    let pos = 0;
-    for (let i = 0; i < 8; i++) {
-      const h = await readBytes(uri, pos, 16);
-      if (h.length < 8) return false;
-      const type = String.fromCharCode(h[4], h[5], h[6], h[7]);
-      if (type === "moov") return true;
-      let boxSize = be32(h, 0);
-      let header = 8;
-      if (boxSize === 1) {
-        // 64-bit size: the high word is 0 in any real file, but stays as the
-        // writer's placeholder in one that was never closed.
-        if (h.length < 16 || be32(h, 8) !== 0) return false;
-        boxSize = be32(h, 12);
-        header = 16;
-      }
-      if (boxSize < header || pos + boxSize > size) return false;
-      pos += boxSize;
-      if (pos >= size) return false;
-    }
-    return false;
-  } catch {
-    return true; // unreadable for another reason — don't cry wolf
+export const SEGMENT_DIR = `${FileSystem.documentDirectory}segments/`;
+
+/** Every segment some saved or interrupted take still needs. */
+async function segmentsInUse(): Promise<Set<string>> {
+  const keep = new Set<string>();
+  for (const r of await listRecordings()) {
+    for (const u of r.mergePending?.segments ?? []) keep.add(u);
+    for (const u of r.mergeLocalPending?.segments ?? []) keep.add(u);
   }
+  // A take that died mid-recording is saved from these on the next launch.
+  for (const u of (await peekPending())?.segments ?? []) keep.add(u);
+  return keep;
+}
+
+async function scanAll(out: CacheAudio[]): Promise<void> {
+  const root = FileSystem.cacheDirectory;
+  if (root) await scan(root, 2, out);
+  if (FileSystem.documentDirectory) await scan(SEGMENT_DIR, 0, out);
 }
 
 // Live segment files: seg_<sessionId>_<index>.m4a (see RecordScreen).
@@ -126,10 +91,8 @@ async function scan(dir: string, depth: number, out: CacheAudio[]): Promise<void
  * so the list only shows audio that would otherwise be lost.
  */
 export async function listOrphanAudio(): Promise<CacheAudio[]> {
-  const root = FileSystem.cacheDirectory;
-  if (!root) return [];
   const found: CacheAudio[] = [];
-  await scan(root, 2, found);
+  await scanAll(found);
 
   // Collapse each live session's segments into one row, ordered by index.
   const sessions = new Map<string, { idx: number; f: CacheAudio }[]>();
@@ -154,7 +117,9 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
     const tailOk = await isPlayable(last.uri, last.size);
     const keep = tailOk ? parts : parts.slice(0, -1);
     if (!keep.length) continue;
+    const span = parts[parts.length - 1].idx - parts[0].idx + 1;
     grouped.push({
+      missing: span - parts.length + parts[0].idx || undefined,
       uri: keep[0].f.uri,
       size: keep.reduce((n, p) => n + p.f.size, 0),
       modTime: Math.max(...parts.map((p) => p.f.modTime)),
@@ -165,11 +130,11 @@ export async function listOrphanAudio(): Promise<CacheAudio[]> {
   }
 
   const saved = new Set<number>();
-  // Segments of a saved take still waiting on its merge are that take's audio,
-  // not lost audio: importing them makes a second copy of the recording.
-  const merging = new Set<string>();
+  // Segments of a saved take still waiting on its merge (or on the download
+  // of the merged file) are that take's audio, not lost audio: importing them
+  // makes a second copy of the recording.
+  const merging = await segmentsInUse();
   for (const r of await listRecordings()) {
-    for (const u of r.mergePending?.segments ?? []) merging.add(u);
     try {
       const i = await FileSystem.getInfoAsync(audioPath(r));
       if (i.exists && i.size) saved.add(i.size);
@@ -207,6 +172,9 @@ export async function importOrphanAudio(
     // A live session: the segments have to be stitched back together in the
     // cloud, which is exactly what the normal live-stop path does.
     const rec = await processStopLive({
+      // The last write is the nearest thing to a time the take has; the
+      // import moment is certainly wrong.
+      recordedAt: file.modTime ? new Date(file.modTime).toISOString() : undefined,
       segmentUris: file.segments,
       liveText: "",
       durationSeconds: 0,
@@ -218,12 +186,12 @@ export async function importOrphanAudio(
       // forever: recovery would restore the audio and never transcribe it.
       transcribeAfterMerge: true,
     });
-    // Only drop the cache copies once the merge has actually landed — until
-    // then they're the only complete copy of the audio.
-    if (!rec.mergePending) await deleteOrphanAudio([file]);
+    // The segments go once the merged file is on the phone, which the save
+    // path does itself; until then they're the only complete local copy.
     return rec;
   }
-  const rec = await processStop({
+  return processStop({
+    recordedAt: file.modTime ? new Date(file.modTime).toISOString() : undefined,
     cacheUri: file.uri,
     durationSeconds: 0, // filled in from the transcript
     plannedDurationHours: 0,
@@ -231,15 +199,10 @@ export async function importOrphanAudio(
     folder: INBOX,
     language: "", // empty = let AssemblyAI detect it
     settings,
+    // Import it either way — the bytes are worth keeping — but don't let it
+    // pose as a normal recording, or upload into the slot a repair needs.
+    damaged: file.damaged,
   });
-  // Import it either way — the bytes are worth keeping — but don't let it pose
-  // as a normal recording that just happens not to play.
-  if (file.damaged) {
-    const next = { ...rec, damaged: true };
-    await writeMeta(next);
-    return next;
-  }
-  return rec;
 }
 
 /**
@@ -247,14 +210,13 @@ export async function importOrphanAudio(
  * that the listing hides as duplicates. Returns the bytes reclaimed.
  */
 export async function clearAllCacheAudio(): Promise<number> {
-  const root = FileSystem.cacheDirectory;
-  if (!root) return 0;
+  // The take being recorded, or being saved, is in here too.
+  if (isRecordingInProgress()) throw new Error("A recording is in progress. Stop it first.");
   const found: CacheAudio[] = [];
-  await scan(root, 2, found);
+  await scanAll(found);
   // Segments of a take whose merge has not landed are the only copy of
   // everything after its first minutes; they are not cache to reclaim.
-  const keep = new Set<string>();
-  for (const r of await listRecordings()) for (const u of r.mergePending?.segments ?? []) keep.add(u);
+  const keep = await segmentsInUse();
   let freed = 0;
   for (const f of found) {
     if (keep.has(f.uri)) continue;
