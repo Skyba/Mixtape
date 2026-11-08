@@ -78,7 +78,6 @@ import {
   releaseWakelock,
   watchSilence,
   cancelSegment,
-  hasNativeSegmentTimer,
   onSegmentDue,
   scheduleSegment,
   startTakeService,
@@ -149,10 +148,13 @@ const OWN_SERVICE_AUDIO_MODE = {
   ...RECORDING_AUDIO_MODE,
   allowsBackgroundRecording: false,
 };
-// Single-file takes enforce the time limit on the native tick, so a limit
-// raised mid-take holds. The recorder's own timer stays only as a backstop
-// past the longest limit, because it cannot be moved once started.
-const BACKSTOP_S = 10 * 3600 + 300;
+// How long a place fix may take before the take goes without one.
+const PLACE_TIMEOUT_MS = 20000;
+// Longest wait for the last live segment's text before the save goes on.
+const FINAL_TEXT_TIMEOUT_MS = 60000;
+// Longest one live-link write may hold up the next.
+const SHARE_WRITE_TIMEOUT_MS = 10000;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // How soon to try again when no segment would arm, rather than a whole chunk.
 const ARM_RETRY_MS = 5000;
 
@@ -172,6 +174,24 @@ const handlers: {
 // Set when the screen unmounted mid-take with no activity to stop the
 // recorder through (a swipe from recents). The next mount finishes it.
 let orphanFinish: (() => Promise<void>) | null = null;
+// The take that owns the service, the wakelock and the in-progress flag.
+// Module-level, like those: a save finishing in a screen instance that has
+// since unmounted must not release them from a take started on a new one.
+let currentTake = 0;
+
+/** Whether expo-audio's recorder calls can run. A build without the native
+ *  check is probed: constructing a recorder needs an activity, and nothing
+ *  else about it has side effects. */
+function activityAvailable(): boolean {
+  const known = hasActivity();
+  if (known !== null) return known;
+  try {
+    new AudioModule.AudioRecorder(createRecordingOptions(RECORDING_OPTIONS)).release();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function getRecorder(): AudioRecorder {
   if (!sharedRecorder) {
@@ -294,7 +314,7 @@ export default function RecordScreen() {
   // Fixed for the take, unlike liveOn/chunkedRef, which drop at Stop while
   // the marker still has to describe the segments until the save.
   const takeModeRef = useRef<"single" | "chunked" | "live">("single");
-  const takeSeqRef = useRef(0); // bumped by every beginTake
+  const takeSeqRef = useRef(0); // this instance's take, from currentTake
   const silenceWarnedRef = useRef(false); // isClientSilenced warning, once per take
   const micFallbackWarnedRef = useRef(false); // mic trouble warning, once per take
   const segArmedAtRef = useRef(0); // when the current segment started recording
@@ -317,6 +337,11 @@ export default function RecordScreen() {
   // Captured when a take starts, so the fix reflects where it happened rather
   // than where the phone was when it stopped. Never blocks starting.
   const placeRef = useRef<Place | undefined>(undefined);
+  const placeGenRef = useRef(0); // bumped by every start, stop and discard
+  // Whether the take may have a public live page: not once it is private or
+  // in an always-private folder, which can both change mid-take.
+  const shareOkRef = useRef(true);
+  const shareChainRef = useRef<Promise<void>>(Promise.resolve());
   const durationRef = useRef(durationH);
   useEffect(() => {
     durationRef.current = durationH;
@@ -333,7 +358,9 @@ export default function RecordScreen() {
       logEvent(
         s.hasError
           ? `recorder error, saving what was recorded: ${s.error ?? "unknown"}`
-          : "recorder stopped from outside (backstop or notification), saving"
+          : activeMs() >= durationRef.current * 3600000 - 5000
+            ? `cap ${durationRef.current}h reached (recorder timer) → saving`
+            : "recorder stopped from outside (notification), saving"
       );
       stop();
       return;
@@ -389,16 +416,18 @@ export default function RecordScreen() {
       if (!(recordingRef.current || liveOn.current || chunkedRef.current)) return;
       logEvent("record screen unmounted mid-take");
       const finish = () => stopRef.current();
-      if (hasActivity()) {
+      if (activityAvailable()) {
         // A render error, the storage move, a recreated activity: the
         // recorder can still be stopped, so save the take now.
         finish().catch(() => {});
         return;
       }
-      // No activity, so expo-audio refuses every recorder call. A
-      // single-file take keeps recording; a segmented one stops at the end
-      // of its segment. Either way it is saved when the app is reopened.
-      handlers.status = noop;
+      // No activity, so expo-audio refuses every recorder call, a stop
+      // included. A segmented take stops at the end of its segment and is
+      // saved when the app is reopened. A single file runs on to its limit,
+      // which the recorder's own timer enforces without an activity; its
+      // finish event, still routed here, saves it then.
+      if (!recordingRef.current) handlers.status = noop;
       handlers.segmentDue = noop;
       handlers.stopRequested = noop;
       cancelSegment();
@@ -676,7 +705,10 @@ export default function RecordScreen() {
    * app is on screen, which a tap on Start guarantees.
    */
   async function beginTake() {
-    takeSeqRef.current += 1;
+    currentTake += 1;
+    takeSeqRef.current = currentTake;
+    // A Stop left from an earlier take must not end this one.
+    consumeStopRequest();
     const own = await startTakeService("Recording");
     await setAudioModeAsync(own ? OWN_SERVICE_AUDIO_MODE : RECORDING_AUDIO_MODE);
     logEvent(own ? "take service held" : "take service unavailable, using expo-audio's");
@@ -687,7 +719,7 @@ export default function RecordScreen() {
   function endTake(seq = takeSeqRef.current) {
     // A save can outlast its take: a new take started meanwhile owns all of
     // this now, and must not lose its service when the old save finishes.
-    if (seq !== takeSeqRef.current) return;
+    if (seq !== currentTake) return;
     deactivateKeepAwake();
     releaseWakelock();
     stopTakeService();
@@ -722,7 +754,53 @@ export default function RecordScreen() {
       inputName: takeInputRef.current,
       meIncluded: meFromSlots(),
       ...(segmented ? { segments: [...segUris.current], live: takeModeRef.current === "live" } : {}),
+      ...(liveShareId.current ? { shareId: liveShareId.current } : {}),
     });
+  }
+
+  /** Where the take happened. Never blocks starting and gives up after
+   *  PLACE_TIMEOUT_MS. A fix landing after the take ended, or after the next
+   *  one began, is dropped: it would rewrite a marker already cleared. */
+  function startPlaceCapture() {
+    placeRef.current = undefined;
+    const gen = ++placeGenRef.current;
+    Promise.race([capturePlace(), sleep(PLACE_TIMEOUT_MS).then(() => undefined)])
+      .then((p) => {
+        if (p && gen === placeGenRef.current) {
+          placeRef.current = p;
+          markerRef.current();
+        }
+      })
+      .catch(() => {});
+  }
+
+  /** Live-link writes go out one after another, so removing the page is
+   *  never overtaken by an update, which would put it back (the update is a
+   *  merge). Each waits at most SHARE_WRITE_TIMEOUT_MS for the one before. */
+  function queueShare(op: () => Promise<void>) {
+    shareChainRef.current = shareChainRef.current.then(() =>
+      Promise.race([op().catch(() => {}), sleep(SHARE_WRITE_TIMEOUT_MS)])
+    );
+  }
+
+  /** Updates the live page, unless the take has become private since. */
+  function pushLive(data: Record<string, unknown>) {
+    const id = liveShareId.current;
+    if (!id || !shareOkRef.current) return;
+    queueShare(async () => {
+      if (liveShareId.current === id && shareOkRef.current) await updateShare(id, data);
+    });
+  }
+
+  /** Takes the live page down; nothing is written to it afterwards. */
+  function closeLiveShare(why: string) {
+    const id = liveShareId.current;
+    if (!id) return;
+    liveShareId.current = null;
+    setLiveUrl("");
+    logEvent(`live link removed: ${why}`);
+    queueShare(() => unpublishShare(id));
+    markerRef.current();
   }
 
   /** A take that cannot fit fails at the save, hours later. Says so now. */
@@ -779,6 +857,31 @@ export default function RecordScreen() {
       if (secs >= durationRef.current * 3600) stop();
     }, 1000);
   }
+
+  useEffect(() => {
+    shareOkRef.current = !isPrivate && !alwaysPrivate(folder);
+    if (!shareOkRef.current) closeLiveShare("the take is now private");
+  }, [isPrivate, folder]);
+
+  // A single file's limit is the recorder's own timer, which runs without
+  // an activity. It cannot be moved while recording, so a changed limit
+  // pauses and resumes the same file with a new one: a gap of milliseconds.
+  useEffect(() => {
+    if (!recordingRef.current || liveOn.current || chunkedRef.current) return;
+    if (pausedRef.current) return; // resume() arms it from the new limit
+    const left = Math.round(durationRef.current * 3600 - activeMs() / 1000);
+    if (left <= 0) {
+      stop();
+      return;
+    }
+    try {
+      recorder.pause();
+      recorder.record({ forDuration: left });
+      logEvent(`cap changed to ${durationRef.current}h mid-take`);
+    } catch (e: any) {
+      logEvent(`cap change not applied to the recorder: ${String(e?.message ?? e)}`);
+    }
+  }, [durationH]);
 
   // The marker is what a crash leaves to recover from, so it follows edits
   // made mid-take instead of keeping the values from the start.
@@ -866,32 +969,17 @@ export default function RecordScreen() {
     silenceWarnedRef.current = false;
     micFallbackWarnedRef.current = false;
     takeGenRef.current += 1;
-    placeRef.current = undefined;
-    (() => {
-      const gen = takeGenRef.current;
-      capturePlace()
-        .then((p) => {
-          // A slow fix resolving after the next take began would stamp the
-          // wrong place on it, or clear a good one with undefined.
-          if (gen === takeGenRef.current) {
-            placeRef.current = p;
-            markerRef.current();
-          }
-        })
-        .catch(() => {});
-    })();
+    startPlaceCapture();
       // Re-assert the recording mode: the global mode may have been changed
       // since mount, and without shouldPlayInBackground the recorder pauses
       // on screen-off.
       await beginTake();
       await recorder.prepareToRecordAsync();
       preferExternalMic();
-      // With the native tick, the limit is enforced there (see armLiveness)
-      // and can move mid-take; forDuration cannot, so it is only a backstop.
-      // A build without the tick keeps forDuration as the limit itself.
-      recorder.record({
-        forDuration: hasNativeSegmentTimer() ? BACKSTOP_S : Math.round(durationH * 3600),
-      });
+      // The recorder's own timer is the limit: it stops the file properly
+      // even with no activity, which a stop from JS cannot. A limit changed
+      // mid-take re-arms it (see the durationH effect).
+      recorder.record({ forDuration: Math.round(durationH * 3600) });
       recordingRef.current = true;
       resetTakeState("single");
       await activateKeepAwakeAsync();
@@ -923,20 +1011,7 @@ export default function RecordScreen() {
     silenceWarnedRef.current = false;
     micFallbackWarnedRef.current = false;
     takeGenRef.current += 1;
-    placeRef.current = undefined;
-    (() => {
-      const gen = takeGenRef.current;
-      capturePlace()
-        .then((p) => {
-          // A slow fix resolving after the next take began would stamp the
-          // wrong place on it, or clear a good one with undefined.
-          if (gen === takeGenRef.current) {
-            placeRef.current = p;
-            markerRef.current();
-          }
-        })
-        .catch(() => {});
-    })();
+    startPlaceCapture();
     // Same re-assert as start(): keeps segments recording with the screen off.
     try {
       await beginTake();
@@ -985,6 +1060,9 @@ export default function RecordScreen() {
         });
         liveShareId.current = shareId;
         setLiveUrl(url);
+        markerRef.current();
+        // Made private while the link was being created.
+        if (!shareOkRef.current) closeLiveShare("the take is now private");
       } catch {
         setStatus("Couldn't create live link; recording anyway.");
       }
@@ -1180,15 +1258,12 @@ export default function RecordScreen() {
           segTextRef.current = [...segTextRef.current, txt.trim()];
           const joined = segTextRef.current.join(" ");
           setLiveText(joined);
-          if (liveShareId.current) {
-            updateShare(liveShareId.current, {
-              liveText: joined,
-              durationSeconds: elapsedRef.current,
-            }).catch(() => {});
-          }
+          pushLive({ liveText: joined, durationSeconds: elapsedRef.current });
         })
         .catch(() => {});
-      if (isFinal) await job; // wait for the last segment before saving
+      // Wait for the last segment before saving, but not forever: until the
+      // save finishes, the take holds the service and the wakelock.
+      if (isFinal) await Promise.race([job, sleep(FINAL_TEXT_TIMEOUT_MS)]);
     }
 
     if (capReached) {
@@ -1245,14 +1320,12 @@ export default function RecordScreen() {
         setDiarMap(speakerMap);
         setDiarPasses((p) => p + 1);
         setDiarCost((c) => c + (audioDurationSec / 3600) * AAI_RATE_PER_HOUR);
-        if (liveShareId.current) {
-          updateShare(liveShareId.current, {
-            utterances,
-            speakers: resolveSpeakers(),
-            speakerMap: speakerMap ?? null,
-            durationSeconds: elapsedRef.current,
-          }).catch(() => {});
-        }
+        pushLive({
+          utterances,
+          speakers: resolveSpeakers(),
+          speakerMap: speakerMap ?? null,
+          durationSeconds: elapsedRef.current,
+        });
       }
     } catch (e: any) {
       logEvent(`diar pass ERROR ${String(e?.message ?? e)}`);
@@ -1338,12 +1411,9 @@ export default function RecordScreen() {
       pausedRef.current = false;
     }
     try {
-      // Re-arm the native timer for the time that's left, so it still holds
-      // after a pause/resume: the backstop, or the limit on an old build.
-      const left = Math.round(
-        (hasNativeSegmentTimer() ? BACKSTOP_S : durationRef.current * 3600) -
-          activeMs() / 1000
-      );
+      // Re-arm the recorder's timer for the time that's left, so the limit
+      // still holds after a pause/resume.
+      const left = Math.round(durationRef.current * 3600 - activeMs() / 1000);
       recorder.record({ forDuration: Math.max(1, left) });
     } catch {}
     setPaused(false);
@@ -1369,8 +1439,11 @@ export default function RecordScreen() {
 
   async function discard() {
     // A discarded take must not come back as an "interrupted" one on the
-    // next launch.
-    clearPending();
+    // next launch: nothing may rewrite the marker from here on (a roll in
+    // flight, a late place fix), and it is cleared again once all is stopped.
+    takeStartRef.current = null;
+    placeGenRef.current += 1;
+    const cleared = clearPending();
     recordingRef.current = false;
     takeGenRef.current += 1;
     // Every path that ends or suspends a take must kill the native tick too,
@@ -1390,10 +1463,7 @@ export default function RecordScreen() {
         clearTimeout(segTimer.current);
         segTimer.current = null;
       }
-      if (liveShareId.current) {
-        unpublishShare(liveShareId.current).catch(() => {});
-        liveShareId.current = null;
-      }
+      closeLiveShare("the take was discarded");
     }
     stopTick();
     segLiveRef.current = false;
@@ -1401,6 +1471,9 @@ export default function RecordScreen() {
     try {
       await stopRecorder();
     } catch {}
+    await cleared;
+    await rollQueueRef.current.catch(() => {});
+    await clearPending();
     endTake();
     setIsRecording(false);
     setPaused(false);
@@ -1417,7 +1490,10 @@ export default function RecordScreen() {
     if (chunkedRef.current) return stopChunked();
     if (!recordingRef.current) return; // already stopping/stopped (idempotent)
     recordingRef.current = false;
+    orphanFinish = null;
     const seq = takeSeqRef.current;
+    takeGenRef.current += 1;
+    placeGenRef.current += 1;
     stopTick();
     // The wall clock, pauses left out: elapsedRef is stale whenever the JS
     // tick was suspended, and a recorder that stopped itself reads 0.
@@ -1436,10 +1512,14 @@ export default function RecordScreen() {
     }
     setIsRecording(false);
     updateTakeService("Saving the recording…");
+    // The save clears the marker; nothing may write it again after this.
+    const startedAt = takeStartRef.current;
+    takeStartRef.current = null;
     const uri = recorder.uri;
     logEvent(`stop normal: dur=${seconds}s uri=${!!uri}${stopError ? ` stop failed: ${stopError}` : ""}`);
     if (!uri) {
       setStatus("No audio captured.");
+      if (startedAt) await clearPending(startedAt);
       endTake(seq);
       return;
     }
@@ -1456,7 +1536,7 @@ export default function RecordScreen() {
       const rec = await processStop({
         // The take's id and time are its start, the same value an
         // interrupted-take save would use, so the two can never both exist.
-        recordedAt: takeStartRef.current ?? undefined,
+        recordedAt: startedAt ?? undefined,
         cacheUri: uri,
         durationSeconds: seconds,
         plannedDurationHours: durationRef.current,
@@ -1497,20 +1577,7 @@ export default function RecordScreen() {
     silenceWarnedRef.current = false;
     micFallbackWarnedRef.current = false;
     takeGenRef.current += 1;
-    placeRef.current = undefined;
-    (() => {
-      const gen = takeGenRef.current;
-      capturePlace()
-        .then((p) => {
-          // A slow fix resolving after the next take began would stamp the
-          // wrong place on it, or clear a good one with undefined.
-          if (gen === takeGenRef.current) {
-            placeRef.current = p;
-            markerRef.current();
-          }
-        })
-        .catch(() => {});
-    })();
+    startPlaceCapture();
       await beginTake();
       await FileSystem.makeDirectoryAsync(SEGMENT_DIR, { intermediates: true }).catch(() => {});
       segUris.current = [];
@@ -1542,8 +1609,10 @@ export default function RecordScreen() {
   async function stopChunked() {
     if (!chunkedRef.current) return; // idempotent
     chunkedRef.current = false;
+    orphanFinish = null;
     const seq = takeSeqRef.current;
     takeGenRef.current += 1;
+    placeGenRef.current += 1;
     cancelSegment();
     stopTick();
     // elapsedRef only moves while the JS tick runs, which it does not with
@@ -1553,19 +1622,22 @@ export default function RecordScreen() {
     setPaused(false);
     setStatus("Finishing last chunk…");
     await rollSegment(true);
+    // The final roll wrote the marker its last time; the save clears it.
+    const startedAt = takeStartRef.current;
+    takeStartRef.current = null;
     setIsRecording(false);
     updateTakeService("Saving the recording…");
     logEvent(`stop chunked: chunks=${segUris.current.length} dur=${seconds}s`);
     if (segUris.current.length === 0) {
       setStatus("No audio captured.");
-      await clearPending(takeStartRef.current ?? undefined);
+      await clearPending(startedAt ?? undefined);
       endTake(seq);
       return;
     }
     setStatus("Joining chunks & saving…");
     try {
       const rec = await processStopLive({
-        recordedAt: takeStartRef.current ?? undefined,
+        recordedAt: startedAt ?? undefined,
         segmentUris: segUris.current,
         liveText: "",
         durationSeconds: seconds,
@@ -1601,8 +1673,10 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
   async function stopLive() {
     const wasDiarizing = diarOnRef.current;
     liveOn.current = false;
+    orphanFinish = null;
     const seq = takeSeqRef.current;
     takeGenRef.current += 1;
+    placeGenRef.current += 1;
     cancelSegment();
     stopDiarization();
     stopTick();
@@ -1611,18 +1685,21 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
     setPaused(false);
     setStatus("Finishing last segment…");
     await rollSegment(true);
+    // The final roll wrote the marker its last time; the save clears it.
+    const startedAt = takeStartRef.current;
+    takeStartRef.current = null;
     setIsRecording(false);
     updateTakeService("Saving the recording…");
     if (segUris.current.length === 0) {
       setStatus("No audio captured.");
-      await clearPending(takeStartRef.current ?? undefined);
+      await clearPending(startedAt ?? undefined);
       endTake(seq);
       return;
     }
     setStatus("Merging segments & saving…");
     try {
       const rec = await processStopLive({
-        recordedAt: takeStartRef.current ?? undefined,
+        recordedAt: startedAt ?? undefined,
         segmentUris: segUris.current,
         liveText: segTextRef.current.join(" "),
         durationSeconds: seconds,
@@ -1638,13 +1715,7 @@ Transcript: ${rec.transcriptStatus} · Upload: ${rec.uploadStatus}`
         meIncluded: meFromSlots(),
         shareId: liveShareId.current ?? undefined,
       });
-      if (liveShareId.current) {
-        updateShare(liveShareId.current, {
-          base: rec.base,
-          speakers: rec.speakers,
-          live: false,
-        }).catch(() => {});
-      }
+      pushLive({ base: rec.base, speakers: rec.speakers, live: false });
       setLastRec(rec);
       setLiveText("");
       setLiveUrl("");

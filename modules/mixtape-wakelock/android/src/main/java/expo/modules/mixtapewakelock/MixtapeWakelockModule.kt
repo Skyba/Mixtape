@@ -43,6 +43,9 @@ class MixtapeWakelockModule : Module() {
       if (context == null) {
         promise.resolve(false)
       } else if (MixtapeRecordingService.running) {
+        // Still held by the last take's save: this take gets its own id, so
+        // a Stop meant for the last one does not end it.
+        MixtapeRecordingService.takeId = System.currentTimeMillis()
         updateNotification(context, text)
         promise.resolve(true)
       } else {
@@ -238,8 +241,21 @@ class MixtapeWakelockModule : Module() {
 
   private fun checkStopIntent(intent: Intent) {
     if (!intent.getBooleanExtra(MixtapeRecordingService.EXTRA_STOP, false)) return
-    // Consumed here, or every later return to the app would stop again.
+    val forTake = intent.getLongExtra(MixtapeRecordingService.EXTRA_TAKE_ID, -1L)
+    // Consumed here and on the activity's own intent, or every later return
+    // to the app would stop again.
     intent.removeExtra(MixtapeRecordingService.EXTRA_STOP)
+    appContext.currentActivity?.let { activity ->
+      if (activity.intent?.hasExtra(MixtapeRecordingService.EXTRA_STOP) == true) {
+        activity.intent = Intent(activity.intent).apply {
+          removeExtra(MixtapeRecordingService.EXTRA_STOP)
+          removeExtra(MixtapeRecordingService.EXTRA_TAKE_ID)
+        }
+      }
+    }
+    // A Stop from an earlier take, replayed: the take it was for has ended.
+    val current = MixtapeRecordingService.takeId
+    if (current == 0L || forTake != current) return
     stopRequested = true
     sendEvent("onStopRequested", mapOf<String, Any>())
   }

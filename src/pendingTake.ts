@@ -18,6 +18,8 @@ export type PendingTake = Omit<StopArgs, "settings" | "durationSeconds"> & {
   // at every boundary. cacheUri is not used for these.
   segments?: string[];
   live?: boolean;
+  // A live take's public link, so the save that recovers it closes the link.
+  shareId?: string;
 };
 
 export async function markPending(p: PendingTake): Promise<void> {
