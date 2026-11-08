@@ -115,6 +115,10 @@ export type Recording = {
   // the first segment the entry was saved from. Anything uploading this
   // recording must leave the audio alone, or it replaces hours with minutes.
   mergedInCloud?: boolean;
+  // The merge landed but the phone's copy is still the first segment: the
+  // download of the merged file has not succeeded yet. The segments stay
+  // until it does, and are not offered as unsaved audio meanwhile.
+  mergeLocalPending?: { id: string; segments?: string[] };
   /** Where the take started. Absent whenever a fix was not available. */
   place?: { lat: number; lon: number; city?: string; region?: string };
   /**
