@@ -177,13 +177,13 @@ export function stopTakeService(): void {
   } catch {}
 }
 
-/** True on a build without the function: the old behaviour assumed one. */
-export function hasActivity(): boolean {
+/** Whether the app has an activity; null on a build without the function. */
+export function hasActivity(): boolean | null {
   try {
     const f = (mod as any)?.hasActivity;
-    return typeof f === "function" ? !!f.call(mod) : true;
+    return typeof f === "function" ? !!f.call(mod) : null;
   } catch {
-    return true;
+    return null;
   }
 }
 
