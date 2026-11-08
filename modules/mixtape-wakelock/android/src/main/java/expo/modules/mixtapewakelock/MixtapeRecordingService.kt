@@ -33,6 +33,8 @@ class MixtapeRecordingService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val text = intent?.getStringExtra(EXTRA_TEXT) ?: "Recording"
+    // Before the notification is built: its Stop carries this id.
+    takeId = System.currentTimeMillis()
     val ok = try {
       val n = buildNotification(this, text)
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -57,6 +59,7 @@ class MixtapeRecordingService : Service() {
         }
       }
     } else {
+      takeId = 0L
       stopSelf()
     }
     val cb = onStarted
@@ -69,6 +72,7 @@ class MixtapeRecordingService : Service() {
 
   override fun onDestroy() {
     running = false
+    takeId = 0L
     if (wakeLock?.isHeld == true) wakeLock?.release()
     wakeLock = null
     super.onDestroy()
@@ -80,9 +84,15 @@ class MixtapeRecordingService : Service() {
     const val NOTIFICATION_ID = 2101
     const val EXTRA_TEXT = "text"
     const val EXTRA_STOP = "mixtape.stopTake"
+    // The take a Stop belongs to, so an intent replayed later (a restored
+    // activity, a recreated task) cannot end a different take.
+    const val EXTRA_TAKE_ID = "mixtape.takeId"
 
     @Volatile
     var running = false
+    // Set when a take takes the service. 0 means no take holds it.
+    @Volatile
+    var takeId = 0L
     var onStarted: ((Boolean) -> Unit)? = null
 
     fun buildNotification(context: Context, text: String): Notification {
@@ -106,7 +116,7 @@ class MixtapeRecordingService : Service() {
       // needs an activity — which there is none of after a swipe from recents.
       val stop = launch?.let {
         PendingIntent.getActivity(
-          context, 1, Intent(it).putExtra(EXTRA_STOP, true),
+          context, 1, Intent(it).putExtra(EXTRA_STOP, true).putExtra(EXTRA_TAKE_ID, takeId),
           PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
       }
