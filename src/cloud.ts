@@ -124,6 +124,12 @@ export async function callAwake<T = any>(name: string, data: unknown, awakeMs = 
   }
 }
 
+/** Joins segments on the server; the budget counts only time the JS ran, like callAwake. */
+export async function mergeAudioSegments(segments: string[], dest: string): Promise<string> {
+  const res = await callAwake<{ path: string }>("mergeAudio", { segments, dest }, 540000);
+  return res.path;
+}
+
 /** What the server knows about a recording, in the phone's shape. */
 export function fromDoc(d: any): Partial<Recording> {
   // "stuck": the submit's answer was lost and the sweep could not settle it.
@@ -319,7 +325,7 @@ export async function flushUploads(canUpload: boolean): Promise<number> {
   if (!(await isCanonical()) || !canUpload) return 0;
   const all = await listRecordings();
   let n = 0;
-  for (const r of all.filter((x) => x.uploadStatus === "pending" && !x.mergePending)) {
+  for (const r of all.filter((x) => x.uploadStatus === "pending" && !x.mergePending && !x.mergedInCloud && !x.damaged)) {
     try {
       if (!r.remoteCreated) {
         await createRemote(r, `create:${r.id}`);

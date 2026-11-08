@@ -30,7 +30,6 @@ import {
   isSignedIn,
   uploadRecording,
   uploadToPath,
-  mergeAudioSegments,
   downloadRemoteFile,
   deleteRemoteRecording,
   downloadUrlForPath,
@@ -43,7 +42,7 @@ import {
 } from "./firebase";
 import { notify } from "./notifications";
 import { clearPending } from "./pendingTake";
-import { isCanonical, createRemote, uploadAudioOnce, retranscribeRemote } from "./cloud";
+import { isCanonical, createRemote, uploadAudioOnce, retranscribeRemote, mergeAudioSegments } from "./cloud";
 import { remoteCanonicalPath } from "./firebase";
 import { logEvent, getLogText } from "./log";
 import { isPlayable } from "./mp4";

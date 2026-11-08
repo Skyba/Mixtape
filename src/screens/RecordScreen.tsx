@@ -32,7 +32,6 @@ import {
   updateShare,
   unpublishShare,
   uploadToPath,
-  mergeAudioSegments,
   downloadUrlForPath,
   liveSegmentPath,
   liveMergedPath,
@@ -48,7 +47,8 @@ import {
 import { logEvent } from "../log";
 import { SEGMENT_DIR } from "../recover";
 import { isPlayable } from "../mp4";
-import { isCanonical } from "../cloud";
+import { isCanonical, mergeAudioSegments } from "../cloud";
+import { alwaysPrivate } from "../placement";
 import { capturePlace } from "../place";
 import type { Place } from "../place";
 import { notify } from "../notifications";
@@ -975,7 +975,8 @@ export default function RecordScreen() {
     }
 
     setLiveUrl("");
-    if (shareLive && isFirebaseConfigured && isSignedIn()) {
+    // A private take never gets a public live link.
+    if (shareLive && !isPrivate && !alwaysPrivate(folder) && isFirebaseConfigured && isSignedIn()) {
       try {
         const { shareId, url } = await createLiveShare({
           base: "Live recording…",

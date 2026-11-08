@@ -382,19 +382,6 @@ export async function uploadToPath(
 }
 
 /** Concatenates uploaded segment files into one m4a via the Cloud Function. */
-export async function mergeAudioSegments(
-  segments: string[],
-  dest: string
-): Promise<string> {
-  await ensureSignedIn();
-  // long timeout — merging many segments can take minutes (default is 70s).
-  const fn = httpsCallable(getFunctions(app(), "us-central1"), "mergeAudio", {
-    timeout: 540000,
-  });
-  const res: any = await fn({ segments, dest });
-  return res.data.path as string;
-}
-
 /** Calls a callable Cloud Function as the signed-in user. */
 export async function callFunction<T = any>(name: string, data: unknown, timeoutMs = 30000): Promise<T> {
   await ensureSignedIn();
