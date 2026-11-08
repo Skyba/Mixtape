@@ -28,6 +28,7 @@
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_MICROPHONE",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
@@ -66,7 +67,8 @@
           "locationWhenInUsePermission": "Mixtape tags a recording with the city it was made in, so your archive is sortable by place. It takes one reading when a recording starts and never follows you."
         }
       ],
-      "expo-background-task"
+      "expo-background-task",
+      "./modules/mixtape-wakelock/app.plugin.js"
     ],
     "extra": {
       "eas": {

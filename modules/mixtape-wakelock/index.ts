@@ -12,6 +12,7 @@ export type AudioInput = {
 type MixtapeWakelockEvents = {
   onRecordingSilenced: (event: { silenced: boolean }) => void;
   onSegmentDue: (event: { token: number }) => void;
+  onStopRequested: (event: {}) => void;
 };
 
 declare class MixtapeWakelockModule extends NativeModule<MixtapeWakelockEvents> {
@@ -22,6 +23,12 @@ declare class MixtapeWakelockModule extends NativeModule<MixtapeWakelockEvents> 
   stopSilenceWatch(): void;
   scheduleSegment(delayMs: number, token: number): void;
   cancelSegment(): void;
+  startTakeService(text: string): Promise<boolean>;
+  updateTakeService(text: string): void;
+  stopTakeService(): void;
+  isTakeServiceRunning(): boolean;
+  hasActivity(): boolean;
+  consumeStopRequest(): boolean;
 }
 
 const mod = (() => {
@@ -133,6 +140,67 @@ export function onSegmentDue(cb: (token: number) => void): () => void {
   if (!mod) return () => {};
   try {
     const sub = mod.addListener("onSegmentDue", (e) => cb(e.token));
+    return () => sub.remove();
+  } catch {
+    return () => {};
+  }
+}
+
+/**
+ * Starts the app's own microphone foreground service, held for the whole take
+ * so that restarting the recorder at a segment boundary in the background is
+ * not silenced. Call it with the app on screen. Resolves false on a build that
+ * predates it or when Android refused it; expo-audio's own service is then
+ * the only one, as before.
+ */
+export async function startTakeService(text: string): Promise<boolean> {
+  try {
+    if (typeof (mod as any)?.startTakeService !== "function") return false;
+    return await Promise.race([
+      mod!.startTakeService(text),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 5000)),
+    ]);
+  } catch {
+    return false;
+  }
+}
+
+export function updateTakeService(text: string): void {
+  try {
+    (mod as any)?.updateTakeService?.(text);
+  } catch {}
+}
+
+export function stopTakeService(): void {
+  try {
+    (mod as any)?.stopTakeService?.();
+  } catch {}
+}
+
+/** True on a build without the function: the old behaviour assumed one. */
+export function hasActivity(): boolean {
+  try {
+    const f = (mod as any)?.hasActivity;
+    return typeof f === "function" ? !!f.call(mod) : true;
+  } catch {
+    return true;
+  }
+}
+
+/** Whether the notification's Stop was tapped since the last call. */
+export function consumeStopRequest(): boolean {
+  try {
+    return !!(mod as any)?.consumeStopRequest?.();
+  } catch {
+    return false;
+  }
+}
+
+/** The notification's Stop & save. Returns an unsubscribe. */
+export function onStopRequested(cb: () => void): () => void {
+  if (!mod) return () => {};
+  try {
+    const sub = mod.addListener("onStopRequested", () => cb());
     return () => sub.remove();
   } catch {
     return () => {};
