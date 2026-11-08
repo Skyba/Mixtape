@@ -516,15 +516,25 @@ async function postProcess(data, meta, env, fetchImpl) {
 
 // The names that leave the app (public share, rendered transcript): a person's
 // or a settled one, two agreeing signals, or AssemblyAI with the name spoken.
-// A single model guess or a voice-only match stays "Speaker X" until confirmed.
+// A single model guess or a voice-only match stays "Speaker X" until confirmed,
+// and says so explicitly: a reader that misses a key falls back on its own,
+// and an older page named a missing letter by list position.
 // Mirrors liveMap() in src/screens/RecordingDetailScreen.tsx.
 const PUBLIC_BY = ["user", "auto", "ai-review", "channel", "aai"];
+const withheld = (k) => (/^[A-Z]$/.test(k) ? `Speaker ${k}` : "Unnamed voice");
 function publicSpeakerMap(doc) {
   const labels = doc.speakerLabels || {};
   if (!Object.keys(labels).length) return doc.speakerMap || null;
   const map = {};
-  for (const [k, l] of Object.entries(labels)) if (l && PUBLIC_BY.includes(l.by)) map[k] = l.name || "";
+  for (const [k, l] of Object.entries(labels)) map[k] = l && PUBLIC_BY.includes(l.by) && (l.name || "").trim() ? l.name : withheld(k);
   return Object.keys(map).length ? map : null;
+}
+
+// The language a reader should see: the owner's pick, else what detection
+// found. The stored choice stays as the owner left it ("" or "Auto" = detect).
+function shownLanguage(d) {
+  const chosen = d.language && d.language !== "Auto" ? d.language : "";
+  return chosen || d.detectedLanguage || d.language || "";
 }
 
 // Mirrors the public share doc, after checking the share is the owner's: this
@@ -597,5 +607,5 @@ module.exports = {
   AAI, AAI_RATE_PER_HOUR, LANG_CODES, LANG_NAMES, CLIENT_FIELDS, CREATE_ONLY_FIELDS, SYNCED_FIELDS,
   ownerAttribution, canonStamp, validField, validLabel, PatchError, applyPatch,
   renderTranscript, acceptSpeakerMapping, inferSpeakerMap, inferTopic, speakerIdentification, anthropic,
-  aaiRequestBody, postProcess, updateShare, publicSpeakerMap, anonymiseUnlisted, concatAudio,
+  aaiRequestBody, postProcess, updateShare, publicSpeakerMap, shownLanguage, anonymiseUnlisted, concatAudio,
 };

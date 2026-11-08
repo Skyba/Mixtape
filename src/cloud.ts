@@ -146,7 +146,7 @@ export function fromDoc(d: any): Partial<Recording> {
     remoteCreated: true,
   };
   // null on the server is "unset" on the phone.
-  for (const k of ["speakerId", "note", "place", "inputName", "topic", "meIncluded", "shareId", "summary"]) if (out[k] === null) out[k] = undefined;
+  for (const k of ["speakerId", "note", "place", "inputName", "topic", "meIncluded", "shareId", "summary", "detectedLanguage"]) if (out[k] === null) out[k] = undefined;
   delete out.audio; delete out.current; delete out.status; delete out.attempts; delete out.ops; delete out.uid; delete out.schema; delete out.migration; delete out.deletedAt; delete out.purge; delete out.shareDirty;
   return out;
 }
@@ -159,6 +159,7 @@ function serverOwned(d: any): Partial<Recording> {
     audioDurationSec: d.audioDurationSec ?? undefined,
     transcribedAt: d.transcribedAt ?? undefined,
     estCostUsd: d.estCostUsd ?? undefined,
+    detectedLanguage: d.detectedLanguage ?? undefined,
     mergedInCloud: !!d.audio,
     remoteCreated: true,
     ...(d.audio ? { uploadStatus: "uploaded" as const } : {}),

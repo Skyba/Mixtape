@@ -485,7 +485,7 @@ function makeCanonical({ db, bucket, fetchImpl, env, now, signer, isOwner }) {
     if (!post) return false;
     const ok = await pushShare(d.shareDirty.shareId, uid, {
       utterances: post.utterances || [], speakerMap: lib.publicSpeakerMap(d), topic: d.topic,
-      durationSeconds: d.durationSeconds || 0, speakers: d.speakers, language: d.language || "",
+      durationSeconds: d.durationSeconds || 0, speakers: d.speakers, language: lib.shownLanguage(d),
     }, d.current.rev);
     if (!ok) return false;
     await mutate(uid, id, (cur) => (cur.shareDirty && cur.shareDirty.rev === d.shareDirty.rev ? { doc: { ...cur, shareDirty: null } } : null));

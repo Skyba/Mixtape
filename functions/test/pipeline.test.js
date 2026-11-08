@@ -62,7 +62,7 @@ test("naming a voice takes the name off a model's suggestion on another voice in
 
 test("the names that leave the app skip single-signal guesses", () => {
   const map = lib.publicSpeakerMap({ speakerLabels: { A: { name: "Erica", by: "voiceprint" }, B: { name: "Basile", by: "user" }, C: { name: "Danny", by: "ai-review" }, D: { name: "Tyler", by: "claude" } } });
-  assert.deepEqual(map, { B: "Basile", C: "Danny" });
+  assert.deepEqual(map, { A: "Speaker A", B: "Basile", C: "Danny", D: "Speaker D" });
 });
 
 test("merge: a bad segment fails the merge instead of giving a short file", async () => {
@@ -87,4 +87,16 @@ test("merge: a bad segment fails the merge instead of giving a short file", asyn
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("withheld voices are pushed as Speaker X, never left for a reader to name by position", () => {
+  const map = lib.publicSpeakerMap({ speakerLabels: { A: { name: "Erica", by: "voiceprint" }, B: { name: "Basile", by: "user" }, Danny: { name: "Danny", by: "claude" }, C: { name: "", by: "user" } } });
+  assert.deepEqual(map, { A: "Speaker A", B: "Basile", Danny: "Unnamed voice", C: "Speaker C" });
+});
+
+test("the language shown is the owner's pick, else what detection found", () => {
+  assert.equal(lib.shownLanguage({ language: "Auto", detectedLanguage: "French" }), "French");
+  assert.equal(lib.shownLanguage({ language: "", detectedLanguage: "French" }), "French");
+  assert.equal(lib.shownLanguage({ language: "English", detectedLanguage: "French" }), "English");
+  assert.equal(lib.shownLanguage({ language: "Auto" }), "Auto");
 });

@@ -179,10 +179,17 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
   function liveMap(r: Recording = rec): Record<string, string> | undefined {
     const labels = r.speakerLabels ?? {};
     if (!Object.keys(labels).length) return r.speakerMap;
+    // A withheld voice is pushed as "Speaker X" explicitly: a reader missing
+    // the key falls back on its own (older pages named it by list position).
     const map: Record<string, string> = {};
-    for (const [k, l] of Object.entries(labels)) if (l && (settled(l) || ["ai-review", "channel", "aai"].includes(l.by))) map[k] = l.name;
+    for (const [k, l] of Object.entries(labels)) {
+      map[k] = l && (settled(l) || ["ai-review", "channel", "aai"].includes(l.by)) && l.name.trim() ? l.name : /^[A-Z]$/.test(k) ? `Speaker ${k}` : "Unnamed voice";
+    }
     return Object.keys(map).length ? map : undefined;
   }
+  // The language to read it as: your pick, else what detection found.
+  const pickedLanguage = rec.language && rec.language !== "Auto" ? rec.language : "";
+  const shownLanguage = pickedLanguage || rec.detectedLanguage || "";
   /** A naming edit reaches the public link too, not only the phone. */
   function shareNames(r: Recording) {
     if (r.shareId && isFirebaseConfigured && isSignedIn()) updateShareNames(r.shareId, shownRev, liveMap(r)).catch(() => {});
@@ -304,7 +311,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     }
     setShareBusy(true);
     try {
-      const { shareId, url } = await publishShare({ ...rec, speakerMap: liveMap() }, utterances ?? []);
+      const { shareId, url } = await publishShare({ ...rec, speakerMap: liveMap(), language: shownLanguage }, utterances ?? []);
       const preview = touch({ ...rec, shareId }, "shareId");
       await recordEdit(preview, { shareId });
       const next = await commitMeta(rec, (cur) => adopt(cur, preview, ["shareId"]));
@@ -565,7 +572,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
     } else if (rec.transcriptStatus === "done") {
       Alert.alert(
         "Language changed",
-        `The transcript was made in ${rec.language || "auto"}. Run it again in ${
+        `The transcript was made in ${pickedLanguage || (rec.detectedLanguage ? `${rec.detectedLanguage} (auto-detected)` : "auto")}. Run it again in ${
           language === "Auto" ? "auto-detect" : language
         }?`,
         [
@@ -727,7 +734,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
       {copied ? <Text style={styles.copiedBanner}>Copied ✓</Text> : null}
       <Text style={styles.title}>{rec.topic || rec.base}</Text>
       <Text style={styles.meta}>
-        {[fmtWhen(rec.recordedAt), fmtLength(rec.durationSeconds || rec.audioDurationSec), placeLabel(rec.place), rec.language].filter(Boolean).join(" · ")}
+        {[fmtWhen(rec.recordedAt), fmtLength(rec.durationSeconds || rec.audioDurationSec), placeLabel(rec.place), pickedLanguage || (rec.detectedLanguage ? `${rec.detectedLanguage} (detected)` : "")].filter(Boolean).join(" · ")}
       </Text>
       {!done || rec.uploadStatus !== "uploaded" ? (
         <Text style={[styles.meta, { color: pending ? "#fbbf24" : "#9aa0a6" }]}>
@@ -934,7 +941,7 @@ export default function RecordingDetailScreen({ route, navigation }: Props) {
               canUseTranscript && isFirebaseConfigured && rec.shareId ? { t: "Update the public link", f: publish } : null,
               done && !pending && !rec.damaged ? { t: "Re-transcribe", f: () => doTranscribe() } : null,
               { t: "Change folder", f: () => setShowPlacement(true) },
-              { t: `Language: ${rec.language || "Auto"} — change…`, f: () => setLangSheet(true) },
+              { t: `Language: ${pickedLanguage || (rec.detectedLanguage ? `Auto (${rec.detectedLanguage})` : "Auto")} — change…`, f: () => setLangSheet(true) },
               { t: showDetails ? "Hide job details" : "Show job details", f: () => setShowDetails((v) => !v) },
               { t: "Delete recording", f: confirmDelete, danger: true },
             ].filter(Boolean).map((o: any) => (

@@ -82,7 +82,8 @@ function getId() {
 }
 
 const id = getId();
-const nameFor = (s, letter) => (s.speakerMap && s.speakerMap[letter]) || (s.speakers && s.speakers[letter.charCodeAt(0)-65]) || ("Speaker " + letter);
+// Letter order is arbitrary: a letter with no public name is "Speaker X", never a name from the list by position.
+const nameFor = (s, letter) => (s.speakerMap && s.speakerMap[letter]) || (/^[A-Z]$/.test(letter) ? "Speaker " + letter : letter);
 let activeTab = true; // true = transcript
 
 function load() {

@@ -99,6 +99,8 @@ export type Recording = {
   /** v2: a server operation sent but not yet acknowledged (re-transcribe). */
   pendingOp?: string;
   language: string;
+  /** What the server's auto-detection found; `language` stays the owner's pick. */
+  detectedLanguage?: string;
   topic?: string;
   transcriptStatus: TranscriptStatus;
   uploadStatus: UploadStatus;

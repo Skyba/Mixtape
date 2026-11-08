@@ -227,7 +227,9 @@ function needId(req, res) {
 // through a route this API never sees.
 function apiView(d) {
   const { shareId, shareDirty, ...rest } = canon().project(d);
-  return rest;
+  // `language` is what to read the transcript as; the owner's own pick
+  // ("" or "Auto" = detect) is kept apart as languageChoice.
+  return { ...rest, language: lib.shownLanguage(d), languageChoice: d.language || "" };
 }
 // Serializes a canonical error into an HTTP response.
 function sendCanonError(res, e) {
@@ -291,7 +293,8 @@ function listRow(m, folder, base) {
         recordedAt: m.recordedAt,
         durationSeconds: m.durationSeconds,
         speakers: m.speakers,
-        language: m.language,
+        // Auto-detected takes carry what detection found, not "".
+        language: lib.shownLanguage(m),
         topic: m.topic || null,
         transcriptStatus: m.transcriptStatus,
         summary: m.summary || null,
@@ -714,12 +717,11 @@ async function mergeAdmitted({ uid, segments, dest, ph, canonDest }) {
     }
 }
 
+// Letter order is arbitrary: a letter with no public name is "Speaker X",
+// never the speakers list by position (which named the wrong person, or a
+// second voice after someone already named). A name key is its own name.
 function speakerName(s, letter) {
-  return (
-    (s.speakerMap && s.speakerMap[letter]) ||
-    (s.speakers && s.speakers[letter.charCodeAt(0) - 65]) ||
-    "Speaker " + letter
-  );
+  return (s.speakerMap && s.speakerMap[letter]) || (/^[A-Z]$/.test(letter) ? "Speaker " + letter : letter);
 }
 
 // Public-page prompt box: proxies to Anthropic with a server-side key so the
