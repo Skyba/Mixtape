@@ -29,16 +29,41 @@ const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const TRANSCRIBE_SECRETS = ["ASSEMBLYAI_KEY", "ANTHROPIC_KEY", "TRANSCRIBE_WEBHOOK_SECRET"];
 
-// ----- API key management (server-side hashing; raw key shown once) -----
-exports.createApiKey = onCall({ region: "us-central1" }, async (req) => {
+// The owner is whoever has an ownerProfiles document, which only an admin
+// writes (tools/push-owner-profile.js). Self-signup is off, but accounts made
+// before that can still sign in, and none of them may spend the AssemblyAI or
+// Anthropic budget or reach these callables.
+const OWNER_CACHE_MS = 5 * 60 * 1000;
+const ownerCache = new Map();
+async function isOwner(uid) {
+  if (!uid) return false;
+  const hit = ownerCache.get(uid);
+  if (hit && Date.now() - hit.at < OWNER_CACHE_MS) return hit.ok;
+  const ok = (await admin.firestore().collection("ownerProfiles").doc(uid).get()).exists;
+  ownerCache.set(uid, { ok, at: Date.now() });
+  return ok;
+}
+async function ownerOnly(req) {
   const uid = req.auth && req.auth.uid;
   if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
-  const { label, scopes } = req.data || {};
+  if (!(await isOwner(uid))) throw new HttpsError("permission-denied", "This account is not the owner.");
+  return uid;
+}
+
+// ----- API key management (server-side hashing; raw key shown once) -----
+// A new key skips private recordings unless asked otherwise, and may expire.
+exports.createApiKey = onCall({ region: "us-central1" }, async (req) => {
+  const uid = await ownerOnly(req);
+  const { label, scopes, includePrivate, expiresInDays } = req.data || {};
   const raw = "mxt_live_" + crypto.randomBytes(24).toString("hex");
   const valid =
     Array.isArray(scopes) && scopes.length
       ? scopes.filter((s) => ALL_SCOPES.includes(s) || WRITE_SCOPES.includes(s))
       : ALL_SCOPES;
+  const days = Number(expiresInDays);
+  if (expiresInDays != null && !(Number.isInteger(days) && days >= 1 && days <= 3650)) {
+    throw new HttpsError("invalid-argument", "expiresInDays must be 1..3650");
+  }
   await admin
     .firestore()
     .collection("apiKeys")
@@ -48,6 +73,8 @@ exports.createApiKey = onCall({ region: "us-central1" }, async (req) => {
       label: label || "API key",
       scopes: valid,
       prefix: raw.slice(0, 16),
+      hidePrivate: includePrivate !== true,
+      expiresAt: expiresInDays != null ? new Date(Date.now() + days * 86400000).toISOString() : null,
       createdAt: new Date().toISOString(),
       lastUsedAt: null,
     });
@@ -55,8 +82,7 @@ exports.createApiKey = onCall({ region: "us-central1" }, async (req) => {
 });
 
 exports.listApiKeys = onCall({ region: "us-central1" }, async (req) => {
-  const uid = req.auth && req.auth.uid;
-  if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
+  const uid = await ownerOnly(req);
   const snap = await admin
     .firestore()
     .collection("apiKeys")
@@ -65,18 +91,20 @@ exports.listApiKeys = onCall({ region: "us-central1" }, async (req) => {
   return {
     keys: snap.docs.map((d) => ({
       id: d.id,
-      label: d.data().label,
-      prefix: d.data().prefix,
-      scopes: d.data().scopes,
+      // Keys from tools/create-reader-key.js carry a name and no prefix.
+      label: d.data().label || d.data().name || "API key",
+      prefix: d.data().prefix || null,
+      scopes: d.data().scopes || [],
+      hidePrivate: d.data().hidePrivate === true,
+      expiresAt: d.data().expiresAt || null,
       createdAt: d.data().createdAt,
-      lastUsedAt: d.data().lastUsedAt,
+      lastUsedAt: d.data().lastUsedAt || null,
     })),
   };
 });
 
 exports.revokeApiKey = onCall({ region: "us-central1" }, async (req) => {
-  const uid = req.auth && req.auth.uid;
-  if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
+  const uid = await ownerOnly(req);
   const { id } = req.data || {};
   const ref = admin.firestore().collection("apiKeys").doc(String(id));
   const doc = await ref.get();
@@ -102,6 +130,7 @@ async function authKey(req, res, next) {
     .doc(sha256(token))
     .get();
   if (!doc.exists) return res.status(401).json({ error: "invalid key" });
+  if (doc.data().expiresAt && !(Date.parse(doc.data().expiresAt) > Date.now())) return res.status(401).json({ error: "key expired" });
   req.uid = doc.data().ownerUid;
   req.scopes = doc.data().scopes || [];
   req.hidePrivate = doc.data().hidePrivate === true;
@@ -130,7 +159,7 @@ const pathFor = (uid, folder, base, ext) =>
 // request: "legacy" until the bucket migration, "frozen" during it,
 // "canonical" after. See mixtape-private/docs/migration/plan.md.
 let _canon = null;
-const canon = () => _canon || (_canon = makeCanonical({ db: admin.firestore(), bucket: bkt(), env: process.env }));
+const canon = () => _canon || (_canon = makeCanonical({ db: admin.firestore(), bucket: bkt(), env: process.env, isOwner }));
 const phase = () => canon().readPhase();
 
 // In-flight legacy mutations. A per-write phase read cannot fence a write
@@ -189,7 +218,16 @@ async function resolveLegacy(req, res) {
 function needId(req, res) {
   const id = req.query.id;
   if (!id || typeof id !== "string") { res.status(req.query.folder ? 410 : 400).json({ error: req.query.folder ? "folder/base addressing is gone; use id" : "id required" }); return null; }
+  // An id with a slash would address a subdocument (items/<id>/webhooks/...).
+  if (!canon().ID_RE.test(id)) { res.status(400).json({ error: "bad id" }); return null; }
   return id;
+}
+// A recording as the REST API returns it. Share ids are bearer links to the
+// transcript: no key needs one, and a reader holding one would keep reading
+// through a route this API never sees.
+function apiView(d) {
+  const { shareId, shareDirty, ...rest } = canon().project(d);
+  return rest;
 }
 // Serializes a canonical error into an HTTP response.
 function sendCanonError(res, e) {
@@ -205,20 +243,24 @@ router.use(authKey);
 // tools/create-reader-key.js) never reaches a recording marked private, nor
 // the phone's logs. Checked live, so marking a recording private cuts it off
 // at once. Only the canonical id addressing gets through.
+// A recording in an always-private folder counts as private even before its
+// flag is set (config/privacy; see canonical.js).
 router.use(async (req, res, next) => {
   // Express routes ignore case and a trailing slash; this check must too.
   const route = req.path.toLowerCase().replace(/\/+$/, "");
   if (!req.hidePrivate || route === "/recordings") return next();
   if (route === "/logs" || typeof req.query.id !== "string" || !req.query.id) return res.status(403).json({ error: "not available to this key" });
+  if (!canon().ID_RE.test(req.query.id)) return res.status(404).json({ error: "not found" });
   const s = await canon().docRef(req.uid, req.query.id).get();
-  if (!s.exists || s.data().private === true) return res.status(404).json({ error: "not found" });
+  if (!s.exists || canon().isPrivateDoc(s.data(), await canon().alwaysPrivateFolders())) return res.status(404).json({ error: "not found" });
   next();
 });
 
 router.get("/recordings", async (req, res) => {
   const since = req.query.since ? Date.parse(String(req.query.since)) : 0;
   if ((await phase()) === "canonical") {
-    const docs = (await canon().list(req.uid, { since })).filter((d) => !(req.hidePrivate && d.private === true));
+    const folders = req.hidePrivate ? await canon().alwaysPrivateFolders() : [];
+    const docs = (await canon().list(req.uid, { since })).filter((d) => !(req.hidePrivate && canon().isPrivateDoc(d, folders)));
     const out = docs.map((d) => ({ ...listRow(canon().project(d), d.folder, d.base), transcript_rev: d.current ? d.current.rev : null }));
     out.sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
     return res.json({ recordings: out });
@@ -329,7 +371,7 @@ router.get("/meta", requireScope("read:meta"), async (req, res) => {
   if ((await phase()) === "canonical") {
     const id = needId(req, res); if (!id) return;
     const d = await canon().get(req.uid, id);
-    return d ? res.json(canon().project(d)) : res.status(404).json({ error: "not found" });
+    return d ? res.json(apiView(d)) : res.status(404).json({ error: "not found" });
   }
   const q = await resolveLegacy(req, res);
   if (!q) return;
@@ -347,7 +389,8 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
     const id = needId(req, res); if (!id) return;
     try {
       const r = await canon().patch(req.uid, id, req.body || {});
-      return res.json({ applied: r.applied, ...r.doc });
+      const { shareId, shareDirty, ...doc } = r.doc;
+      return res.json({ applied: r.applied, ...doc });
     } catch (e) {
       if (e instanceof PatchError) return res.status(e.status).json({ error: e.message, ...e.extra });
       if (isCanonError(e)) return sendCanonError(res, e);
@@ -431,8 +474,7 @@ router.patch("/meta", requireScope("write:meta"), async (req, res) => {
 // merged sidecar so the phone writes the authoritative state locally rather
 // than its own guess at it.
 exports.patchMeta = onCall({ region: "us-central1" }, async (req) => {
-  const uid = req.auth && req.auth.uid;
-  if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
+  const uid = await ownerOnly(req);
   const { folder, base, patch, id } = req.data || {};
   const ph = await phase();
   if (ph === "canonical") {
@@ -486,16 +528,16 @@ const authed = (req) => { const uid = req.auth && req.auth.uid; if (!uid) throw 
 
 // Canonical-only callables (fail with unavailable until cutover).
 exports.createRecording = onCall({ region: "us-central1" }, async (req) => {
-  const uid = authed(req);
+  const uid = await ownerOnly(req);
   try { return await canon().createRecording(uid, req.data || {}); } catch (e) { throw toHttpsError(e); }
 });
 exports.retranscribe = onCall({ region: "us-central1", secrets: ["ASSEMBLYAI_KEY", "ANTHROPIC_KEY", "TRANSCRIBE_WEBHOOK_SECRET"] }, async (req) => {
-  const uid = authed(req);
+  const uid = await ownerOnly(req);
   const { id, opId } = req.data || {};
   try { return await canon().retranscribe(uid, String(id), String(opId || "")); } catch (e) { throw toHttpsError(e); }
 });
 exports.deleteRecording = onCall({ region: "us-central1" }, async (req) => {
-  const uid = authed(req);
+  const uid = await ownerOnly(req);
   const { id, opId } = req.data || {};
   try { return await canon().deleteRecording(uid, String(id), String(opId || "")); } catch (e) { throw toHttpsError(e); }
 });
@@ -503,7 +545,7 @@ exports.deleteRecording = onCall({ region: "us-central1" }, async (req) => {
 // SDK cannot read crc32c, and the phone must not adopt an object it did not
 // write without checking the bytes.
 exports.audioDescriptor = onCall({ region: "us-central1" }, async (req) => {
-  const uid = authed(req);
+  const uid = await ownerOnly(req);
   const { id } = req.data || {};
   if (typeof id !== "string") throw new HttpsError("invalid-argument", "id required");
   return { audio: await canon().audioDescriptor(uid, id) };
@@ -696,6 +738,8 @@ function speakerName(s, letter) {
 // Questions allowed per share per day. Generous for a reader, useless for
 // anyone trying to run up the bill.
 const ASK_DAILY_LIMIT = 50;
+// All shares together, per day: bounds the bill however many links exist.
+const ASK_GLOBAL_DAILY_LIMIT = 200;
 
 exports.askSonnet = onRequest(
   {
@@ -703,6 +747,7 @@ exports.askSonnet = onRequest(
     secrets: ["ANTHROPIC_KEY"],
     cors: true,
     invoker: "public",
+    maxInstances: 3,
   },
   async (req, res) => {
     try {
@@ -722,26 +767,42 @@ exports.askSonnet = onRequest(
         res.status(413).json({ error: "prompt too long" });
         return;
       }
-      const snap = await admin.firestore().doc(`shares/${id}`).get();
-      if (!snap.exists) {
+      if (typeof id !== "string" || !/^[A-Za-z0-9]{1,40}$/.test(id)) {
         res.status(404).json({ error: "share not found" });
         return;
       }
-      const s = snap.data();
-
       // This endpoint is public — a share id is the only thing gating it — and
       // every call spends the project's Anthropic budget. Capping the prompt
-      // bounds one call; this bounds the number of them. The counter lives on
-      // the share doc, so it costs no extra read.
+      // bounds one call; these bound the number of them, per share and in
+      // all. Counted in a transaction, so parallel requests cannot all read
+      // the same count and all pass.
+      const db = admin.firestore();
       const today = new Date().toISOString().slice(0, 10);
-      const askedToday = s.askDay === today ? s.askCount || 0 : 0;
-      if (askedToday >= ASK_DAILY_LIMIT) {
+      const shareRef = db.doc(`shares/${id}`);
+      const quotaRef = db.doc(`askQuota/${today}`);
+      const ownerUid = (await shareRef.get().then((x) => x.exists ? x.data().ownerUid : null));
+      // A closed link (revoked, or a live link whose take ended) answers
+      // nothing, nor does a share made by an account that is not the owner.
+      const verdict = !ownerUid || !(await isOwner(ownerUid)) ? { status: 404 } : await db.runTransaction(async (tx) => {
+        const [snap, quota] = [await tx.get(shareRef), await tx.get(quotaRef)];
+        const d = snap.exists ? snap.data() : null;
+        if (!d || d.revoked === true || d.live === false) return { status: 404 };
+        const askedToday = d.askDay === today ? d.askCount || 0 : 0;
+        const allToday = quota.exists ? quota.data().count || 0 : 0;
+        if (askedToday >= ASK_DAILY_LIMIT || allToday >= ASK_GLOBAL_DAILY_LIMIT) return { status: 429 };
+        tx.set(shareRef, { askDay: today, askCount: askedToday + 1 }, { merge: true });
+        tx.set(quotaRef, { count: allToday + 1 }, { merge: true });
+        return { share: d };
+      });
+      if (verdict.status === 404) {
+        res.status(404).json({ error: "share not found" });
+        return;
+      }
+      if (verdict.status === 429) {
         res.status(429).json({ error: "daily question limit reached" });
         return;
       }
-      snap.ref
-        .set({ askDay: today, askCount: askedToday + 1 }, { merge: true })
-        .catch(() => {});
+      const s = verdict.share;
 
       const transcript = (s.utterances || [])
         .map((u) => `${speakerName(s, u.speaker)}: ${u.text}`)
@@ -1222,9 +1283,15 @@ exports.reviewRecording = onDocumentWritten({ ...REVIEW_OPTS, document: "recordi
   const before = event.data.before.exists ? event.data.before.data() : null;
   const after = event.data.after.exists ? event.data.after.data() : null;
   if (!after || !after.reviewDue || JSON.stringify(after.reviewDue) === JSON.stringify(before && before.reviewDue)) return;
-  console.log(JSON.stringify({ review: event.params.id, out: await reviewer().reviewOne(event.params.uid, event.params.id, after.reviewDue) }));
+  console.log(JSON.stringify({ review: event.params.id, out: reviewLog(await reviewer().reviewOne(event.params.uid, event.params.id, after.reviewDue)) }));
 });
 exports.reviewSweep = onSchedule({ ...REVIEW_OPTS, schedule: "every 30 minutes" }, async () => {
   if ((await phase()) !== "canonical") return;
-  console.log(JSON.stringify({ reviewSweep: await reviewer().sweep() }));
+  console.log(JSON.stringify({ reviewSweep: (await reviewer().sweep()).map(([id, r]) => [id, typeof r === "string" ? "error" : reviewLog(r)]) }));
 });
+// Logs carry counts, never names, quotes or folders: Cloud Logging keeps
+// them for private recordings too.
+function reviewLog(r) {
+  if (!r || r.skipped) return r;
+  return { rev: r.rev, labels: Object.keys(r.labels || {}).length, flagged: !!r.flag, folderSuggested: !!r.folder };
+}

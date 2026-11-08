@@ -426,8 +426,10 @@ export function liveMergedPath(id: string): string {
 export type ApiKeyInfo = {
   id: string;
   label: string;
-  prefix: string;
+  prefix: string | null;
   scopes: string[];
+  hidePrivate: boolean;
+  expiresAt: string | null;
   createdAt: string;
   lastUsedAt: string | null;
 };
@@ -439,10 +441,11 @@ function fn(name: string) {
 /** Creates an API key; the raw key is returned ONCE. */
 export async function createApiKey(
   label: string,
-  scopes: string[]
+  scopes: string[],
+  opts: { includePrivate?: boolean; expiresInDays?: number } = {}
 ): Promise<{ key: string; prefix: string }> {
   await ensureSignedIn();
-  const res: any = await fn("createApiKey")({ label, scopes });
+  const res: any = await fn("createApiKey")({ label, scopes, ...opts });
   return res.data;
 }
 

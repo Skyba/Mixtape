@@ -4,6 +4,7 @@ import {
   Alert,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -25,12 +26,21 @@ const SCOPES = [
   { key: "read:audio", label: "Audio" },
 ];
 const API_BASE = `https://${firebaseConfig.projectId}.web.app/api/v1`;
+const EXPIRIES: { days: number | undefined; label: string }[] = [
+  { days: 30, label: "30 days" },
+  { days: 365, label: "1 year" },
+  { days: undefined, label: "Never" },
+];
 
 export default function ApiKeysScreen() {
   const [keys, setKeys] = useState<ApiKeyInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [newKey, setNewKey] = useState<string | null>(null);
+  // A key is usually handed to something else, so by default it never sees
+  // a recording marked private.
+  const [includePrivate, setIncludePrivate] = useState(false);
+  const [expiresInDays, setExpiresInDays] = useState<number | undefined>(30);
 
   async function load() {
     setLoading(true);
@@ -54,7 +64,8 @@ export default function ApiKeysScreen() {
     try {
       const { key } = await createApiKey(
         "Key " + new Date().toISOString().slice(0, 10),
-        SCOPES.map((s) => s.key)
+        SCOPES.map((s) => s.key),
+        { includePrivate, expiresInDays }
       );
       setNewKey(key);
       await load();
@@ -65,7 +76,7 @@ export default function ApiKeysScreen() {
   }
 
   function confirmRevoke(k: ApiKeyInfo) {
-    Alert.alert("Revoke this key?", `${k.label} (${k.prefix}…)`, [
+    Alert.alert("Revoke this key?", k.prefix ? `${k.label} (${k.prefix}…)` : k.label, [
       { text: "Cancel", style: "cancel" },
       {
         text: "Revoke",
@@ -111,17 +122,37 @@ export default function ApiKeysScreen() {
           </View>
         </View>
       ) : (
-        <TouchableOpacity
-          style={styles.generate}
-          onPress={generate}
-          disabled={busy}
-        >
-          {busy ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.btnTxt}>Generate new key</Text>
-          )}
-        </TouchableOpacity>
+        <>
+          <View style={styles.optRow}>
+            <Text style={styles.optLabel}>Include private recordings</Text>
+            <Switch value={includePrivate} onValueChange={setIncludePrivate} />
+          </View>
+          <View style={styles.optRow}>
+            <Text style={styles.optLabel}>Expires</Text>
+            <View style={styles.chips}>
+              {EXPIRIES.map((e) => (
+                <TouchableOpacity
+                  key={e.label}
+                  style={[styles.chip, expiresInDays === e.days && styles.chipOn]}
+                  onPress={() => setExpiresInDays(e.days)}
+                >
+                  <Text style={styles.chipTxt}>{e.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+          <TouchableOpacity
+            style={styles.generate}
+            onPress={generate}
+            disabled={busy}
+          >
+            {busy ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.btnTxt}>Generate new key</Text>
+            )}
+          </TouchableOpacity>
+        </>
       )}
 
       <Text style={styles.section}>Your keys</Text>
@@ -135,7 +166,13 @@ export default function ApiKeysScreen() {
             <View style={{ flex: 1 }}>
               <Text style={styles.keyLabel}>{k.label}</Text>
               <Text style={styles.keyMeta}>
-                {k.prefix}… · {k.scopes.length} scopes
+                {k.prefix ? `${k.prefix}… · ` : ""}{k.scopes.length} scopes ·{" "}
+                {k.hidePrivate ? "skips private" : "includes private"}
+              </Text>
+              <Text style={styles.keyMeta}>
+                {k.expiresAt
+                  ? `${Date.parse(k.expiresAt) > Date.now() ? "expires" : "expired"} ${new Date(k.expiresAt).toLocaleDateString()}`
+                  : "never expires"}
               </Text>
               <Text style={styles.keyMeta}>
                 last used: {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "never"}
@@ -150,10 +187,10 @@ export default function ApiKeysScreen() {
 
       <Text style={styles.section}>Endpoints</Text>
       <Text style={styles.code}>{`GET ${API_BASE}/recordings?since=<iso>
-GET ${API_BASE}/transcript?folder=&base=&format=md
-GET ${API_BASE}/utterances?folder=&base=
-GET ${API_BASE}/meta?folder=&base=
-GET ${API_BASE}/audio?folder=&base=
+GET ${API_BASE}/transcript?id=&format=md
+GET ${API_BASE}/utterances?id=
+GET ${API_BASE}/meta?id=
+GET ${API_BASE}/audio?id=
 
 Header: Authorization: Bearer <key>`}</Text>
       <View style={{ height: 50 }} />
@@ -173,6 +210,12 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   btnTxt: { color: "#fff", fontWeight: "700" },
+  optRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 14 },
+  optLabel: { color: "#cdd1d6", fontSize: 14 },
+  chips: { flexDirection: "row", gap: 6 },
+  chip: { backgroundColor: "#23262d", borderRadius: 8, paddingVertical: 6, paddingHorizontal: 10 },
+  chipOn: { backgroundColor: "#3b82f6" },
+  chipTxt: { color: "#fff", fontSize: 12 },
   newKeyCard: {
     backgroundColor: "#16331f",
     borderRadius: 12,
